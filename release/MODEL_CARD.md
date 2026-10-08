@@ -48,7 +48,7 @@ documents and chat, in many languages.
   `0.21` into `0. 21`). Optional `force_protected=True` guarantees no identifier is dropped.
 - **Better answers from compressed text.** At the same share of LLM tokens kept, QA accuracy from the
   compressed text is {{QA_GAIN_50}} higher than with LLMLingua-2-large at 50% kept, and {{QA_GAIN_33}} at 33%.
-  The gain comes from agent tool outputs and agent text; on multilingual web prose and on code
+  The gain comes from agent tool outputs, agent text and code; on multilingual web prose
   LLMLingua-2-large is still better (see per-source table).
 - **Small and fast.** ~{{MS_FP32}} ms per 500-token chunk on CPU (ONNX fp32), ~{{MS_INT8}} ms int8,
   vs ~600 ms for LLMLingua-2-large. ONNX files included; no PyTorch needed.
@@ -116,13 +116,20 @@ Reasoning on vs off for the reader made no difference on a 40-question check, so
   prompt score highest. This teaches ranking inside the large "keep" set, which is what a 33–50% rate needs.
 - **Model**: mmBERT-small (MIT) with a 2-class token head, 5 epochs, best epoch by ROC-AUC against
   teacher labels. Training takes {{TRAIN_MIN}} minutes on one Intel Arc Pro B70.
+- **What mattered** (same eval, DeepSeek reader, 50% / 33% kept): conservative labels only, 65.6 / 45.8;
+  aggressive labels only, 65.6 / 50.8; both together (graded), 68.8 / 53.4. Doubling the labels from ~1k
+  to ~2k added 4 points; mmBERT-base instead of small added ~1 point at 2.3x the latency.
 
 Code, data pipeline and evals: {{CODE_LINK}}.
 
 ## Limitations
 
-- **Source code** is the weakest domain: the teacher rarely deletes code, so use `force_protected=True`
-  or a milder rate for code-heavy context.
+- **Multilingual web prose** is the weakest domain: LLMLingua-2-large answers more questions there
+  (small sample: 18 questions). The teacher often rewrote non-English text instead of deleting from it,
+  so fewer of those labels survived filtering.
+- `force_protected=True` guarantees no identifier is dropped, but at 50% it spends budget on IDs the
+  question did not need and scores a few points lower overall. Use it when exact IDs matter more than
+  everything else (e.g. you will act on them).
 - Compression always loses information. At 50% kept, QA accuracy drops from ~92% (uncompressed) to
   {{OURS_50}}. Use it where the token savings are worth that.
 - Labels come from one teacher LLM, and the eval questions were written by that same model.
