@@ -19,6 +19,11 @@ c.compress(tool_output, rate=0.5)["text"]                         # keep ~50%
 c.compress(tool_output, rate=0.33, force_protected=True)["text"]  # never drop IDs/numbers/paths
 ```
 
+```bash
+ctxprune order.json --rate 0.5          # CLI, same thing
+
+```
+
 Works inside LLMLingua too, once its tokenizer-detection fix is merged:
 [microsoft/LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261) (`upstream/llmlingua-subword-style.patch`).
 
