@@ -37,6 +37,8 @@ datasets:
 
 # {{NAME}}: context compression for AI agents
 
+By [@imdariotoo](https://x.com/imdariotoo) · code: [riceharvest/ctxprune]({{CODE_LINK}})
+
 A 140M-parameter token classifier that shortens text before it reaches an LLM by **deleting** the
 words that matter least. It is a successor to Microsoft's
 [LLMLingua-2](https://huggingface.co/microsoft/llmlingua-2-xlm-roberta-large-meetingbank), trained for
