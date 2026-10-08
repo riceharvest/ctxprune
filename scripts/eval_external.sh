@@ -10,7 +10,10 @@ DATA=${DATA:-/mnt/ssd/ctxprune-data/v1}
 RUN=${RUN:-/mnt/ssd/ctxprune-data/runs/v1-n3000}
 NAMES=${NAMES:-"small small-half base"}
 [ -n "${WAIT_PID:-}" ] && while kill -0 "$WAIT_PID" 2>/dev/null; do sleep 30; done
-export OPENROUTER_API_KEY=$(grep -h '^OPENROUTER_API_KEY=' ~/.hermes/.env | tail -1 | cut -d= -f2- | tr -d "\"'")
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f ~/.hermes/.env ]; then  # local fallback
+  OPENROUTER_API_KEY=$(grep -h '^OPENROUTER_API_KEY=' ~/.hermes/.env | tail -1 | cut -d= -f2- | tr -d "\"'")
+fi
+export OPENROUTER_API_KEY=${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}
 API=(--base-url https://openrouter.ai/api/v1 --llm deepseek/deepseek-v4-flash --api-key-env OPENROUTER_API_KEY
      --concurrency 24 --device cpu)
 for name in $NAMES; do
