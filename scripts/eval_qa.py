@@ -192,7 +192,7 @@ def cmd_answer(args) -> None:
         # Measure ours in the reader's tokens so every method's `rate` means the same thing.
         return len(llm_tok(t, add_special_tokens=False)["input_ids"])
 
-    ours = Compressor(args.model, device=args.device)
+    ours = Compressor(args.model, device=args.device, backend=args.backend, onnx_file=args.onnx_file)
     methods = {"original": lambda t: t}
     for r in args.rates:
         methods[f"ours@{r}"] = lambda t, r=r: ours.compress(t, rate=r, measure=llm_count)["text"]
@@ -213,6 +213,8 @@ def cmd_answer(args) -> None:
         print(f"compressed {name} in {time.time() - t0:.1f}s", flush=True)
 
     tag = re.sub(r"[^\w.-]+", "_", str(args.model).rstrip("/").replace("/final", "").split("/")[-1])
+    if args.backend == "onnx":
+        tag += "-onnx-" + Path(args.onnx_file).stem
     outdir = args.data / "qa"
     (outdir / f"contexts_{tag}.json").write_text(json.dumps(contexts, ensure_ascii=False))
 
@@ -294,6 +296,8 @@ def main() -> None:
             p.add_argument("--rates", type=float, nargs="+", default=[0.5, 0.33])
             p.add_argument("--device", default=None)
             p.add_argument("--no-baseline", action="store_true")
+            p.add_argument("--backend", default="torch", choices=["torch", "onnx"])
+            p.add_argument("--onnx-file", default="onnx/model.onnx", help="e.g. onnx/model_quantized.onnx")
             p.add_argument("--max-answer-tokens", type=int, default=64,
                            help="raise (e.g. 4096) for reasoning readers: reasoning counts toward the limit")
             p.add_argument("--llm-tokenizer", default="/mnt/ssd/models/qwen38-27b-gptq")
