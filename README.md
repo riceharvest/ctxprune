@@ -19,8 +19,14 @@ c.compress(tool_output, rate=0.5)["text"]                         # keep ~50%
 c.compress(tool_output, rate=0.33, force_protected=True)["text"]  # never drop IDs/numbers/paths
 ```
 
-Works inside LLMLingua too, once its tokenizer-detection fix is merged
-(`upstream/llmlingua-subword-style.patch`).
+Works inside LLMLingua too, once its tokenizer-detection fix is merged:
+[microsoft/LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261) (`upstream/llmlingua-subword-style.patch`).
+
+At 50% of tokens kept, an independent LLM answers 68.8% of held-out questions correctly from ctxprune's
+output vs 53.4% from LLMLingua-2-large's (91.8% uncompressed); at 33%, 53.4% vs 32.5%. Details, per-source
+results and limitations: [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
+
+By [@imdariotoo](https://x.com/imdariotoo).
 
 ---
 

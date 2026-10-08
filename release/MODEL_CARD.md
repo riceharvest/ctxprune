@@ -81,7 +81,8 @@ pc.compress_prompt(text, rate=0.5, force_tokens=["\n", "?"])
 
 **Raw transformers / ONNX:** label 1 = keep (same convention as LLMLingua-2). Score each token with
 `softmax(logits)[..., 1]`, average per word, and keep the highest-scoring words. `onnx/model.onnx` is
-exact fp32. `onnx/model_quantized.onnx` is int8 (143 MB): its keep decisions match fp32 on ~96% of tokens.
+exact fp32. `onnx/model_quantized.onnx` is int8 (143 MB): its keep decisions match fp32 on ~96% of tokens, and QA
+accuracy at 50% kept is 68.2 vs 68.8 for fp32 (same eval as below).
 
 ## Results
 
