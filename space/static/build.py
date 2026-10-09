@@ -26,6 +26,11 @@ for name, text in EXAMPLES.items():
             "ours_protect": ours.compress(text, rate=rate, force_protected=True)["text"],
             "theirs": theirs.compress_prompt(text, rate=rate, force_tokens=["\n", "?"])["compressed_prompt"],
         }
+        # LLMLingua-2 again at the size of ctxprune's ID-safe output, so that toggle compares like for like
+        target = len(outs["ours_protect"]) / max(1, len(text))
+        tries = [theirs.compress_prompt(text, rate=r / 100, force_tokens=["\n", "?"])["compressed_prompt"]
+                 for r in range(20, 100, 2)]
+        outs["theirs_matched"] = min(tries, key=lambda o: abs(len(o) / max(1, len(text)) - target))
         for key, out in outs.items():
             s = survival(text, out)
             want = {a.text for a in atoms if is_protected(a.text)}

@@ -69,7 +69,7 @@ details pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; word-break
   <div class="controls">
     <div class="tabs" id="tabs"></div>
     <div class="tabs" id="rates"></div>
-    <label><input type="checkbox" id="protect"> ctxprune: never drop IDs, numbers or paths</label>
+    <label><input type="checkbox" id="protect"> ctxprune: never drop IDs, numbers or paths (LLMLingua-2 is then run at the same output size)</label>
   </div>
 
   <div class="cols">
@@ -107,7 +107,8 @@ function draw() {
   const d = DATA[ex];
   const key = $("protect").checked ? "ours_protect" : "ours";
   render($("ours"), "ctxprune-small", d.runs[`${key}@${rate}`], d.atoms);
-  render($("theirs"), "LLMLingua-2", d.runs[`theirs@${rate}`], d.atoms);
+  const matched = $("protect").checked;
+  render($("theirs"), matched ? "LLMLingua-2 (same size)" : "LLMLingua-2", d.runs[`${matched ? "theirs_matched" : "theirs"}@${rate}`], d.atoms);
   [...$("tabs").children].forEach((b, i) => b.setAttribute("aria-pressed", i === ex));
   [...$("rates").children].forEach((b) => b.setAttribute("aria-pressed", b.dataset.rate === rate));
 }
