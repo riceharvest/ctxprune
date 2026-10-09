@@ -1,0 +1,4 @@
+ctxprune @ git+https://github.com/riceharvest/ctxprune
+llmlingua
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

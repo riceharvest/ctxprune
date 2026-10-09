@@ -24,6 +24,10 @@ class Compressor:
                  backend: str = "torch", onnx_file: str = "onnx/model.onnx"):
         """backend="torch" (any device) or "onnx" (CPU, no torch needed; onnx_file may be
         "onnx/model_quantized.onnx" for the int8 build)."""
+        if backend == "onnx":
+            import os
+
+            os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")  # silence "PyTorch was not found"
         from transformers import AutoTokenizer
 
         self.tok = AutoTokenizer.from_pretrained(model)

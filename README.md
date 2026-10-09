@@ -5,10 +5,11 @@ tool outputs, code, documents and chat before they reach an LLM. It is a success
 LLMLingua-2, built for agent text, and it never splits or re-spaces identifiers.
 
 Model: [darioooooo0o/ctxprune-small](https://huggingface.co/darioooooo0o/ctxprune-small) (Apache-2.0).
-Results and limitations are on the model card.
+Results and limitations are on the model card. **Try it next to LLMLingua-2 on your own text:
+[live demo](https://huggingface.co/spaces/darioooooo0o/ctxprune).**
 
 ```bash
-pip install "ctxprune[onnx] @ git+https://github.com/riceharvest/ctxprune"
+pip install "ctxprune @ git+https://github.com/riceharvest/ctxprune"   # CPU, ONNX; no torch needed
 ```
 
 ```python
@@ -22,6 +23,17 @@ c.compress(tool_output, rate=0.33, force_protected=True)["text"]  # never drop I
 ```bash
 ctxprune order.json --rate 0.5          # CLI, same thing
 
+```
+
+LangChain and LlamaIndex:
+
+```python
+from ctxprune.integrations import CtxpruneDocumentCompressor    # LangChain
+retriever = ContextualCompressionRetriever(base_compressor=CtxpruneDocumentCompressor(rate=0.5),
+                                           base_retriever=base_retriever)
+
+from ctxprune.integrations import CtxpruneNodePostprocessor     # LlamaIndex
+engine = index.as_query_engine(node_postprocessors=[CtxpruneNodePostprocessor(rate=0.5)])
 ```
 
 Works inside LLMLingua too, once its tokenizer-detection fix is merged:
