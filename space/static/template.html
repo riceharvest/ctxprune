@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ctxprune vs LLMLingua-2</title>
+<meta name="description" content="Context compression for AI agents. Real outputs from ctxprune-small and LLMLingua-2 on logs, JSON and tracebacks.">
+<style>
+:root {
+  --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b6760; --line: #e4e0d8; --panel: #ffffff;
+  --gone: #b3ada3; --lost-bg: #fde2dc; --lost-fg: #a3271a; --ok: #1f6f43; --bad: #a3271a; --accent: #1c1b19;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151412; --fg: #ece8e1; --muted: #9a958c; --line: #2c2a26; --panel: #1c1b18;
+    --gone: #5a564f; --lost-bg: #4a1f19; --lost-fg: #ffb4a6; --ok: #7fd3a1; --bad: #ff9c8a; --accent: #ece8e1;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); margin: 0 0 18px; max-width: 760px; }
+.links { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 22px; font-size: 14px; }
+.links a { color: var(--fg); }
+code, pre, .text { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.install { background: var(--panel); border: 1px solid var(--line); padding: 2px 8px; border-radius: 4px; font-size: 13px; }
+.score { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 0 0 26px; }
+.score div { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 12px 14px; }
+.score b { display: block; font-size: 22px; }
+.score span { color: var(--muted); font-size: 13px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-bottom: 14px; font-size: 14px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+button { font: inherit; font-size: 13px; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+button[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+.col { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; min-width: 0; }
+.col header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 14px; }
+.col header b { font-size: 15px; }
+.stat-ok { color: var(--ok); } .stat-bad { color: var(--bad); }
+.text { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.6; padding: 12px 14px; margin: 0; }
+.gone { color: var(--gone); text-decoration: line-through; text-decoration-thickness: 1px; }
+.lost { background: var(--lost-bg); color: var(--lost-fg); border-radius: 2px; }
+details { border-top: 1px solid var(--line); font-size: 13px; }
+details summary { padding: 8px 14px; cursor: pointer; color: var(--muted); }
+details pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.legend { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.foot { margin-top: 28px; color: var(--muted); font-size: 13px; max-width: 820px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>ctxprune: context compression for AI agents</h1>
+  <p class="lede">A small token classifier deletes the least useful words from tool outputs, logs, code and documents before an LLM reads them. It is a successor to Microsoft's LLMLingua-2, trained on agent text, and it never splits or re-spaces identifiers.</p>
+  <div class="links">
+    <span class="install">pip install "ctxprune @ git+https://github.com/riceharvest/ctxprune"</span>
+    <a href="https://github.com/riceharvest/ctxprune">GitHub</a>
+    <a href="https://huggingface.co/darioooooo0o/ctxprune-small">Model card</a>
+    <a href="https://x.com/imdariotoo">@imdariotoo</a>
+  </div>
+  <div class="score">
+    <div><b>68.8% vs 53.4%</b><span>questions an LLM still answers at 50% kept, ctxprune vs LLMLingua-2-large (91.8% uncompressed)</span></div>
+    <div><b>53.4% vs 32.5%</b><span>same at 33% kept</span></div>
+    <div><b>~6× faster</b><span>on CPU than LLMLingua-2-large; int8 ONNX, no torch needed</span></div>
+  </div>
+
+  <div class="controls">
+    <div class="tabs" id="tabs"></div>
+    <div class="tabs" id="rates"></div>
+    <label><input type="checkbox" id="protect"> ctxprune: never drop IDs, numbers or paths</label>
+  </div>
+
+  <div class="cols">
+    <section class="col" id="ours"></section>
+    <section class="col" id="theirs"></section>
+  </div>
+  <p class="legend"><span class="gone">struck</span> = deleted · <span class="lost">red</span> = identifier deleted or mangled (what the LLM no longer sees intact)</p>
+
+  <p class="foot">Real outputs of <code>darioooooo0o/ctxprune-small</code> (int8 ONNX) and <code>microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank</code>, computed offline with each library's own <code>rate</code>. LLMLingua-2 measures rate in its own tokens and often keeps more than asked. QA numbers: 378 held-out questions answered by an independent LLM, details on the model card.</p>
+</main>
+<script>
+const DATA = __DATA__;
+let ex = 0, rate = "0.5";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+function render(el, title, run, atoms) {
+  const lost = new Set(run.lost);
+  let html = "";
+  atoms.forEach(([ws, text, prot], i) => {
+    const kept = run.keep[i];
+    const cls = prot && lost.has(text) ? "lost" + (kept ? "" : " gone") : kept ? "" : "gone";
+    html += esc(ws) + (cls ? `<span class="${cls}">${esc(text)}</span>` : esc(text));
+  });
+  const [ok, all] = run.ids;
+  const idCls = ok === all ? "stat-ok" : "stat-bad";
+  const json = run.json === null ? "" : ` · JSON <span class="${run.json ? "stat-ok" : "stat-bad"}">${run.json ? "valid" : "broken"}</span>`;
+  el.innerHTML = `<header><b>${title}</b><span>${Math.round(run.ratio * 100)}% kept · IDs intact <span class="${idCls}">${ok}/${all}</span>${json}</span></header>
+    <pre class="text">${html}</pre>
+    <details><summary>What the LLM receives</summary><pre>${esc(run.out)}</pre></details>`;
+}
+
+function draw() {
+  const d = DATA[ex];
+  const key = $("protect").checked ? "ours_protect" : "ours";
+  render($("ours"), "ctxprune-small", d.runs[`${key}@${rate}`], d.atoms);
+  render($("theirs"), "LLMLingua-2", d.runs[`theirs@${rate}`], d.atoms);
+  [...$("tabs").children].forEach((b, i) => b.setAttribute("aria-pressed", i === ex));
+  [...$("rates").children].forEach((b) => b.setAttribute("aria-pressed", b.dataset.rate === rate));
+}
+
+DATA.forEach((d, i) => {
+  const b = document.createElement("button");
+  b.textContent = d.name; b.onclick = () => { ex = i; draw(); };
+  $("tabs").appendChild(b);
+});
+[["0.5", "keep 50%"], ["0.33", "keep 33%"]].forEach(([r, label]) => {
+  const b = document.createElement("button");
+  b.textContent = label; b.dataset.rate = r; b.onclick = () => { rate = r; draw(); };
+  $("rates").appendChild(b);
+});
+$("protect").onchange = draw;
+draw();
+</script>
+</body>
+</html>

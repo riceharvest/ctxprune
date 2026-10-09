@@ -1,4 +1,4 @@
-"""ctxprune vs LLMLingua-2, side by side on your own text."""
+"""ctxprune vs LLMLingua-2 side by side (local Gradio demo; the hosted page is the static build in static/)."""
 
 import json
 
