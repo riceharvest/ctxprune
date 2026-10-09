@@ -207,7 +207,13 @@ def cmd_answer(args) -> None:
                 methods[f"{bname}@{r}"] = lambda t, r=r, pc=pc: pc.compress_prompt(
                     t, rate=r, force_tokens=["\n", "?"])["compressed_prompt"]
     contexts: dict[str, dict[str, str]] = {}
+    for path in args.extra_contexts or []:  # methods compressed elsewhere, e.g. scripts/baseline_kompress.py
+        for name, by_chunk in json.loads(Path(path).read_text()).items():
+            contexts[name] = by_chunk
+            methods[name] = None
     for name, fn in methods.items():
+        if fn is None:
+            continue
         t0 = time.time()
         contexts[name] = {cid: fn(t) for cid, t in texts.items()}
         print(f"compressed {name} in {time.time() - t0:.1f}s", flush=True)
@@ -296,6 +302,8 @@ def main() -> None:
             p.add_argument("--rates", type=float, nargs="+", default=[0.5, 0.33])
             p.add_argument("--device", default=None)
             p.add_argument("--no-baseline", action="store_true")
+            p.add_argument("--extra-contexts", nargs="*", default=None,
+                           help="JSON files of {method: {chunk_id: compressed text}} to score alongside")
             p.add_argument("--backend", default="torch", choices=["torch", "onnx"])
             p.add_argument("--onnx-file", default="onnx/model.onnx", help="e.g. onnx/model_quantized.onnx")
             p.add_argument("--max-answer-tokens", type=int, default=64,
