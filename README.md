@@ -9,7 +9,7 @@ Results and limitations are on the model card. **Try it next to LLMLingua-2 on y
 [live demo](https://huggingface.co/spaces/darioooooo0o/ctxprune).**
 
 ```bash
-pip install "ctxprune @ git+https://github.com/riceharvest/ctxprune"   # CPU, ONNX; no torch needed
+pip install ctxprune   # CPU, ONNX; no torch needed
 ```
 
 ```python
