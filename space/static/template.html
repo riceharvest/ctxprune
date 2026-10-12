@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ctxprune vs LLMLingua-2</title>
-<meta name="description" content="Context compression for AI agents. Real outputs from ctxprune-small and LLMLingua-2 on logs, JSON and tracebacks.">
+<title>ctxprune demo</title>
+<meta name="description" content="Context compression for AI agents. Paste text and see what ctxprune keeps, in your browser; real side-by-side outputs vs LLMLingua-2.">
 <style>
 :root {
   --bg: #fbfaf8; --fg: #1c1b19; --muted: #6b6760; --line: #e4e0d8; --panel: #ffffff;
@@ -47,6 +47,20 @@ details { border-top: 1px solid var(--line); font-size: 13px; }
 details summary { padding: 8px 14px; cursor: pointer; color: var(--muted); }
 details pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 .legend { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
+.try { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 14px; margin: 0 0 30px; }
+.try h2, h2.sec { font-size: 17px; margin: 0 0 4px; }
+.try p.sub { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.try textarea { width: 100%; min-height: 170px; resize: vertical; font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 10px; }
+.try .row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 10px 0; font-size: 14px; }
+.try input[type=range] { width: 160px; }
+#go { background: var(--accent); color: var(--bg); border-color: var(--accent); padding: 6px 14px; }
+#go:disabled { opacity: .6; cursor: progress; }
+#status { color: var(--muted); font-size: 13px; }
+#tryout { border: 1px solid var(--line); border-radius: 4px; display: none; }
+#tryout header { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 14px; }
+.bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; width: 200px; display: none; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+h2.sec { margin-top: 6px; }
 .foot { margin-top: 28px; color: var(--muted); font-size: 13px; max-width: 820px; }
 </style>
 </head>
@@ -61,11 +75,31 @@ details pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; word-break
     <a href="https://x.com/imdariotoo">@imdariotoo</a>
   </div>
   <div class="score">
-    <div><b>68.8% vs 53.4%</b><span>questions an LLM still answers at 50% kept, ctxprune vs LLMLingua-2-large (91.8% uncompressed)</span></div>
-    <div><b>53.4% vs 32.5%</b><span>same at 33% kept</span></div>
+    <div><b>51.5 vs 36.5</b><span>exact-match QA at 50% of tokens kept, ctxprune vs headroom's Kompress-v2 (SQuAD v2 + HotpotQA, 400 questions, CI +10.5..+19.5)</span></div>
+    <div><b>68.8% vs 53.4%</b><span>questions an LLM still answers at 50% kept, ctxprune vs LLMLingua-2-large (our 378-question agent set; 91.8% uncompressed)</span></div>
     <div><b>~6× faster</b><span>on CPU than LLMLingua-2-large; int8 ONNX, no torch needed</span></div>
   </div>
 
+  <section class="try" id="try">
+    <h2>Try it on your own text</h2>
+    <p class="sub">Runs entirely in your browser with the int8 ONNX model. The first run downloads about 180 MB from Hugging Face (cached after that); nothing you paste is sent anywhere.</p>
+    <textarea id="input" spellcheck="false"></textarea>
+    <div class="row">
+      <label>keep <input type="range" id="keep" min="0.15" max="0.9" step="0.05" value="0.5"> <b id="keepv">50%</b></label>
+      <label><input type="checkbox" id="tprotect"> never drop IDs, numbers or paths</label>
+      <button id="go">Compress</button>
+      <div class="bar" id="bar"><i></i></div>
+      <span id="status"></span>
+    </div>
+    <div id="tryout">
+      <header><b>ctxprune-small, in your browser</b><span id="trystats"></span></header>
+      <pre class="text" id="trytext"></pre>
+      <details><summary>What the LLM receives</summary><pre id="tryplain"></pre></details>
+    </div>
+  </section>
+
+  <h2 class="sec">Side by side with LLMLingua-2</h2>
+  <p class="lede">Precomputed outputs of both models on the same inputs.</p>
   <div class="controls">
     <div class="tabs" id="tabs"></div>
     <div class="tabs" id="rates"></div>
@@ -78,10 +112,10 @@ details pre { margin: 0; padding: 0 14px 12px; white-space: pre-wrap; word-break
   </div>
   <p class="legend"><span class="gone">struck</span> = deleted · <span class="lost">red</span> = identifier deleted or mangled (what the LLM no longer sees intact)</p>
 
-  <p class="foot">Real outputs of <code>darioooooo0o/ctxprune-small</code> (int8 ONNX) and <code>microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank</code>, computed offline with each library's own <code>rate</code>. LLMLingua-2 measures rate in its own tokens and often keeps more than asked. QA numbers: 378 held-out questions answered by an independent LLM, details on the model card.</p>
+  <p class="foot">Real outputs of <code>darioooooo0o/ctxprune-small</code> (int8 ONNX) and <code>microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank</code>, computed offline with each library's own <code>rate</code>. LLMLingua-2 measures rate in its own tokens and often keeps more than asked. QA numbers: 378 held-out questions answered by an independent LLM, details on the model card. The in-browser demo runs the same int8 model in WebAssembly; its scores are as close to the exact fp32 model as the Python int8 build's are, but a few borderline words can differ from <code>pip install ctxprune</code> output.</p>
 </main>
 <script>
-const DATA = __DATA__;
+window.DATA = __DATA__; const DATA = window.DATA;
 const params = new URLSearchParams(location.search);
 let ex = Math.min(+(params.get("ex") ?? 1) || 0, DATA.length - 1), rate = params.get("rate") === "0.33" ? "0.33" : "0.5";
 const $ = (id) => document.getElementById(id);
@@ -126,6 +160,74 @@ DATA.forEach((d, i) => {
 $("protect").checked = params.get("protect") === "1";
 $("protect").onchange = draw;
 draw();
+</script>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+$("input").value = DATA[1] ? DATA[1].atoms.map(([ws, t]) => ws + t).join("") : "";
+const keepEl = $("keep");
+const showKeep = () => { $("keepv").textContent = Math.round(keepEl.value * 100) + "%"; };
+keepEl.oninput = showKeep; showKeep();
+let comp = null, cache = null;
+
+async function load() {
+  const T = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0/dist/transformers.min.js");
+  const { Compressor } = await import("./js/ctxprune.js");
+  const files = {};
+  const progress = (p) => {
+    if (p.status === "progress" && p.total) {
+      files[p.file] = [p.loaded, p.total];
+      const [l, t] = Object.values(files).reduce((a, [x, y]) => [a[0] + x, a[1] + y], [0, 0]);
+      $("bar").firstElementChild.style.width = (100 * l / t).toFixed(1) + "%";
+      $("status").textContent = `downloading model ${(l / 1e6).toFixed(0)} / ${(t / 1e6).toFixed(0)} MB`;
+    }
+  };
+  $("bar").style.display = "block";
+  const repo = "darioooooo0o/ctxprune-small";
+  const tok = await T.AutoTokenizer.from_pretrained(repo, { progress_callback: progress });
+  const model = await T.AutoModelForTokenClassification.from_pretrained(repo, { dtype: "q8", device: "wasm", progress_callback: progress });
+  $("bar").style.display = "none";
+  return new Compressor(tok, model, T.Tensor);
+}
+
+function show(atoms, keep) {
+  let html = "";
+  atoms.forEach((a, i) => { html += esc(a.ws) + (keep[i] ? esc(a.text) : `<span class="gone">${esc(a.text)}</span>`); });
+  $("trytext").innerHTML = html;
+}
+
+async function run() {
+  const text = $("input").value;
+  if (!text.trim()) return;
+  $("go").disabled = true;
+  try {
+    if (!comp) { $("status").textContent = "loading model..."; comp = await load(); }
+    if (!cache || cache.text !== text) {
+      $("status").textContent = "scoring...";
+      const t0 = performance.now();
+      const { atoms, scores } = await comp.atomScores(text, (f) => { $("status").textContent = `scoring ${Math.round(f * 100)}%`; });
+      cache = { text, atoms, scores, ms: performance.now() - t0 };
+    }
+    const rate = +keepEl.value, protect = $("tprotect").checked;
+    const out = comp.select(cache.atoms, cache.scores, rate, protect);
+    show(cache.atoms, out.keep);
+    $("tryplain").textContent = out.text;
+    const { isProtected } = await import("./js/ctxprune.js");
+    const ids = cache.atoms.map((a, i) => [isProtected(a.text), out.keep[i]]).filter(([p]) => p);
+    const kept = ids.filter(([, k]) => k).length;
+    $("trystats").textContent = `${text.length.toLocaleString()} → ${out.text.length.toLocaleString()} chars (${Math.round(100 * out.text.length / text.length)}%) · IDs/numbers kept ${kept}/${ids.length} · scored in ${Math.round(cache.ms)} ms`;
+    $("tryout").style.display = "block";
+    $("status").textContent = "";
+  } catch (e) {
+    $("status").textContent = "failed: " + e.message;
+    console.error(e);
+  } finally {
+    $("go").disabled = false;
+  }
+}
+$("go").onclick = run;
+keepEl.onchange = () => { if (cache) run(); };
+$("tprotect").onchange = () => { if (cache) run(); };
 </script>
 </body>
 </html>

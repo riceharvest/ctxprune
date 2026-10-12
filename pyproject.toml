@@ -1,11 +1,11 @@
 [project]
 name = "ctxprune"
-version = "0.1.0"
+version = "0.2.0"
 description = "Context compression for AI agents: an LLMLingua-2 successor that keeps identifiers intact"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-keywords = ["llm", "prompt-compression", "context-compression", "agents", "llmlingua", "rag", "token-classification"]
+keywords = ["claude-code", "llm", "prompt-compression", "context-compression", "agents", "llmlingua", "rag", "token-classification"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -15,8 +15,8 @@ classifiers = [
     "Topic :: Text Processing",
 ]
 dependencies = [
-    # inference on CPU out of the box: tokenizer + int8/fp32 ONNX model; torch is optional
-    "transformers>=4.45",
+    # inference on CPU out of the box: tokenizer + int8/fp32 ONNX model; torch/transformers are optional
+    "tokenizers>=0.20",
     "huggingface_hub>=0.25",
     "onnxruntime>=1.18",
     "numpy",
@@ -31,14 +31,14 @@ Model = "https://huggingface.co/darioooooo0o/ctxprune-small"
 Demo = "https://huggingface.co/spaces/darioooooo0o/ctxprune"
 
 [project.optional-dependencies]
-torch = ["torch"]
+torch = ["torch", "transformers>=4.45"]
 onnx = []  # kept so older `ctxprune[onnx]` installs still resolve; ONNX is now a core dependency
 langchain = ["langchain-core>=0.3"]
 llamaindex = ["llama-index-core>=0.12"]
-data = ["httpx", "pyarrow", "tokenizers"]  # corpus building, teacher labeling, QA eval
-export = ["torch", "onnx", "onnxruntime>=1.18"]
+data = ["httpx", "pyarrow", "transformers>=4.45"]  # corpus building, teacher labeling, QA eval
+export = ["torch", "transformers>=4.45", "onnx", "onnxruntime>=1.18"]
 baseline = ["llmlingua", "torch"]
-dev = ["pytest", "httpx", "pyarrow"]
+dev = ["pytest", "httpx", "pyarrow", "transformers>=4.45"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"

@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install build pytest langchain-core llama-index-core
+      - run: pip install build pytest langchain-core llama-index-core transformers
       - run: pip install -e . && pytest -q
       - run: python -m build
       - uses: actions/upload-artifact@v4

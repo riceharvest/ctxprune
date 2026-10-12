@@ -15,20 +15,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from .cli import DEFAULT_MODEL
+from .compress import DEFAULT_MODEL
 
 
 @lru_cache(maxsize=4)
 def _compressor(model: str, backend: str | None):
     from .compress import Compressor
 
-    if backend is None:
-        try:
-            import onnxruntime  # noqa: F401
-            backend = "onnx"
-        except ImportError:
-            backend = "torch"
-    return Compressor(model, backend=backend)
+    return Compressor(model, backend=backend or "auto")
 
 
 def _langchain():
