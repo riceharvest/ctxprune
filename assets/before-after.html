@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><style>
+body { margin:0; background:#fbfaf8; font:15px/1.5 ui-sans-serif,system-ui,sans-serif; color:#1c1b19 }
+.wrap { width:1040px; padding:28px 32px }
+h1 { font-size:22px; margin:0 0 4px } p { margin:0 0 14px; color:#6b6760 }
+pre { background:#fff; border:1px solid #e4e0d8; border-radius:6px; padding:14px 16px; margin:0;
+  font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap }
+s { color:#bcb6ac; text-decoration-thickness:1px }
+.k { display:flex; gap:28px; margin-top:12px; font-size:14px } .k b { font-size:18px; display:block }
+</style><div class="wrap">
+<h1>ctxprune on a failing test run</h1>
+<p>What an agent reads after compression: struck-through words are deleted, the rest is passed on unchanged.</p>
+<pre>$ pytest tests/test_orders.py -x -q
+<s>F</s>
+<s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s> <s>FAILURES</s> <s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s>
+<s>____________________</s> test_refund_is_idempotent[ord_8f3a2c91] <s>____________________</s>
+
+    def test_refund_is_idempotent(client, order_id):
+        r1 = client.post(f&quot;/v2/orders/{order_id}/refund&quot;, json={&quot;amount&quot;: 14950})
+        r2 = client.post(f&quot;/v2/orders/{order_id}/refund&quot;, json={&quot;amount&quot;: 14950})
+&gt;       assert r2.status_code == 409, r2.json()
+E       AssertionError: {&#x27;error&#x27;: &#x27;refund_already_pending&#x27;, &#x27;refund_id&#x27;: &#x27;re_3PqK9x2LmN&#x27;, &#x27;retry_after&#x27;: 3600}
+E       assert 202 == 409
+<s>E</s>        <s>+</s>  <s>where</s> <s>202</s> <s>=</s> <s>&lt;</s><s>Response</s> <s>[</s><s>202</s><s>]</s><s>&gt;</s><s>.status_code</s>
+
+tests/test_orders.py:88: AssertionError
+<s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s> <s>Captured</s> <s>log</s> <s>call</s> <s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s><s>-</s>
+<s>WARNING</s>  payments.client:client.py:212 stripe request <s>req_Hk2v9QzR</s> <s>took</s> <s>2210ms</s> <s>(</s><s>timeout</s> <s>budget</s> <s>2000ms</s><s>)</s>
+<s>INFO</s>     payments.refunds:refunds.py:57 created refund re_3PqK9x2LmN for ord_8f3a2c91 <s>(</s><s>amount=14950</s>, <s>currency=eur</s><s>)</s>
+<s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s> <s>short</s> <s>test</s> <s>summary</s> <s>info</s> <s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s><s>=</s>
+<s>FAILED</s> <s>tests/test_orders.py::test_refund_is_idempotent</s><s>[</s><s>ord_8f3a2c91</s><s>]</s> <s>-</s> <s>AssertionError</s><s>:</s> <s>{</s><s>&#x27;</s><s>error</s><s>&#x27;</s><s>:</s> <s>&#x27;</s><s>refund_alrea</s><s>.</s><s>.</s><s>.</s>
+<s>1</s> <s>failed</s> <s>in</s> <s>3.42s</s></pre>
+<div class="k"><div><b>1,209 → 637 chars</b>53% kept</div>
+<div><b>0 split or re-spaced</b>36/54 IDs and numbers kept whole (protect=True keeps all)</div>
+<div><b>CPU, ~0.1 s</b>int8 ONNX, no GPU or API</div></div></div>

@@ -1,0 +1,12 @@
+{
+  "name": "ctxprune",
+  "description": "Context compression for Claude Code: shrinks big Bash and MCP tool outputs before Claude reads them",
+  "owner": {"name": "riceharvest", "url": "https://github.com/riceharvest"},
+  "plugins": [
+    {
+      "name": "ctxprune",
+      "source": "./claude-code-plugin",
+      "description": "Compresses Bash and MCP tool outputs over 6,000 characters to about half, keeping IDs, numbers and paths exact. Runs locally on CPU."
+    }
+  ]
+}

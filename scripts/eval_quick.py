@@ -95,7 +95,7 @@ def main() -> None:
     rows = load_test(args.data, args.labels, args.split, args.per_source,
                      dict(kv.split("=") for kv in args.extra_splits))
     print(f"{len(rows)} {args.split} rows", flush=True)
-    ours = Compressor(args.model, device=args.device)
+    ours = Compressor(args.model, device=args.device, backend="torch")
     methods = {}
     for r in args.rates:
         methods[f"ours@{r}"] = lambda t, r=r: ours.compress(t, rate=r, measure=llm_count)["text"]

@@ -1,31 +1,61 @@
 # ctxprune
 
-Context compression for AI agents. A small token classifier deletes the least useful words from
-tool outputs, code, documents and chat before they reach an LLM. It is a successor to Microsoft's
-LLMLingua-2, built for agent text, and it never splits or re-spaces identifiers.
+**Cut big tool outputs, logs and documents in half before your LLM reads them, without mangling IDs.**
+A 140M-parameter model deletes the least useful words; everything it keeps is passed on byte for byte.
+Runs on CPU in about 0.1 s per 500 tokens. Apache-2.0.
 
-Model: [darioooooo0o/ctxprune-small](https://huggingface.co/darioooooo0o/ctxprune-small) (Apache-2.0).
-Results and limitations are on the model card. **Try it next to LLMLingua-2 on your own text:
-[live demo](https://huggingface.co/spaces/darioooooo0o/ctxprune).**
+![ctxprune on a failing pytest run: struck-through words are deleted, IDs and code stay intact](https://raw.githubusercontent.com/riceharvest/ctxprune/main/assets/before-after.png)
+
+At 50% of tokens kept, a reader LLM answers **51.5%** of SQuAD v2 + HotpotQA questions exactly from ctxprune's
+output vs **36.5%** from [headroom](https://github.com/headroomlabs-ai/headroom)'s Kompress-v2 (400 questions,
+95% CI of the gap +10.5 to +19.5), and **68.8% vs 53.4%** for LLMLingua-2-large on our agent-text set.
+**[Try it in your browser](https://huggingface.co/spaces/darioooooo0o/ctxprune)** (nothing is uploaded).
+
+## Quick start
 
 ```bash
-pip install ctxprune   # CPU, ONNX; no torch needed
+pip install ctxprune
+ctxprune build.log --keep 0.5          # or: some_command | ctxprune --keep 0.33 --protect
 ```
 
 ```python
-from ctxprune import Compressor
-
-c = Compressor("darioooooo0o/ctxprune-small", backend="onnx")
-c.compress(tool_output, rate=0.5)["text"]                         # keep ~50%
-c.compress(tool_output, rate=0.33, force_protected=True)["text"]  # never drop IDs/numbers/paths
+import ctxprune
+short = ctxprune.prune(tool_output, keep=0.5)    # protect=True never drops IDs, numbers or paths
 ```
+
+## Which one do I use?
+
+| You want to... | Use | |
+|---|---|---|
+| Shrink big Bash/MCP outputs inside **Claude Code** | `ctxprune install claude-code` | or the plugin: `/plugin install ctxprune --marketplace riceharvest/ctxprune` |
+| Compress a file or a pipe from the shell | `ctxprune FILE --keep 0.5` | `--protect`, `--stats`, reads stdin |
+| Call it from Python | `ctxprune.prune(text, keep=0.5)` | `Compressor` for batching and options |
+| Call it from another language / avoid the model load | `ctxprune serve` | `POST localhost:8787/compress {"text": ...}` |
+| Compress retrieved documents in **LangChain** | `CtxpruneDocumentCompressor` | see below |
+| Compress retrieved nodes in **LlamaIndex** | `CtxpruneNodePostprocessor` | see below |
+| Use it inside **LLMLingua** | `PromptCompressor(model_name="darioooooo0o/ctxprune-small", use_llmlingua2=True)` | needs [LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261) |
+| Run the raw model (ONNX / transformers / transformers.js) | [model card](https://huggingface.co/darioooooo0o/ctxprune-small) | label 1 = keep |
+
+Agents setting this up for a user: see [AGENTS.md](https://github.com/riceharvest/ctxprune/blob/main/AGENTS.md).
+
+## Claude Code
 
 ```bash
-ctxprune order.json --rate 0.5          # CLI, same thing
-
+pip install ctxprune && ctxprune install claude-code     # undo: ctxprune uninstall claude-code
 ```
 
-LangChain and LlamaIndex:
+This adds a `PostToolUse` hook. Bash and MCP outputs over 6,000 characters are compressed to about half before
+Claude reads them, with identifiers, numbers and paths always kept. Claude gets a one-line note saying so, and the
+full output is saved under `~/.cache/ctxprune/outputs/` so it can grep the original if a detail is missing.
+Commands that print files Claude may edit (`cat`, `head`, `sed -n`, `git diff/show`) and the Read/Grep tools are
+never touched, and a command containing `CTXPRUNE_OFF=1` is passed through. If anything fails, Claude gets the
+original output. Settings: `CTXPRUNE_RATE` (0.5), `CTXPRUNE_MIN_CHARS` (6000). Each compressed call loads the model
+(~2 s); run `ctxprune serve` in the background and the hook uses it instead.
+
+As a plugin, without touching settings files (needs `ctxprune` on PATH, or `uv` so it can run via `uvx`):
+`/plugin install ctxprune --marketplace riceharvest/ctxprune`.
+
+## LangChain and LlamaIndex
 
 ```python
 from ctxprune.integrations import CtxpruneDocumentCompressor    # LangChain
@@ -36,12 +66,14 @@ from ctxprune.integrations import CtxpruneNodePostprocessor     # LlamaIndex
 engine = index.as_query_engine(node_postprocessors=[CtxpruneNodePostprocessor(rate=0.5)])
 ```
 
-Works inside LLMLingua too, once its tokenizer-detection fix is merged:
-[microsoft/LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261) (`upstream/llmlingua-subword-style.patch`).
+## How good is it, honestly
 
-At 50% of tokens kept, an independent LLM answers 68.8% of held-out questions correctly from ctxprune's
-output vs 53.4% from LLMLingua-2-large's (91.8% uncompressed); at 33%, 53.4% vs 32.5%. Details, per-source
-results and limitations: [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
+- Compression loses information. On our agent set, QA accuracy goes from 91.8% uncompressed to 68.8% at 50% kept.
+  Use it where the token savings are worth that, e.g. long logs, test output, search results, retrieved docs.
+- Weak spots: source code (the teacher rarely deleted code, so the model keeps most of it) and non-English web prose,
+  where LLMLingua-2-large still does better.
+- Our 378-question set is from our own training distribution, so the neutral SQuAD/HotpotQA comparison above is the
+  fairer number. Per-source tables and caveats: [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
 
 By [@imdariotoo](https://x.com/imdariotoo).
 

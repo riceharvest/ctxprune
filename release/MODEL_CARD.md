@@ -25,6 +25,8 @@ tags:
 - modernbert
 - mmbert
 - onnx
+- claude-code
+- transformers.js
 datasets:
 - SWE-bench/SWE-smith-trajectories
 - nebius/SWE-rebench-openhands-trajectories
@@ -37,7 +39,21 @@ datasets:
 
 # {{NAME}}: context compression for AI agents
 
-By [@imdariotoo](https://x.com/imdariotoo) · code: [riceharvest/ctxprune]({{CODE_LINK}})
+**Cuts tool outputs, logs and documents to about half before an LLM reads them, without mangling IDs.**
+At 50% of tokens kept, a reader LLM answers 51.5% of SQuAD v2 + HotpotQA questions exactly from this model's output
+vs 36.5% from headroom's Kompress-v2-base (400 questions, gap CI +10.5 to +19.5), and 68.8% vs 53.4% for
+LLMLingua-2-large on our agent-text set. **[Try it in your browser](https://huggingface.co/spaces/darioooooo0o/ctxprune)**
+(runs locally, nothing is uploaded).
+
+![Real output on a failing pytest run: struck-through words are deleted](https://raw.githubusercontent.com/riceharvest/ctxprune/main/assets/before-after.png)
+
+```bash
+pip install ctxprune
+ctxprune build.log --keep 0.5           # or pipe: cmd | ctxprune --keep 0.33 --protect
+ctxprune install claude-code            # compress big Bash/MCP outputs inside Claude Code
+```
+
+By [@imdariotoo](https://x.com/imdariotoo) · code, Claude Code plugin, LangChain/LlamaIndex integrations: [riceharvest/ctxprune]({{CODE_LINK}})
 
 A 140M-parameter token classifier that shortens text before it reaches an LLM by **deleting** the
 words that matter least. It is a successor to Microsoft's
@@ -59,19 +75,27 @@ documents and chat, in many languages.
 ## Usage
 
 ```bash
-pip install "ctxprune[onnx] @ git+https://github.com/riceharvest/ctxprune"   # CPU, no torch
-pip install "ctxprune[torch] @ git+https://github.com/riceharvest/ctxprune"  # PyTorch (GPU/CPU)
+pip install ctxprune             # CPU: onnxruntime + tokenizers, no torch
+pip install "ctxprune[torch]"    # PyTorch backend (GPU/CPU)
 ```
 
 ```python
-from ctxprune import Compressor
+import ctxprune
+ctxprune.prune(tool_output, keep=0.5)                 # int8 ONNX on CPU, model downloads once (143 MB)
+ctxprune.prune(tool_output, keep=0.33, protect=True)  # never drop IDs, numbers, paths
 
-c = Compressor("{{REPO}}", backend="onnx")    # or backend="torch"
-out = c.compress(tool_output, rate=0.5)       # keep ~50% of the text
-print(out["text"])
-
-c.compress(tool_output, rate=0.33, force_protected=True)  # never drop IDs, numbers, paths
+from ctxprune import Compressor                       # more control: batching, fp32, torch, thresholds
+c = Compressor("{{REPO}}", backend="onnx", onnx_file="onnx/model.onnx")
+c.compress(tool_output, rate=0.5)["text"]
 ```
+
+| Where | How |
+|---|---|
+| Claude Code | `ctxprune install claude-code`, or `/plugin install ctxprune --marketplace riceharvest/ctxprune` |
+| Shell | `ctxprune FILE --keep 0.5 --stats`, reads stdin |
+| Other languages | `ctxprune serve` then `POST localhost:8787/compress {"text": ...}` |
+| LangChain / LlamaIndex | `ctxprune.integrations.CtxpruneDocumentCompressor` / `CtxpruneNodePostprocessor` |
+| Browser (transformers.js) | see the [demo source](https://huggingface.co/spaces/darioooooo0o/ctxprune/tree/main/js) |
 
 **With LLMLingua** (drop-in, needs the tokenizer-detection fix proposed upstream in {{PR_LINK}}):
 

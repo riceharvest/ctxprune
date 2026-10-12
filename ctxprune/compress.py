@@ -1,7 +1,7 @@
 """Inference: score atoms with the trained token classifier and keep the best.
 
-    from ctxprune.compress import Compressor
-    c = Compressor("path/or/hub-id")
+    from ctxprune import Compressor
+    c = Compressor()                      # darioooooo0o/ctxprune-small, int8 ONNX on CPU
     c.compress(text, rate=0.5)["text"]
 
 `rate` is the fraction of tokens to keep (like LLMLingua-2's `rate`).
@@ -19,38 +19,92 @@ from .tokenlabels import atom_spans, char_to_atom, special_wrap, token_atom_sets
 STRUCTURE = set('{}[]",:')
 
 
+DEFAULT_MODEL = "darioooooo0o/ctxprune-small"
+INT8 = "onnx/model_quantized.onnx"
+FP32 = "onnx/model.onnx"
+
+
+def _hub_file(model: str, filename: str) -> str:
+    """Local path of a model file: a directory checkout, the HF cache (no network), or a download."""
+    import os
+
+    if os.path.isdir(model):
+        return os.path.join(model, filename)
+    from huggingface_hub import hf_hub_download
+
+    try:
+        return hf_hub_download(model, filename, local_files_only=True)
+    except Exception:
+        return hf_hub_download(model, filename)
+
+
+class _RawTokenizer:
+    """The slice of the transformers tokenizer API that inference needs, on the `tokenizers`
+    library alone. Loads in ~1 s instead of ~7 s and gives identical ids and offsets."""
+
+    def __init__(self, path: str):
+        from tokenizers import Tokenizer
+
+        self.t = Tokenizer.from_file(path)
+        self.t.no_padding()
+        self.t.no_truncation()
+        self.pad_token_id = self.t.token_to_id("<pad>")
+        if self.pad_token_id is None:
+            self.pad_token_id = self.t.token_to_id("[PAD]") or 0
+
+    def __call__(self, text: str, add_special_tokens: bool = True, return_offsets_mapping: bool = False) -> dict:
+        e = self.t.encode(text, add_special_tokens=add_special_tokens)
+        out = {"input_ids": e.ids}
+        if return_offsets_mapping:
+            out["offset_mapping"] = e.offsets
+        return out
+
+
+def _pick_backend(model: str, onnx_file: str, device: str | None) -> str:
+    import os
+
+    if device is not None:
+        return "torch"
+    if os.path.isdir(model) and not os.path.exists(os.path.join(model, onnx_file)):
+        return "torch"
+    try:
+        import onnxruntime  # noqa: F401
+        return "onnx"
+    except ImportError:
+        return "torch"
+
+
 class Compressor:
-    def __init__(self, model: str, device: str | None = None, max_len: int = 512, batch_size: int = 16,
-                 backend: str = "torch", onnx_file: str = "onnx/model.onnx"):
-        """backend="torch" (any device) or "onnx" (CPU, no torch needed; onnx_file may be
-        "onnx/model_quantized.onnx" for the int8 build)."""
-        if backend == "onnx":
-            import os
-
-            os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")  # silence "PyTorch was not found"
-        from transformers import AutoTokenizer
-
-        self.tok = AutoTokenizer.from_pretrained(model)
+    def __init__(self, model: str = DEFAULT_MODEL, device: str | None = None, max_len: int = 512,
+                 batch_size: int = 16, backend: str = "auto", onnx_file: str = INT8):
+        """backend="onnx" (CPU, needs only onnxruntime + tokenizers), "torch" (any device, needs
+        torch + transformers) or "auto" (onnx when available, torch when a device is given).
+        onnx_file defaults to the int8 build (143 MB); FP32 ("onnx/model.onnx") is exact."""
+        if backend == "auto":
+            backend = _pick_backend(model, onnx_file, device)
         self.backend = backend
         if backend == "onnx":
-            import os
-
             import onnxruntime as ort
-            from huggingface_hub import hf_hub_download
 
-            path = os.path.join(model, onnx_file) if os.path.isdir(model) else hf_hub_download(model, onnx_file)
-            self.session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            self.tok = _RawTokenizer(_hub_file(model, "tokenizer.json"))
+            opts = ort.SessionOptions()
+            opts.log_severity_level = 3
+            self.session = ort.InferenceSession(_hub_file(model, onnx_file), opts,
+                                                providers=["CPUExecutionProvider"])
             self.device = "cpu"
-        else:
+        elif backend == "torch":
             import torch
-            from transformers import AutoModelForTokenClassification
+            from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+            self.tok = AutoTokenizer.from_pretrained(model)
             self.torch = torch
             if device is None:
                 device = "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else (
                     "cuda" if torch.cuda.is_available() else "cpu")
             self.device = device
             self.model = AutoModelForTokenClassification.from_pretrained(model).to(device).eval()
+        else:
+            raise ValueError(f"backend must be 'auto', 'onnx' or 'torch', not {backend!r}")
         self.max_len = max_len
         self.batch_size = batch_size
         self.pre, self.post = special_wrap(self.tok)

@@ -70,7 +70,7 @@ def main() -> None:
                           use_llmlingua2=True, device_map="cpu")
     ll_out = ll.compress_prompt(TEXT, rate=args.rate, force_tokens=["\n", "?"])["compressed_prompt"]
 
-    c = Compressor(args.model, device="cpu")
+    c = Compressor(args.model, device="cpu", backend="torch")
     atoms, scores, _ = c.atom_scores(TEXT)
     res = c.compress(TEXT, rate=args.rate, force_protected=True)
     out_atoms = {a.text for a in atomize(res["text"])}
