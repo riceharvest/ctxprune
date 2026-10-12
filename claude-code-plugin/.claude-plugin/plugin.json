@@ -1,6 +1,6 @@
 {
   "name": "ctxprune",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Compresses Bash and MCP tool outputs over 6,000 characters to about half before Claude reads them, keeping IDs, numbers and paths exact. Local CPU model, no API calls.",
   "author": {"name": "riceharvest", "url": "https://github.com/riceharvest"},
   "homepage": "https://github.com/riceharvest/ctxprune",

@@ -21,7 +21,11 @@ Claude should see a note starting "ctxprune compressed this Bash output". (Outpu
 like `seq 1 3000`, is left alone because those are always kept.) Originals are saved in `~/.cache/ctxprune/outputs/`.
 
 Tuning (environment of the Claude Code process): `CTXPRUNE_RATE=0.5` (fraction kept), `CTXPRUNE_MIN_CHARS=6000`.
-Optional speed-up: keep `ctxprune serve` running (localhost:8787); the hook then skips the ~2 s model load.
+Optional speed-up: keep `ctxprune serve` running (localhost:8719); the hook then skips the ~2 s model load.
+
+Saved originals in `~/.cache/ctxprune/outputs/` are raw tool output (may contain secrets) and are never deleted
+automatically; tell the user, and clear with `rm -rf ~/.cache/ctxprune/outputs`. The plugin install path does not
+pre-download the model: run `python -c "import ctxprune; ctxprune.prune('x')"` once so early outputs get compressed.
 
 **Shell / scripts**
 

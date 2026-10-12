@@ -1,7 +1,7 @@
 """Small local HTTP API so other processes (the Claude Code hook, Node/Go/shell tools) skip the model load.
 
-    ctxprune serve                    # http://127.0.0.1:8787
-    curl -s localhost:8787/compress -d '{"text": "...", "rate": 0.5}'
+    ctxprune serve                    # http://127.0.0.1:8719
+    curl -s localhost:8719/compress -d '{"text": "...", "rate": 0.5}'
 
 POST /compress  {"text": str} or {"texts": [str]}, optional "rate" (0.5), "force_protected" (false),
                 "keep_structure" (false)  ->  {"text", "kept", "total"} or {"results": [...]}
@@ -43,7 +43,7 @@ class _State:
             return out
 
 
-def make_server(host: str = "127.0.0.1", port: int = 8787, model: str = DEFAULT_MODEL,
+def make_server(host: str = "127.0.0.1", port: int = 8719, model: str = DEFAULT_MODEL,
                 onnx_file: str = INT8) -> ThreadingHTTPServer:
     state = _State(model, onnx_file)
 

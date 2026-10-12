@@ -75,8 +75,8 @@ h2.sec { margin-top: 6px; }
     <a href="https://x.com/imdariotoo">@imdariotoo</a>
   </div>
   <div class="score">
-    <div><b>51.5 vs 36.5</b><span>exact-match QA at 50% of tokens kept, ctxprune vs headroom's Kompress-v2 (SQuAD v2 + HotpotQA, 400 questions, CI +10.5..+19.5)</span></div>
-    <div><b>68.8% vs 53.4%</b><span>questions an LLM still answers at 50% kept, ctxprune vs LLMLingua-2-large (our 378-question agent set; 91.8% uncompressed)</span></div>
+    <div><b>51.5 vs 36.5</b><span>exact-match QA at 50% of tokens kept, ctxprune vs headroom's Kompress-v2 (SQuAD v2 + HotpotQA, 400 questions, CI +10.5..+19.5; reader Qwen3.8-27B, also our labeling teacher)</span></div>
+    <div><b>68.8% vs 53.4%</b><span>questions an LLM still answers at 50% kept, ctxprune vs LLMLingua-2-large (our 378-question agent set, independent reader; 91.8% uncompressed)</span></div>
     <div><b>~6× faster</b><span>on CPU than LLMLingua-2-large; int8 ONNX, no torch needed</span></div>
   </div>
 
@@ -215,7 +215,7 @@ async function run() {
     const { isProtected } = await import("./js/ctxprune.js");
     const ids = cache.atoms.map((a, i) => [isProtected(a.text), out.keep[i]]).filter(([p]) => p);
     const kept = ids.filter(([, k]) => k).length;
-    $("trystats").textContent = `${text.length.toLocaleString()} → ${out.text.length.toLocaleString()} chars (${Math.round(100 * out.text.length / text.length)}%) · IDs/numbers kept ${kept}/${ids.length} · scored in ${Math.round(cache.ms)} ms`;
+    $("trystats").textContent = `${text.length.toLocaleString()} → ${out.text.length.toLocaleString()} chars (${Math.round(100 * out.text.length / text.length)}%) · IDs/numbers not deleted ${kept}/${ids.length}, none split · scored in ${Math.round(cache.ms)} ms`;
     $("tryout").style.display = "block";
     $("status").textContent = "";
   } catch (e) {

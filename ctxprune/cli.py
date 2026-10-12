@@ -3,7 +3,7 @@
     ctxprune build.log                       # keep ~50% of the text, print it
     cat build.log | ctxprune --keep 0.33 --protect --stats
     ctxprune install claude-code             # compress big Bash/MCP outputs inside Claude Code
-    ctxprune serve                           # local HTTP API on :8787 (skips the model load per call)
+    ctxprune serve                           # local HTTP API on :8719 (skips the model load per call)
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ USAGE = """\
 ctxprune FILE [--keep 0.5] [--protect] [--stats]   compress a file (or stdin) and print it
 ctxprune install claude-code [--scope user|project|local]
 ctxprune uninstall claude-code [--scope ...]
-ctxprune serve [--port 8787] [--host 127.0.0.1]
+ctxprune serve [--port 8719] [--host 127.0.0.1]
 ctxprune hook claude-code                          (called by Claude Code, reads JSON on stdin)"""
 
 
@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> None:
     if cmd == "serve":
         ap = argparse.ArgumentParser(prog="ctxprune serve")
         ap.add_argument("--host", default="127.0.0.1")
-        ap.add_argument("--port", type=int, default=8787)
+        ap.add_argument("--port", type=int, default=8719)
         ap.add_argument("--model", default=DEFAULT_MODEL)
         ap.add_argument("--fp32", action="store_true")
         args = ap.parse_args(argv[1:])

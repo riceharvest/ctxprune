@@ -15,7 +15,7 @@ What it does, and what it deliberately leaves alone:
 - Any error means no output: Claude then gets the original text (fail open).
 
 Settings (environment of the Claude Code process): CTXPRUNE_RATE (default 0.5),
-CTXPRUNE_MIN_CHARS (6000), CTXPRUNE_SERVER (default http://127.0.0.1:8787; used when
+CTXPRUNE_MIN_CHARS (6000), CTXPRUNE_SERVER (default http://127.0.0.1:8719; used when
 `ctxprune serve` is running, which avoids the ~2 s model load per compressed call).
 """
 
@@ -51,7 +51,7 @@ def _save_original(text: str) -> str:
 
 def _compress(texts: list[str], rate: float) -> list[str]:
     """Compress via a running `ctxprune serve` if there is one, else in process."""
-    server = os.environ.get("CTXPRUNE_SERVER", "http://127.0.0.1:8787")
+    server = os.environ.get("CTXPRUNE_SERVER", "http://127.0.0.1:8719")
     if server:
         try:
             import urllib.request
@@ -61,9 +61,11 @@ def _compress(texts: list[str], rate: float) -> list[str]:
                                          data=json.dumps({"texts": texts, "rate": rate,
                                                           "force_protected": True}).encode())
             with urllib.request.urlopen(req, timeout=60) as r:
-                return [o["text"] for o in json.load(r)["results"]]
-        except OSError:
-            pass  # not running: load the model here
+                outs = [o["text"] for o in json.load(r)["results"]]
+            if len(outs) == len(texts) and all(isinstance(o, str) for o in outs):
+                return outs
+        except Exception:
+            pass  # not running, or something else owns the port: load the model here
     from .compress import Compressor
 
     c = Compressor()

@@ -41,8 +41,9 @@ datasets:
 
 **Cuts tool outputs, logs and documents to about half before an LLM reads them, without mangling IDs.**
 At 50% of tokens kept, a reader LLM answers 51.5% of SQuAD v2 + HotpotQA questions exactly from this model's output
-vs 36.5% from headroom's Kompress-v2-base (400 questions, gap CI +10.5 to +19.5), and 68.8% vs 53.4% for
-LLMLingua-2-large on our agent-text set. **[Try it in your browser](https://huggingface.co/spaces/darioooooo0o/ctxprune)**
+vs 36.5% from headroom's Kompress-v2-base (400 questions, gap CI +10.5 to +19.5; reader Qwen3.8-27B, which also
+labeled this model's training data), and 68.8% vs 53.4% for LLMLingua-2-large on our agent-text set with an
+independent reader (DeepSeek V4 Flash). **[Try it in your browser](https://huggingface.co/spaces/darioooooo0o/ctxprune)**
 (runs locally, nothing is uploaded).
 
 ![Real output on a failing pytest run: struck-through words are deleted](https://raw.githubusercontent.com/riceharvest/ctxprune/main/assets/before-after.png)
@@ -93,7 +94,7 @@ c.compress(tool_output, rate=0.5)["text"]
 |---|---|
 | Claude Code | `ctxprune install claude-code`, or `/plugin install ctxprune --marketplace riceharvest/ctxprune` |
 | Shell | `ctxprune FILE --keep 0.5 --stats`, reads stdin |
-| Other languages | `ctxprune serve` then `POST localhost:8787/compress {"text": ...}` |
+| Other languages | `ctxprune serve` then `POST localhost:8719/compress {"text": ...}` |
 | LangChain / LlamaIndex | `ctxprune.integrations.CtxpruneDocumentCompressor` / `CtxpruneNodePostprocessor` |
 | Browser (transformers.js) | see the [demo source](https://huggingface.co/spaces/darioooooo0o/ctxprune/tree/main/js) |
 

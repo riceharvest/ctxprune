@@ -65,3 +65,29 @@ def test_hook_fails_open(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     hook.main_claude_code()
     assert capsys.readouterr().out == ""
+
+
+def test_foreign_server_on_port_falls_back(monkeypatch):
+    """Something other than `ctxprune serve` answering on the port must not break compression."""
+    import io
+    import urllib.request
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp(b'{"object": "not ctxprune"}'))
+    called = {}
+
+    class FakeCompressor:
+        def compress(self, t, rate, force_protected):
+            called["yes"] = True
+            return {"text": t[:10]}
+
+    import ctxprune.compress
+
+    monkeypatch.setattr(ctxprune.compress, "Compressor", lambda *a, **k: FakeCompressor())
+    assert hook._compress(["x" * 100], 0.5) == ["x" * 10] and called

@@ -8,7 +8,9 @@ Runs on CPU in about 0.1 s per 500 tokens. Apache-2.0.
 
 At 50% of tokens kept, a reader LLM answers **51.5%** of SQuAD v2 + HotpotQA questions exactly from ctxprune's
 output vs **36.5%** from [headroom](https://github.com/headroomlabs-ai/headroom)'s Kompress-v2 (400 questions,
-95% CI of the gap +10.5 to +19.5), and **68.8% vs 53.4%** for LLMLingua-2-large on our agent-text set.
+95% CI of the gap +10.5 to +19.5; the reader there is Qwen3.8-27B, which also labeled ctxprune's training data, so
+this may flatter ctxprune), and **68.8% vs 53.4%** for LLMLingua-2-large on our agent-text set with an independent
+reader (DeepSeek V4 Flash).
 **[Try it in your browser](https://huggingface.co/spaces/darioooooo0o/ctxprune)** (nothing is uploaded).
 
 ## Quick start
@@ -30,7 +32,7 @@ short = ctxprune.prune(tool_output, keep=0.5)    # protect=True never drops IDs,
 | Shrink big Bash/MCP outputs inside **Claude Code** | `ctxprune install claude-code` | or the plugin: `/plugin install ctxprune --marketplace riceharvest/ctxprune` |
 | Compress a file or a pipe from the shell | `ctxprune FILE --keep 0.5` | `--protect`, `--stats`, reads stdin |
 | Call it from Python | `ctxprune.prune(text, keep=0.5)` | `Compressor` for batching and options |
-| Call it from another language / avoid the model load | `ctxprune serve` | `POST localhost:8787/compress {"text": ...}` |
+| Call it from another language / avoid the model load | `ctxprune serve` | `POST localhost:8719/compress {"text": ...}` |
 | Compress retrieved documents in **LangChain** | `CtxpruneDocumentCompressor` | see below |
 | Compress retrieved nodes in **LlamaIndex** | `CtxpruneNodePostprocessor` | see below |
 | Use it inside **LLMLingua** | `PromptCompressor(model_name="darioooooo0o/ctxprune-small", use_llmlingua2=True)` | needs [LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261) |
@@ -53,7 +55,12 @@ original output. Settings: `CTXPRUNE_RATE` (0.5), `CTXPRUNE_MIN_CHARS` (6000). E
 (~2 s); run `ctxprune serve` in the background and the hook uses it instead.
 
 As a plugin, without touching settings files (needs `ctxprune` on PATH, or `uv` so it can run via `uvx`):
-`/plugin install ctxprune --marketplace riceharvest/ctxprune`.
+`/plugin install ctxprune --marketplace riceharvest/ctxprune`. The plugin does not pre-download the model, so the
+first large outputs pass through uncompressed while it downloads (~180 MB); run `ctxprune serve` once, or
+`python -c "import ctxprune; ctxprune.prune('x')"`, to fetch it up front.
+
+Saved originals in `~/.cache/ctxprune/outputs/` are raw tool output (which can include secrets) and are never
+deleted automatically; clear them with `rm -rf ~/.cache/ctxprune/outputs`.
 
 ## LangChain and LlamaIndex
 
@@ -72,8 +79,8 @@ engine = index.as_query_engine(node_postprocessors=[CtxpruneNodePostprocessor(ra
   Use it where the token savings are worth that, e.g. long logs, test output, search results, retrieved docs.
 - Weak spots: source code (the teacher rarely deleted code, so the model keeps most of it) and non-English web prose,
   where LLMLingua-2-large still does better.
-- Our 378-question set is from our own training distribution, so the neutral SQuAD/HotpotQA comparison above is the
-  fairer number. Per-source tables and caveats: [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
+- Our 378-question set is from our own training distribution, and the neutral SQuAD/HotpotQA comparison used our
+  labeling teacher as the reader; neither is a fully independent benchmark. Per-source tables and caveats: [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
 
 By [@imdariotoo](https://x.com/imdariotoo).
 

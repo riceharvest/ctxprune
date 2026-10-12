@@ -8,7 +8,7 @@
 from .compress import DEFAULT_MODEL, Compressor
 
 __all__ = ["Compressor", "prune", "DEFAULT_MODEL"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 _default: Compressor | None = None
 
