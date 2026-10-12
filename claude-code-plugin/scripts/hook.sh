@@ -6,5 +6,5 @@ if command -v ctxprune >/dev/null 2>&1; then
 elif command -v uvx >/dev/null 2>&1; then
   exec uvx --quiet --from "ctxprune>=0.2" ctxprune hook claude-code
 fi
-cat >/dev/null
+cat >/dev/null 2>&1
 exit 0
