@@ -182,8 +182,13 @@ class HermesPluginTest(unittest.TestCase):
         files = json.dumps({"total_count": 12, "files": listing.split("\n")})
         out = plug.on_tool_result("search_files", {"pattern": "*.tsx"}, files, task_id="t-local", session_id="s-local",
                                   tool_call_id="c1")
+        self.assertTrue(out is None or "[cp:dir]" not in out)       # sffiles needs the dir grouping (paths)
+        out = plug.on_tool_result("search_files", {"pattern": "*.tsx"}, files, task_id="t-api", session_id="s-api",
+                                  tool_call_id="c2")
         self.assertIn("[cp:files below", out)
-        self.assertNotIn("[cp:dir]", out)
+        self.assertIn("[cp:dir]", out)
+        plug._TARGETS.clear()                                          # the process fallback is the local model now
+        plug._FIRST_TARGET[0] = ""
 
     def test_sys_path_appended(self):
         plug._cc()   # audit M4: appended after Hermes' own entries, never in front of them

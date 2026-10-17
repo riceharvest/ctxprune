@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -269,12 +270,72 @@ class Noise(unittest.TestCase):
                 out, st = compress(listing, "find src", paths=on)
                 self.assertEqual("l2_paths" in st["rules"], want)
                 self.assertEqual(decode(out), listing)
-                out, st = compress(files, None, paths=on)              # sffiles: one per line, dir-grouped only with paths
-                self.assertIn("l2_sffiles", st["rules"])
+                out, st = compress(files, None, paths=on)              # sffiles needs the dir grouping (paths)
+                self.assertEqual("l2_sffiles" in st["rules"], want)
                 self.assertEqual("[cp:dir]" in out, want)
                 self.assertEqual(decode(out), files)
         with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS": ""}):
             self.assertIn("l2_paths", compress(listing, "find src")[1]["rules"])   # no target: on (Claude Code hooks)
+
+    def test_windows_and_unicode_path_lists(self):   # robustness study: \ paths, drive / UNC roots, NFD, Indic
+        import unicodedata
+        lists = [[f"C:\\Users\\dev\\proj\\src\\components\\widget_{i}.tsx" for i in range(12)],
+                 [f"\\\\fileserver\\share\\team\\reports\\q{i}_summary.xlsx" for i in range(12)],
+                 [unicodedata.normalize("NFD", f"/Users/zoë/Documents/résumés/candidat_{i}_é.pdf") for i in range(12)],
+                 [f"/home/राहुल/दस्तावेज़/परियोजना/फ़ाइल_{i}.txt" for i in range(12)]]
+        for lines in lists:
+            for nl in ("\n", "\r\n"):
+                text = nl.join(lines) + nl
+                out, st = compress(text, "dir /s /b", paths=True)
+                self.assertIn("l2_paths", st["rules"], lines[0])
+                self.assertEqual(decode(out), text)
+
+    def test_mixed_line_endings_keep_line_rules(self):
+        import random
+        r = random.Random(3)
+        lines = [f"C:\\Users\\dev\\proj\\src\\module_{i}.py" for i in range(20)]
+        text = "".join(x + r.choice(["\r\n", "\n"]) for x in lines)
+        out, st = compress(text, "dir /s /b", paths=True)
+        self.assertIn("l2_paths", st["rules"])
+        self.assertTrue(out.startswith("[cp: lines ending in \\r\\n: "), out[:80])
+        self.assertEqual(decode(out), text)
+
+    def test_bom_json(self):
+        doc = json.dumps({"items": [{"id": i, "name": f"item {i}", "ok": True} for i in range(12)]})
+        for text in ("\ufeff" + doc, "\ufeff" + doc + "\r\n", "\ufeff[cp: grouped by file]\nx"):
+            out, st = compress(text, "curl -s api")
+            self.assertTrue(out.startswith("\ufeff"))
+            self.assertEqual(decode(out), text)
+        self.assertIn("l2_jsonrows", compress("\ufeff" + doc, "curl -s api")[1]["rules"])
+
+    def test_json_ascii_exact_or_nothing(self):
+        recs = [{"id": i, "title": f"Résumé — {i} 東京 Привет мир", "who": "Zoë 😀"} for i in range(8)]
+        for js in (json.dumps({"items": recs}), json.dumps(recs, separators=(",", ":")),
+                   re.sub(r"\\u[0-9a-f]{4}", lambda m: m.group(0).upper().replace("\\U", "\\u"),
+                          json.dumps({"items": recs}))):                       # all hex uppercase (other servers)
+            out, st = compress(js, "python api.py")
+            self.assertIn("l2_json_ascii", st["rules"], js[:80])
+            self.assertEqual(decode(out), js)
+            self.assertIn("東京", out)
+        mixed = json.dumps({"items": recs}).replace("\\u00e9", "\\u00E9", 1)        # hex case mixed: never
+        self.assertNotIn("l2_json_ascii", compress(mixed, "x")[1]["rules"])
+        kept = json.dumps({"a": ["x\u2028y\u0085z\u200b\ud800 " + "ü" * 40] * 4})  # separators / C1 / invisible / lone
+        out, st = compress(kept, "x")                                              # surrogate stay escaped
+        self.assertEqual(decode(out), kept)
+        for esc in ("\\u2028", "\\u0085", "\\u200b", "\\ud800"):
+            self.assertIn(esc, out)
+        php = '{"url":"https:\\/\\/example.org\\/caf\\u00e9","t":"' + "\\u00e9t\\u00e9 " * 30 + '"}'   # PHP json_encode
+        out, st = compress(php, "php api.php")
+        self.assertIn("l2_json_ascii", st["rules"])
+        self.assertEqual(decode(out), php)
+
+    def test_spill_accepts_windows_paths(self):
+        import spill
+        for p in ("C:\\Users\\u\\.claude\\projects\\x\\tool-results\\a.txt", "\\\\srv\\share\\tool-results\\a.txt",
+                  "/home/u/.claude/projects/x/tool-results/a.txt"):
+            msg = (f"Error: result (1,234 characters across 10 lines) exceeds maximum allowed tokens. Output has been "
+                   f"saved to {p}.\nFormat: Plain text\n")
+            self.assertEqual(spill._BIG.match(msg).group(3), p)
 
     def test_opt_in_rules_off_by_default(self):   # comprehension probe 2026-10-17: blockref / prefix fail, a11y pending
         logs = "\n".join(f"web-1     | GET /api/items/{k} 200 in {k * 3} ms" for k in range(12)) + "\nother"

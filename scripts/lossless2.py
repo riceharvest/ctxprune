@@ -70,7 +70,9 @@ import sys
 _U = r"[^\x00-\x7f\s]"
 _A = "A-Za-z0-9_"
 HIT = re.compile(rf"^((?:[{_A}.@~+-]|{_U}|/(?!/))*(?:[{_A}.@~+-]|{_U})[^\s:]*?)([:-])(\d+)\2(.*)$")   # reference only: see _hit_match
-PATHLINE = re.compile(rf"^(?:\./|~/|/)?(?:(?:[{_A}.@+-]|{_U})+/)+(?:[{_A}.@+-]|{_U})+/?$")
+PATHLINE = re.compile(rf"^(?:\./|~/|/|[A-Za-z]:\\|\\\\|\.\\)?(?:(?:[{_A}.@+-]|{_U})+[/\\])+(?:[{_A}.@+-]|{_U})+[/\\]?$")
+# ^ POSIX and Windows (`\` separators, `C:\` drive and `\\server\share` UNC roots); name chars as in _U (NFD combining
+#   marks, Indic vowel signs count)
 # Markers (tokenizer study 2026-10-17 §4): one shared prefix `[cp` / `[/cp]`, so the H2 escaper and the note need one
 # pattern. The older `[ctxprune...]` forms still decode (outputs written by earlier versions), each with its own end.
 HB, PB, END = "[cp:file]", "[cp:dir]", "[/cp]"
@@ -127,6 +129,13 @@ def _est(s: str) -> int:
 
 def _est_lines(lines: list[str]) -> int:
     return _est("\n".join(lines)) + 1
+
+
+def _margin(lines: list[str]) -> int:
+    """Extra estimated tokens the header-carrying rules (paths, a11y, sffiles) must save. The estimate has no
+    tokenizer (hooks ship without one) and misses merges around fence lines and non-ASCII names (emoji, NFD,
+    Devanagari: robustness study, 0.36% of outputs grew on o200k): a fixed 4, plus 1 per 4 lines with non-ASCII."""
+    return 4 + sum(1 for x in lines if not x.isascii()) // 4
 
 
 # ---------------------------------------------------------------- hits
@@ -208,9 +217,13 @@ def _enc_hits(lines: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- paths
 
+def _pathlike(ln: str) -> bool:
+    return bool(PATHLINE.match(ln))
+
+
 def _dir(p: str) -> tuple[str, str] | None:
-    q = p[:-1] if p.endswith("/") else p
-    k = q.rfind("/")
+    q = p[:-1] if p.endswith(("/", "\\")) else p
+    k = max(q.rfind("/"), q.rfind("\\"))
     if k <= 0:
         return None
     return p[:k + 1], p[k + 1:]
@@ -219,10 +232,10 @@ def _dir(p: str) -> tuple[str, str] | None:
 def _enc_paths(lines: list[str]) -> list[str]:
     out, i, n = [], 0, len(lines)
     while i < n:
-        if not PATHLINE.match(lines[i]) or _dir(lines[i]) is None:
+        if not _pathlike(lines[i]) or _dir(lines[i]) is None:
             out.append(lines[i]); i += 1; continue
         j = i
-        while j < n and PATHLINE.match(lines[j]) and _dir(lines[j]) is not None:
+        while j < n and _pathlike(lines[j]) and _dir(lines[j]) is not None:
             j += 1
         run = lines[i:j]
         if len(run) < 4:
@@ -235,7 +248,7 @@ def _enc_paths(lines: list[str]) -> list[str]:
             block.append(" " + name)
         block.append(END)
         if sum(map(len, block)) + len(block) < sum(map(len, run)) + len(run) - 8 \
-                and _est_lines(block) < _est_lines(run):          # token gate: fewer chars can still cost more tokens
+                and _est_lines(block) + _margin(run) <= _est_lines(run):   # token gate (+ margin, see _margin)
             out.extend(block)
         else:
             out.extend(run)
@@ -460,7 +473,8 @@ def _enc_a11y(lines: list[str]) -> list[str]:
                 new = [x.replace(A11Y_CUR, A11Y_ARROW) for x in new]
                 head = A11Y_HEAD
             if not any(MARKERISH.match(x) or x.startswith(A11Y_CLOSE) for x in new) \
-                    and _est_lines([head] + new) < _est_lines(body):
+                    and (_est_lines(body) - _est_lines(new)) * 4 // 5 >= _est(head) + _margin(body):
+                # (the estimate over-counts what a dropped dash / cursor saves by ~1/5 against o200k / Qwen)
                 out += [lines[i], head] + new + [lines[k]]
                 i = k + 1
                 continue
@@ -855,9 +869,11 @@ def _enc_sffiles(text: str, group: bool = True) -> str:
     if outer.count(_ser("\x00F\x00", k)) != 1:
         return text
     outer = outer.replace(_ser("\x00F\x00", k), f"[cp:files below, one per line{JLABEL[k]}]", 1)
-    lst = encode("\n".join(fs), ("paths",))[0] if group else "\n".join(fs)   # group: the `paths` rule is on
+    lst = encode("\n".join(fs), ("paths",))[0] if group else ""   # group: the `paths` rule is on
+    if not lst.startswith(PB) and f"\n{PB}\n" not in lst:
+        return text   # one path per line alone saves no real tokens (`","` is one token, like a newline)
     new = f"{outer}\n{lst}{nl}"
-    return new if len(new) < len(text) and _est(new) < _est(text) and _dec_sffiles(new) == text else text
+    return new if len(new) < len(text) and _est(new) + _margin(fs) <= _est(text) and _dec_sffiles(new) == text else text
 
 
 def _dec_sffiles(text: str) -> str | None:
@@ -868,6 +884,82 @@ def _dec_sffiles(text: str) -> str | None:
         return None
     k = JLABEL.index(m.group(1) or "")
     return outer.replace(m.group(0), _ser(decode(rest).split("\n"), k), 1) + nl
+
+
+# ---------------------------------------------------------------- json_ascii (\uXXXX-escaped JSON)
+
+JA_HEAD = "[cp: \\uXXXX escapes shown as characters]"
+JA_HEAD_UP = "[cp: \\uXXXX escapes shown as characters, hex uppercase]"
+JA_HEADS = (JA_HEAD, JA_HEAD_UP)
+_JA_ESC = re.compile(r"\\(?:u([0-9a-fA-F]{4})|.)", re.S)
+_JA_KEEP = re.compile(r"[\x80-\x9f  ﷐-﷯￾￿" + INVISIBLE + r"]")   # stay escaped
+
+
+def _ja_unescape(body: str) -> tuple[str, bool] | None:
+    """All-ASCII JSON text -> (the text with every \\uXXXX escape of a printable non-ASCII char (surrogate pairs
+    joined) replaced by the char, hex uppercase?), or None when nothing changes or the replaced escapes mix hex case.
+    Exact by construction: the input has no raw non-ASCII char, so the decoder re-escapes every one it finds; escapes
+    of ASCII, lone surrogates, C1 controls, line separators and invisible chars are left as they are."""
+    out, i, cases = [], 0, set()
+    ms = list(_JA_ESC.finditer(body))
+    k = 0
+    while k < len(ms):
+        m = ms[k]
+        if m.group(1) is None:
+            k += 1
+            continue
+        v, span, hexes = int(m.group(1), 16), [m.start(), m.end()], [m.group(1)]
+        if 0xD800 <= v <= 0xDBFF and k + 1 < len(ms) and ms[k + 1].start() == m.end() and ms[k + 1].group(1) \
+                and 0xDC00 <= int(ms[k + 1].group(1), 16) <= 0xDFFF:
+            lo = ms[k + 1]
+            v = 0x10000 + ((v - 0xD800) << 10) + (int(lo.group(1), 16) - 0xDC00)
+            span[1] = lo.end(); hexes.append(lo.group(1)); k += 1
+        k += 1
+        ch = chr(v) if not 0xD800 <= v <= 0xDFFF else ""
+        if v < 0x80 or not ch or _JA_KEEP.match(ch):
+            continue
+        for h in hexes:
+            if any(c.isalpha() for c in h):
+                cases.add(h.isupper())
+        out.append(body[i:span[0]]); out.append(ch); i = span[1]
+    if not out or len(cases) > 1:
+        return None
+    out.append(body[i:])
+    return "".join(out), cases == {True}
+
+
+def _ja_escape(body: str, upper: bool) -> str:
+    def esc(m):
+        v = ord(m.group(0))
+        if v > 0xFFFF:
+            v -= 0x10000
+            r = "\\u%04x\\u%04x" % (0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF))
+        else:
+            r = "\\u%04x" % v
+        return r.upper().replace("\\U", "\\u") if upper else r
+    return re.sub(r"[^\x00-\x7f]", esc, body)
+
+
+def _enc_jsonascii(text: str, rules: tuple[str, ...]) -> tuple[str, list]:
+    """\\uXXXX-escaped JSON (Python json.dumps / PHP json_encode default) -> `[cp: \\uXXXX escapes shown as
+    characters]` + the same JSON with the characters, which the other JSON rules may then encode further."""
+    if not text.isascii() or "\\u" not in text or _jload(text.rstrip("\n")) is None or text[:1] not in "[{":
+        return text, []
+    got = _ja_unescape(text)
+    if got is None:
+        return text, []
+    body, upper = got
+    inner, st = _encode_lf(body, tuple(r for r in rules if r != "json_ascii"))
+    new = f"{JA_HEAD_UP if upper else JA_HEAD}\n{inner}"
+    ok = len(new) < len(text) and _est(new) < _est(text) and _dec_jsonascii(new) == text
+    return (new, st["rules"]) if ok else (text, [])
+
+
+def _dec_jsonascii(text: str) -> str | None:
+    head, sep, rest = text.partition("\n")
+    if head not in JA_HEADS or not sep:
+        return None
+    return _ja_escape(decode(rest), head == JA_HEAD_UP)
 
 
 HREAD_RE = re.compile(r"\[cp:content below(; ascii compact|; compact|; ascii)?\]")
@@ -971,14 +1063,68 @@ def _dec_fences(lines: list[str]) -> list[str]:
     return out
 
 
-def _crlf(text: str) -> bool:
-    """Every line break is \r\n (Windows / PowerShell output): the rules run on the LF form and the CRs go back."""
-    return "\r\n" in text and text.count("\r") == text.count("\n") == text.count("\r\n")
+def _cr_runs(text: str) -> list[tuple[bool, list[str]]] | None:
+    """Maximal runs of lines that do / don't end in \r (CRLF / LF endings, per line; PowerShell, Windows tools, mixed
+    logs), or None when no line ends in \r. The rules run on each run's LF form; a CR run gets its CRs back."""
+    lines = text.split("\n")
+    if not any(ln.endswith("\r") for ln in lines):
+        return None
+    runs: list[tuple[bool, list[str]]] = []
+    for ln in lines:
+        cr = ln.endswith("\r")
+        if runs and runs[-1][0] == cr:
+            runs[-1][1].append(ln)
+        else:
+            runs.append((cr, [ln]))
+    return runs
+
+
+def _per_run(text: str, fn) -> tuple[str, list]:
+    out, res = [], []
+    for cr, run in _cr_runs(text):
+        body, r = fn("\n".join(x[:-1] if cr else x for x in run))
+        res.append(r)
+        out.append("\n".join(x + "\r" for x in body.split("\n")) if cr else body)
+    return "\n".join(out), res
+
+
+CRMAP_RE = re.compile(r"^\[cp: lines ending in \\r\\n: ((?:\d{1,7}(?:–\d{1,7})?, )*\d{1,7}(?:–\d{1,7})?)\]$")
+
+
+def _ranges(nums: list[int]) -> str:
+    out, i = [], 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else f"{nums[i]}–{nums[j]}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def _dec_crmap(text: str) -> str | None:
+    head, sep, rest = text.partition("\n")
+    m = CRMAP_RE.match(head) if sep else None
+    if not m:
+        return None
+    lines = _decode_lf(rest).split("\n")
+    for part in m.group(1).split(", "):
+        a, _, b = part.partition("–")
+        a, b = int(a), int(b or a)
+        if not 1 <= a <= b <= len(lines):
+            return None
+        for k in range(a - 1, b):
+            lines[k] += "\r"
+    return "\n".join(lines)
 
 
 def decode(text: str) -> str:
-    if _crlf(text):
-        return _decode_lf(text.replace("\r\n", "\n")).replace("\n", "\r\n")
+    if text.startswith("[cp: lines ending in "):
+        w = _dec_crmap(text)
+        if w is not None:
+            return w
+    if "\r" in text and _cr_runs(text) is not None:
+        return _per_run(text, lambda t: (_decode_lf(t), None))[0]
     return _decode_lf(text)
 
 
@@ -986,7 +1132,9 @@ def _decode_lf(text: str) -> str:
     head, _, rest = text.partition("\n")
     w = None
     try:                                   # decode never raises: a malformed encoding is returned as is
-        if head.startswith("{") and "[cp:content below" in head:
+        if head in JA_HEADS:
+            w = _dec_jsonascii(text)
+        elif head.startswith("{") and "[cp:content below" in head:
             w = _dec_hread(text)
         elif head.startswith("{") and "[cp:files below" in head:
             w = _dec_sffiles(text)
@@ -1024,7 +1172,7 @@ FLAG_RULES = {"blockref": "CTXPRUNE_BLOCKREF", "prefix": "CTXPRUNE_PREFIX", "jso
 #   jsonrows_ext (key.sub columns, quoted keys): Qwen3.6 thinking -7.3 pt on those items, thinking runs into the cap
 #   (lprobe3). a11y (Playwright) passed lprobe3 on Qwen3.6 / Qwen3.8 / Gemma: on. dupref is never encoded (0% even
 #   with the note); its markers still decode.
-JSON_RULES = ("sffiles", "jsonrows", "jsonrows_ext", "paths")   # paths: sffiles groups its list by directory;
+JSON_RULES = ("json_ascii", "sffiles", "jsonrows", "jsonrows_ext", "paths")   # paths: sffiles groups by directory;
 # jsonrows_ext: jsonrows flattens key.sub columns and allows non-word (quoted) keys
 ALL_RULES = TEXT_RULES
 LINE_ORDER = (("a11y", _enc_a11y), ("diffhdr", _enc_diffhdr), ("hits", _enc_hits), ("paths", _enc_paths), ("catn", _enc_catn),
@@ -1033,7 +1181,8 @@ LINE_ORDER = (("a11y", _enc_a11y), ("diffhdr", _enc_diffhdr), ("hits", _enc_hits
 
 def _marked(text: str) -> bool:
     if text.startswith(LEGEND_HEAD) or "[cp:rows #" in text or "[cp:content below" in text or \
-            "[cp:files below" in text:
+            "[cp:files below" in text or text.partition("\n")[0] in JA_HEADS or \
+            text.startswith("[cp: lines ending in "):
         return True
     if "[" not in text:
         return False
@@ -1043,14 +1192,32 @@ def _marked(text: str) -> bool:
 
 
 def encode(text: str, rules: tuple[str, ...] = TEXT_RULES) -> tuple[str, dict]:
-    if _crlf(text):                               # CRLF output: encode the LF form, CRLF back on every line
-        e, stats = _encode_lf(text.replace("\r\n", "\n"), rules)
-        new = e.replace("\n", "\r\n")
-        if stats["rules"] and len(new) < len(text) and decode(new) == text:
-            stats["before"], stats["after"] = len(text), len(new)
-            return new, stats
+    runs = _cr_runs(text) if "\r" in text else None
+    if runs is None:
+        return _encode_lf(text, rules)
+    if text.startswith("[cp: lines ending in "):
         return text, {"rules": [], "before": len(text), "after": len(text)}
-    return _encode_lf(text, rules)
+    cands = []
+    # (a) each run of CRLF lines encoded in LF form, CRs put back (uniform CRLF: one run)
+    new, res = _per_run(text, lambda t: _encode_lf(t, rules))
+    fired = list(dict.fromkeys(r for st in res for r in st["rules"]))
+    if fired:
+        cands.append((new, fired))
+    # (b) endings mixed line by line: the LF form encoded as one text, the CRLF lines listed in a header line
+    if len(runs) > 2:
+        lines = text.split("\n")
+        crs = [k + 1 for k, ln in enumerate(lines) if ln.endswith("\r")]
+        body, st = _encode_lf("\n".join(ln[:-1] if ln.endswith("\r") else ln for ln in lines), rules)
+        if st["rules"]:
+            cands.append((f"[cp: lines ending in \\r\\n: {_ranges(crs)}]\n{body}", st["rules"]))
+    best = None
+    for new, fired in cands:
+        if len(new) < len(text) and _est(new) <= _est(text) and decode(new) == text and \
+                (best is None or _est(new) < _est(best[0])):
+            best = (new, fired)
+    if best:
+        return best[0], {"rules": best[1], "before": len(text), "after": len(best[0])}
+    return text, {"rules": [], "before": len(text), "after": len(text)}
 
 
 def _encode_lf(text: str, rules: tuple[str, ...]) -> tuple[str, dict]:
@@ -1060,12 +1227,17 @@ def _encode_lf(text: str, rules: tuple[str, ...]) -> tuple[str, dict]:
         stats["after"] = len(text)
         return text, stats
     cur = text
-    for name, fn in (("hread", _enc_hread), ("sffiles", _enc_sffiles), ("jsonrows", _enc_jsonrows)):   # whole-output
+    for name, fn in (("json_ascii", _enc_jsonascii), ("hread", _enc_hread), ("sffiles", _enc_sffiles),
+                     ("jsonrows", _enc_jsonrows)):   # whole-output (json_ascii may wrap one of the others)
         if name in rules:
-            new = fn(text, "paths" in rules) if name == "sffiles" else \
-                fn(text, "jsonrows_ext" in rules) if name == "jsonrows" else fn(text)
+            inner = []
+            if name == "json_ascii":
+                new, inner = fn(text, rules)
+            else:
+                new = fn(text, "paths" in rules) if name == "sffiles" else \
+                    fn(text, "jsonrows_ext" in rules) if name == "jsonrows" else fn(text)
             if new != text and _est(new) <= _est(text) and decode(new) == text:
-                stats["rules"], stats["after"] = [name], len(new)
+                stats["rules"], stats["after"] = [name] + inner, len(new)
                 return new, stats
     diffy = bool(DIFFY.search(text))
     for name, fn in LINE_ORDER:
@@ -1187,7 +1359,7 @@ def _self_test() -> None:
                            {"name": "ccc", "size": -0.0, "ok": False}]),
                json.dumps({"items": [{"id": k, "title": f"Ü title {k}"} for k in range(5)]}, ensure_ascii=True)):
         e = _rt(js, JSON_RULES, want="jsonrows")
-        assert e.split("\n")[1].startswith("[cp:rows #1 TSV "), e
+        assert any(x.startswith("[cp:rows #1 TSV ") for x in e.split("\n")[1:3]), e   # (json_ascii may wrap it)
     e = _rt(json.dumps({"matches": recs}), JSON_RULES)
     assert "\n./src/pkg/mod0.py\n10\tdef handler_0(request):" in e and "; grouped by path]" in e, e
     # CRLF (PowerShell): rules run on the LF form, every CR comes back

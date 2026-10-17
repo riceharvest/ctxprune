@@ -558,7 +558,17 @@ def paths_on(target: str | None = None) -> bool:
 
 
 def compress(text: str, command: str | None = None, *, paths: bool | None = None) -> tuple[str, dict]:
-    """paths: the lossless2 `paths` rule (None = paths_on(): the env override, else on)."""
+    """paths: the lossless2 `paths` rule (None = paths_on(): the env override, else on). A leading BOM (UTF-16 /
+    UTF-8-with-BOM tool output, PowerShell) is set aside and put back, so JSON and first-line rules still see the text;
+    decode() does the same."""
+    if text.startswith("\ufeff"):
+        out, st = _compress(text[1:], command, paths)
+        st["chars_before"], st["chars_after"] = len(text), len(out) + 1
+        return "\ufeff" + out, st
+    return _compress(text, command, paths)
+
+
+def _compress(text: str, command: str | None, paths: bool | None) -> tuple[str, dict]:
     view_first, view_any = view_kind(command)
     rules: list[str] = []
     counts: dict[str, int] = {}
@@ -646,6 +656,8 @@ def decode(text: str) -> str:
     if _here not in sys.path:
         sys.path.append(_here)
     from lossless2 import decode as dec2
+    if text.startswith("\ufeff"):                 # set aside by compress()
+        return "\ufeff" + decode(text[1:])
     text = _drop_trunc_mark(text)
     try:
         return unescape_markers(expand(dec2(text)))

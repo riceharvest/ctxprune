@@ -32,6 +32,7 @@ the caller must not touch it either) | None (not a spill case: the normal pipeli
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import stat
@@ -44,7 +45,8 @@ LINE_CAP = 2000             # a text file's lines may grow up to this (Read show
 PTR_FIELDS = ("persistedOutputPath", "persistedOutputSize")
 PASS = "pass"
 _BIG = re.compile(r"\AError: result \(([\d,]+) characters across ([\d,]+) lines\) exceeds maximum allowed tokens\. "
-                  r"Output has been saved to (/[^\n]+?\.txt)\.\nFormat: Plain text\n")
+                  r"Output has been saved to ((?:/|[A-Za-z]:[\\/]|\\\\)[^\n]+?\.txt)\.\nFormat: Plain text\n")
+# ^ POSIX, drive (C:\ / C:/) and UNC roots: Claude Code on Windows names the file with its native path
 _NOTE = "Note: the output exceeded the persist byte limit"
 
 
@@ -231,7 +233,7 @@ def mcp_big(ev: dict, msg: str):
     if _NOTE in msg:
         return PASS
     n_chars, n_lines, path = int(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")), m.group(3)
-    if not os.path.isabs(path) or os.path.basename(os.path.dirname(path)) != "tool-results":
+    if not (os.path.isabs(path) or ntpath.isabs(path)) or re.split(r"[\\/]", path)[-2:-1] != ["tool-results"]:
         return PASS
     text = _read_exact(path)
     if text is None or u16(text) != n_chars or _lines(text) != n_lines:
