@@ -89,7 +89,9 @@ DIFFY = re.compile(r"^(diff --git |@@ -\d+(,\d+)? \+\d+(,\d+)? @@)", re.M)
 LEGEND_HEAD = "[ctxprune lossless: "
 MARKERS = {HB, PB, END, NB, HB_OLD, PB_OLD, END_OLD, NB_OLD}
 # a line that is (or, after a reversible backslash escape, was) marker-shaped; same family as lossless.MARKER_PREFIX
-MARKERISH = re.compile(r"^[​-‏⁠﻿]*\\*\[(?:/?(?i:ctxprune)|/?(?i:cp)(?=[:\]= ])|…)")
+INVISIBLE = (r"\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164"
+             r"\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff")   # = lossless.INVISIBLE
+MARKERISH = re.compile(r"^[" + INVISIBLE + r"]*\\*\[(?:/?(?i:ctxprune)|/?(?i:cp)(?=[:\]= ])|…)")
 _OWN = re.compile(r"^\[(?:/?ctxprune|/?cp(?=[:\]= ]))")        # an unescaped marker line ctxprune would write
 _BREAKS = re.compile(r"[\r\x0b\x0c\x1c-\x1e\x85  ]")   # splitlines() boundaries other than \n
 

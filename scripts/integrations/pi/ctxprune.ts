@@ -56,12 +56,16 @@ function compress(text, command, tool, noModel) {
 // H2: marker escaping adds one backslash per marker-shaped line, so a result can be LONGER and still must be used
 // (a forged "[ctxprune: ...]" line in a file or web page would otherwise reach the model unescaped).
 function escapedOnly(out, text) {
-  const a = out.split("\n"), b = text.split("\n");
+  // the line boundaries and invisible prefix chars of lossless.escape_markers (_LINE_SEP, INVISIBLE): a marker after \r,
+  // \f or U+2028, or behind a bidi mark, is escaped too, and the plugin must not fall back to the unescaped text then
+  const SEP = /\r\n|[\n\r\x0b\x0c\x1c-\x1e\x85\u2028\u2029]/;
+  const INV = /^((?:[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0000}-\u{e0fff}])*)\\/u;
+  const a = out.split(SEP), b = text.split(SEP);
   if (a.length !== b.length) return false;
   let n = 0;
   for (let i = 0; i < a.length; i++) {
     if (a[i] === b[i]) continue;
-    if (a[i].length !== b[i].length + 1 || a[i].replace(/^([\u200b-\u200f\u2060\ufeff]*)\\/, "$1") !== b[i]) return false;
+    if (a[i].length !== b[i].length + 1 || a[i].replace(INV, "$1") !== b[i]) return false;
     n++;
   }
   return n > 0;

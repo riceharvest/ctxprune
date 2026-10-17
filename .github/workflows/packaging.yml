@@ -72,6 +72,14 @@ jobs:
         working-directory: scripts
         run: '"../$BIN/python" -m unittest test_hooks'
 
+      - name: Windows host hook tests (code-page stdin, no fcntl)
+        if: runner.os == 'Windows'
+        working-directory: scripts
+        run: env -u PYTHONIOENCODING "../$BIN/python" -m unittest test_hooks.WindowsHost -v
+
+      - name: Non-ASCII hook I/O through the installed hook under non-UTF-8 code pages
+        run: env -u PYTHONIOENCODING "$BIN/python" tests/packaging/codepage_hook.py
+
       - name: Install / doctor / uninstall e2e in a throwaway HOME
         run: '"$BIN/python" tests/packaging/e2e.py --ctxprune "$BIN/ctxprune" --wheel dist/*.whl'
 

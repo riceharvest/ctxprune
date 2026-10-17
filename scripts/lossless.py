@@ -40,17 +40,24 @@ PIPE_OPS = {"|", "|&"}
 MAX_REST = 1000  # max chars of sibling JSON kept in the unescape marker line
 
 # H2 (security audit 2026-10-17): tool output must not be able to forge ctxprune markers. Every line that already
-# looks like one (MARKER_PREFIX at its start, optionally after zero-width chars) gets one more leading backslash;
+# looks like one (MARKER_PREFIX at its start, optionally after invisible chars: INVISIBLE) gets one more leading backslash;
 # lines that start with backslashes + such a prefix too, so the escape is a bijection and unescape_markers undoes it
 # exactly. "Line" = every splitlines() boundary (\r, \f, U+2028, ...), since the line model and recover split there.
 # Every marker-shaped line the model sees is therefore one ctxprune wrote, and decoders only ever see those.
 # MARKER_PREFIX is shared (note, decoders, tests): `[ctxprune` / `[/ctxprune` (any case), the short forms `[cp` /
 # `[/cp` followed by `:` `]` `=` or a space (so `[cpu]` / `[cpp]` config sections stay untouched), and `[…` (gaps).
 MARKER_PREFIX = r"\[(?:/?(?i:ctxprune)|/?(?i:cp)(?=[:\]= ])|…)"
-MARKER_LIKE = re.compile(r"^[\u200b-\u200f\u2060\ufeff]*" + MARKER_PREFIX)   # is this line marker-shaped?
+# INVISIBLE: Unicode Default_Ignorable_Code_Point (zero-width chars, bidi marks / embeddings / isolates, soft hyphen,
+# CGJ, variation selectors, tags). A reader sees `<U+2067>[cp:file]` as `[cp:file]`; RTL text carries these routinely
+# (robustness audit 2026-10-17: only U+200B-200F / 2060 / FEFF were covered). Same class in lossless2.INVISIBLE and in
+# the plugins' escapedOnly(). Visible lookalikes (fullwidth `［cp:`, NBSP / space indent) are not escaped: they look
+# different, and every decoder matches ASCII `[cp` / `[ctxprune` exactly.
+INVISIBLE = (r"\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164"
+             r"\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff")
+MARKER_LIKE = re.compile(r"^[" + INVISIBLE + r"]*" + MARKER_PREFIX)   # is this line marker-shaped?
 _LINE_SEP = re.compile(r"(\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])")
-_MARKER_LIKE = re.compile(r"^([\u200b-\u200f\u2060\ufeff]*)(\\*)(" + MARKER_PREFIX + ")")
-_ESCAPED = re.compile(r"^([\u200b-\u200f\u2060\ufeff]*)\\(\\*" + MARKER_PREFIX + ")")
+_MARKER_LIKE = re.compile(r"^([" + INVISIBLE + r"]*)(\\*)(" + MARKER_PREFIX + ")")
+_ESCAPED = re.compile(r"^([" + INVISIBLE + r"]*)\\(\\*" + MARKER_PREFIX + ")")
 
 
 def _per_line(text: str, fn) -> str:

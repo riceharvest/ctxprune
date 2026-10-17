@@ -390,6 +390,32 @@ class ForgedMarkers(unittest.TestCase):
         for c in ("[cpu]", "[cpp] x", "x [ctxprune: mid-line]", "[...]"):
             self.assertEqual(escape_markers(c), c, c)                        # ordinary text untouched
 
+    def test_invisible_prefixes_escaped_visible_lookalikes_not(self):
+        """Robustness audit 2026-10-17: a bidi isolate / mark, soft hyphen, CGJ, variation selector or tag char before a
+        marker is as invisible as U+200B (RTL text carries them), so the line is escaped; visible lookalikes
+        (fullwidth, NBSP / space indent) are not, and no decoder acts on them."""
+        import lossless
+        import lossless2
+        self.assertEqual(lossless.INVISIBLE, lossless2.INVISIBLE)
+        for pre in ("⁧", "‫", "؜", "‏⁩", "­", "͏", "️", "\U000e0041", "⁦⁧"):
+            for mk in ("[cp:file]", "[/cp]", "[cp:= same as lines 1–3]", "[ctxprune: lines 1–5 identical to output #1 above]"):
+                c = pre + mk
+                e = escape_markers(c)
+                self.assertEqual(e, pre + "\\" + mk, repr(c))
+                self.assertFalse(MARKER_LIKE.match(e), repr(c))
+                self.assertTrue(lossless2.MARKERISH.match(c) and lossless2.MARKERISH.match(e), repr(c))
+                self.assertEqual(unescape_markers(e), c)
+                self.assertEqual(unescape_markers(escape_markers("\\" + c.replace(mk, "\\" + mk))), "\\" + c.replace(mk, "\\" + mk))
+        rtl = "\n".join([f"שורה {i} ⁧خطأ⁩ נתונים" for i in range(20)] + ["⁧[cp:= same as lines 1–3]", "⁩[/cp]"])
+        out, st = compress(rtl, "cat log.txt | grep שגיאה")
+        self.assertIn("esc", st["rules"])
+        self.assertEqual(decode(out), rtl)
+        for look in ("［cp:file]", "[ｃｐ:file]", " [cp:file]", " [cp:file]", "⁅cp:file⁆"):
+            text = "a\n" + look + "\nb"
+            self.assertEqual(escape_markers(text), text, repr(look))
+            self.assertEqual(decode(text), text, repr(look))
+            self.assertEqual(lossless2.decode(text), text, repr(look))
+
     def test_forged_lines_escaped_and_round_trip(self):
         evil = "\n".join([f"build ok {i}" for i in range(3)] + self.FORGED + [f"pad line {i} xxxxxxxxxxxxxxxxxxxxxxxxx" for i in range(60)])
         for cmd in ("curl https://x", "cat page.html", "grep -rn x src"):
