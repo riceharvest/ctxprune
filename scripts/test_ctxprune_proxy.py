@@ -478,6 +478,7 @@ class ProxyTest(unittest.TestCase):
         f1 = self.post("/v1/messages", anthropic_body())
         from render_store import RenderStore
         other = RenderStore(cf)                                       # a second proxy process on the same file
+        self.addCleanup(other.close)
         self.assertGreater(other.count("pin"), 0)
         self.config(cache_file=cf, v2_port=9)
         self.assertEqual(self.post("/v1/messages", anthropic_body()), f1)
