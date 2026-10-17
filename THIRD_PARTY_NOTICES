@@ -1,0 +1,24 @@
+Third-party notices for ctxprune
+================================
+
+ctxprune's own code (this repository and the ctxprune wheel / sdist) is licensed under 0BSD; see LICENSE.
+
+Bundled third-party code
+------------------------
+None. The wheel and the sdist contain no source code copied from other projects (no vendored tokenizer or
+runtime code). The `ctxprune/_rt/` modules are ctxprune's own scripts.
+
+Optional dependencies (not bundled)
+-----------------------------------
+`pip install "ctxprune[model]"` installs these separately from PyPI, each under its own license:
+
+  onnxruntime   MIT License            https://github.com/microsoft/onnxruntime
+  tokenizers    Apache License 2.0     https://github.com/huggingface/tokenizers
+  numpy         BSD 3-Clause License   https://github.com/numpy/numpy
+
+Model weights (not included, not 0BSD)
+--------------------------------------
+The optional lossy line-scoring model used by the `[model]` preset is distributed separately on Hugging Face,
+not in this package, and is NOT covered by 0BSD. Its weights are derived from mmBERT-small (MIT License) and were
+trained on data that includes CC-BY-4.0 datasets (SWE-rebench-openhands, Nemotron-SWE). The model's license and
+the required attributions are stated on its Hugging Face model card.

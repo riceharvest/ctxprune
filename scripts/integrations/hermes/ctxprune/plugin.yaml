@@ -1,0 +1,8 @@
+name: ctxprune
+version: "0.3.0"
+description: Compress big tool outputs (lossless rules + ctxprune v2 line model) before they reach the model, and dedup repeated tool output per request
+provides_hooks:
+  - transform_terminal_output
+  - transform_tool_result
+provides_middleware:
+  - llm_request

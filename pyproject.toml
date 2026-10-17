@@ -1,0 +1,101 @@
+[project]
+name = "ctxprune"
+version = "0.3.0"
+description = "Lossless compression of agent tool outputs for Claude Code, Hermes, Pi, OpenCode, dsh and Codex"
+readme = "PACKAGE.md"
+# 0BSD (public-domain equivalent, OSI approved). The optional [model] weights are NOT covered: see THIRD_PARTY_NOTICES.
+license = "0BSD"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
+requires-python = ">=3.9"
+keywords = ["claude-code", "codex", "opencode", "hermes", "llm", "context-compression", "agents", "tool-output"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Text Processing",
+]
+# the default `safe` preset (lossless + dedup) is standard library only
+dependencies = []
+
+[project.optional-dependencies]
+# the `model` preset: `ctxprune serve` scores lines with the v2 ONNX model (tokenizers, never transformers)
+model = ["onnxruntime>=1.18", "tokenizers>=0.20", "numpy"]
+
+[project.scripts]
+ctxprune = "ctxprune.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/riceharvest/ctxprune"
+
+[build-system]
+requires = ["hatchling>=1.27"]   # PEP 639 license expression / license-files
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctxprune"]
+
+# The runtime is the research tree's scripts/, vendored UNCHANGED as ctxprune/_rt/ (keep this list in sync with
+# glue.RUNTIME_MODULES; `ctxprune doctor` fails on a missing one). Never edit copies: edit scripts/ and rebuild.
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/ctxprune_core.py" = "ctxprune/_rt/ctxprune_core.py"
+"scripts/ctxprune_compress.py" = "ctxprune/_rt/ctxprune_compress.py"
+"scripts/lossless.py" = "ctxprune/_rt/lossless.py"
+"scripts/lossless2.py" = "ctxprune/_rt/lossless2.py"
+"scripts/dedup.py" = "ctxprune/_rt/dedup.py"
+"scripts/recover.py" = "ctxprune/_rt/recover.py"
+"scripts/view_safe.py" = "ctxprune/_rt/view_safe.py"
+"scripts/lossless_hook.py" = "ctxprune/_rt/lossless_hook.py"
+"scripts/v2_hook.py" = "ctxprune/_rt/v2_hook.py"
+"scripts/ctxprune_proxy.py" = "ctxprune/_rt/ctxprune_proxy.py"
+"scripts/ctxprune_note.py" = "ctxprune/_rt/ctxprune_note.py"
+"scripts/v2_server.py" = "ctxprune/_rt/v2_server.py"
+"scripts/methods.py" = "ctxprune/_rt/methods.py"
+"scripts/export_v2_onnx.py" = "ctxprune/_rt/export_v2_onnx.py"
+"scripts/line_encode.py" = "ctxprune/_rt/line_encode.py"
+"scripts/emitted.py" = "ctxprune/_rt/emitted.py"
+"scripts/spill.py" = "ctxprune/_rt/spill.py"
+"scripts/read_trim.py" = "ctxprune/_rt/read_trim.py"
+"scripts/integrations/hermes/ctxprune/__init__.py" = "ctxprune/_rt/integrations/hermes/ctxprune/__init__.py"
+"scripts/integrations/hermes/ctxprune/plugin.yaml" = "ctxprune/_rt/integrations/hermes/ctxprune/plugin.yaml"
+"scripts/integrations/pi/ctxprune.ts" = "ctxprune/_rt/integrations/pi/ctxprune.ts"
+"scripts/integrations/opencode/ctxprune.js" = "ctxprune/_rt/integrations/opencode/ctxprune.js"
+"scripts/integrations/dsh/ctxprune.mjs" = "ctxprune/_rt/integrations/dsh/ctxprune.mjs"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ctxprune",
+    "tests/packaging",
+    "PACKAGE.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES",
+    "scripts/ctxprune_core.py",
+    "scripts/ctxprune_compress.py",
+    "scripts/lossless.py",
+    "scripts/lossless2.py",
+    "scripts/dedup.py",
+    "scripts/recover.py",
+    "scripts/view_safe.py",
+    "scripts/lossless_hook.py",
+    "scripts/v2_hook.py",
+    "scripts/ctxprune_proxy.py",
+    "scripts/ctxprune_note.py",
+    "scripts/v2_server.py",
+    "scripts/methods.py",
+    "scripts/export_v2_onnx.py",
+    "scripts/line_encode.py",
+    "scripts/emitted.py",
+    "scripts/spill.py",
+    "scripts/read_trim.py",
+    "scripts/integrations/hermes/ctxprune/__init__.py",
+    "scripts/integrations/hermes/ctxprune/plugin.yaml",
+    "scripts/integrations/pi/ctxprune.ts",
+    "scripts/integrations/opencode/ctxprune.js",
+    "scripts/integrations/dsh/ctxprune.mjs",
+]
