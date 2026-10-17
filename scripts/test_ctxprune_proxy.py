@@ -173,6 +173,7 @@ class ProxyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(lambda: cp.STORE.close())   # runs before the rmtree: Windows can't delete an open sqlite file
         self.up = serve(Upstream, "bodies")
         self.addCleanup(stop, self.up)
         self.v2 = serve(FakeV2, "calls")
