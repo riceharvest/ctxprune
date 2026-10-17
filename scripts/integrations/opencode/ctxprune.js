@@ -12,9 +12,12 @@
 // repeated output or run of lines becomes `[ctxprune: lines a–b identical to output #k above (`cmd`)]`, pointing at
 // an earlier result IN THAT REQUEST); the rewrite replaces the part objects of this call's message list only (OpenCode
 // reloads the list from storage for every step). Deterministic in the request prefix (prompt cache safe). read /
-// edit / write / patch / todo outputs are counted but never rewritten. Opt-in: only with CTXPRUNE_DEDUP=1 (Qwen3.8 comprehension probe); CTXPRUNE_OFF=1: off.
+// edit / write / patch / todo outputs are counted but never rewritten. Opt-in: only with CTXPRUNE_DEDUP=1 (Qwen3.8 comprehension probe); CTXPRUNE_OFF=1: off for new results (results
+// already sent keep their pinned text: off()).
 import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 const SKIP = /^(read|edit|write|multiedit|patch|apply_patch|todowrite|todoread)$/i;
 const CLI = process.env.CTXPRUNE_CLI || `${homedir()}/ctxprune-v2/scripts/ctxprune_compress.py`;
@@ -79,7 +82,7 @@ function standIn(tool, a) {
   try { return `${tool} ${JSON.stringify(a)}`.slice(0, 500); } catch (e) { return tool; }
 }
 
-function contextDedup(events) {
+function contextDedup(events, seed) {
   return new Promise((resolve) => {
     try {
       const child = execFile(PY, [CLI, "--context=opencode"], {
@@ -95,11 +98,25 @@ function contextDedup(events) {
         }
       });
       child.stdin.on("error", () => {});
-      child.stdin.end(JSON.stringify({ events }));
+      child.stdin.end(JSON.stringify({ events, seed }));
     } catch (e) {
       resolve({});
     }
   });
+}
+
+// Dedup is opt-in. With dedup off or CTXPRUNE_OFF=1 the CLI still runs while first-render pins exist
+// (<state>/context-store.sqlite): results already sent keep their deduped text and new ones go out unchanged, so a
+// toggle never rewrites history the provider has cached (ctxprune_compress.context).
+function off() {
+  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") &&
+    ["1", "true", "yes", "on"].includes((process.env.CTXPRUNE_DEDUP || "").toLowerCase());
+  if (on) return false;
+  try {
+    return !existsSync(join(process.env.CTXPRUNE_STATE || join(homedir(), ".cache", "ctxprune"), "context-store.sqlite"));
+  } catch (e) {
+    return true;
+  }
 }
 
 const CLEARED = "[Old tool result content cleared]";   // what OpenCode sends for a pruned (compacted) tool output
@@ -139,10 +156,13 @@ export const CtxPrune = async () => {
     "experimental.chat.messages.transform": async (_input, output) => {
       try {
         const msgs = output && Array.isArray(output.messages) ? output.messages : null;
-        if (!msgs || ["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") || !["1", "true", "yes", "on"].includes((process.env.CTXPRUNE_DEDUP || "").toLowerCase())) return;   // dedup is opt-in
+        if (!msgs || off()) return;
         const { events, where } = contextEvents(msgs);
         if (events.filter((e) => e.t === "result").length < 2) return;
-        const out = await contextDedup(events);
+        const first = msgs.find((m) => m && m.info && m.info.role === "user");   // first-render pins: per conversation
+        const seed = first && Array.isArray(first.parts)
+          ? JSON.stringify(first.parts.filter((p) => p && p.type === "text").map((p) => p.text)) : null;
+        const out = await contextDedup(events, seed);
         for (const [k, text] of Object.entries(out)) {
           const w = where[k];
           if (!w || typeof text !== "string") continue;

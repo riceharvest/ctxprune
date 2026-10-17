@@ -62,6 +62,7 @@ packages = ["src/ctxprune"]
 "scripts/emitted.py" = "ctxprune/_rt/emitted.py"
 "scripts/spill.py" = "ctxprune/_rt/spill.py"
 "scripts/read_trim.py" = "ctxprune/_rt/read_trim.py"
+"scripts/render_store.py" = "ctxprune/_rt/render_store.py"
 "scripts/integrations/hermes/ctxprune/__init__.py" = "ctxprune/_rt/integrations/hermes/ctxprune/__init__.py"
 "scripts/integrations/hermes/ctxprune/plugin.yaml" = "ctxprune/_rt/integrations/hermes/ctxprune/plugin.yaml"
 "scripts/integrations/pi/ctxprune.ts" = "ctxprune/_rt/integrations/pi/ctxprune.ts"
@@ -96,6 +97,7 @@ include = [
     "scripts/emitted.py",
     "scripts/spill.py",
     "scripts/read_trim.py",
+    "scripts/render_store.py",
     "scripts/integrations/hermes/ctxprune/__init__.py",
     "scripts/integrations/hermes/ctxprune/plugin.yaml",
     "scripts/integrations/pi/ctxprune.ts",

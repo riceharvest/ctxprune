@@ -339,7 +339,7 @@ class ProxyTest(unittest.TestCase):
         f3 = json.loads(self.post("/v1/messages", turn2))
         self.assertEqual(f3, f2)
         stats = json.loads(OPENER.open(self.base + "/ctxprune/stats", timeout=5).read())
-        self.assertGreaterEqual(stats["cache_hits"], 8)
+        self.assertGreaterEqual(stats["cache_hits"] + stats["pinned_results"], 8)
         self.assertEqual(stats["model_calls"], 3)
 
     def test_fail_open_result_is_canonical(self):
@@ -365,6 +365,124 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.post("/v1/responses", responses_body()), b1)
 
     # ---------------------------------------------------------------- pass-through, fail open
+
+    # ---------------------------------------------------------------- first-render pins (upgrade / toggle stability)
+
+    def grown(self, body, k=9, text=None):
+        """The next turn of an anthropic_body() conversation: one more Bash call and its result."""
+        b = copy.deepcopy(body)
+        b["messages"] += [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{k}", "name": "Bash",
+                                                              "input": {"command": f"{CMD} lib{k}"}}]},
+                          {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{k}",
+                                                        "content": text or GREP.replace("User", f"U{k}")}]}]
+        return b
+
+    def test_upgrade_keeps_sent_bytes(self):
+        """A restart on new code (new VERSION, new lossless output, new note text) serves every result already sent
+        with its first bytes; only new results and new conversations see the new code."""
+        cf = os.path.join(self.tmp.name, "store.sqlite")
+        self.config(cache_file=cf, note="on")
+        t1 = anthropic_body()
+        f1 = json.loads(self.post("/v1/messages", t1))
+        from ctxprune_core import process as real
+        new_note = "NEW NOTE TEXT"
+
+        def upgraded(text, *a, **kw):
+            out, rec = real(text, *a, **kw)
+            return out + "\n[upgraded]", rec
+        with mock.patch.object(cp, "VERSION", "proxy-99"), mock.patch("ctxprune_core.process", upgraded), \
+                mock.patch("ctxprune_note.NOTES", {"on": new_note, "min": new_note, "off": None}):
+            self.config(cache_file=cf, note="on")                     # restart on the new version
+            self.kill_v2()                                            # (and the model is gone, too)
+            f2 = json.loads(self.post("/v1/messages", self.grown(t1)))
+            self.assertEqual(f2["messages"][:3], f1["messages"])      # every old result: byte-identical
+            self.assertEqual(f2["system"], f1["system"])              # the conversation keeps its note
+            self.assertTrue(f2["messages"][4]["content"][0]["content"].endswith("[upgraded]"))   # new: new code
+            other = anthropic_body()
+            other["messages"][0]["content"] = "a new conversation"
+            f3 = json.loads(self.post("/v1/messages", other))
+            self.assertTrue(f3["messages"][2]["content"][0]["content"].endswith("[upgraded]"))
+            self.assertEqual(f3["system"], "sys\n\n" + new_note)
+
+    def test_settings_toggle_new_outputs_only(self):
+        """preset / model / dedup / paths changes mid-conversation reach new results only."""
+        t1 = anthropic_body()
+        f1 = json.loads(self.post("/v1/messages", t1))
+        self.assertIn("[fake v2 call", f1["messages"][2]["content"][0]["content"])
+        cp.Cfg.no_model, cp.Cfg.dedup = True, True                    # runtime switches (settings re-resolve)
+        t2 = self.grown(t1)
+        f2 = json.loads(self.post("/v1/messages", t2))
+        self.assertEqual(f2["messages"][:3], f1["messages"])
+        self.assertNotIn("[fake v2", f2["messages"][4]["content"][0]["content"])
+        cp.Cfg.no_model, cp.Cfg.dedup = False, False
+        f3 = json.loads(self.post("/v1/messages", self.grown(t2, 10)))
+        self.assertEqual(f3["messages"][:5], f2["messages"])
+        self.assertIn("[fake v2", f3["messages"][6]["content"][0]["content"])
+
+    def test_history_edit_rerenders_after_it_only(self):
+        """A result changed by the harness (compaction stub) re-keys everything after it; the prefix before it keeps
+        its pins. Only that part was a provider-cache miss anyway."""
+        t2 = self.grown(anthropic_body())
+        f1 = json.loads(self.post("/v1/messages", t2))
+        cp.Cfg.no_model = True
+        t2b = copy.deepcopy(t2)
+        t2b["messages"][2]["content"][2]["content"] = "[old result cleared]"
+        f2 = json.loads(self.post("/v1/messages", t2b))
+        self.assertEqual(f2["messages"][2]["content"][:2], f1["messages"][2]["content"][:2])
+        self.assertNotIn("[fake v2", f2["messages"][4]["content"][0]["content"])   # after the edit: current code
+
+    def test_legacy_jsonl_cache_imported(self):
+        """--cache-file X.jsonl (proxy-3): imported into X.sqlite, so results the old proxy sent keep their bytes."""
+        cf = os.path.join(self.tmp.name, "cache.jsonl")
+        self.config(cache_file=cf)
+        k = cp.cache_key("Bash", json.dumps({"command": CMD}, ensure_ascii=False, sort_keys=True), GREP, False)
+        with open(cf, "w") as f:
+            f.write(json.dumps({"k": k, "t": "what proxy-3 sent"}) + "\n" + json.dumps({"k": k, "t": "later"}) + "\n")
+        self.config(cache_file=cf)
+        self.assertEqual(cp.STORE.path, os.path.join(self.tmp.name, "cache.sqlite"))
+        f = json.loads(self.post("/v1/messages", anthropic_body()))
+        self.assertEqual(f["messages"][2]["content"][0]["content"], "what proxy-3 sent")
+        self.assertTrue(os.path.exists(cf))                           # left in place
+
+    def test_rerender_flag(self):
+        t1 = anthropic_body()
+        f1 = json.loads(self.post("/v1/messages", t1))
+        cp.Cfg.no_model, cp.Cfg.rerender = True, True                 # explicit: re-render everything once
+        f2 = json.loads(self.post("/v1/messages", t1))
+        self.assertNotEqual(f2, f1)
+        self.assertNotIn("[fake v2", json.dumps(f2))
+        cp.Cfg.no_model, cp.Cfg.rerender = False, False               # and the new bytes are the pins now
+        self.assertEqual(json.loads(self.post("/v1/messages", t1)), f2)
+
+    def test_per_result_fail_open_keeps_other_pins(self):
+        t1 = anthropic_body()
+        f1 = json.loads(self.post("/v1/messages", t1))
+        boom = GREP.replace("User", "Boom")
+        real = cp._process
+
+        def flaky(text, slot):
+            if "Boom" in text:
+                raise RuntimeError("bug in new code")
+            return real(text, slot)
+        with mock.patch.object(cp, "_process", flaky):
+            f2 = json.loads(self.post("/v1/messages", self.grown(t1, text=boom)))
+        self.assertEqual(f2["messages"][:3], f1["messages"])          # old results: still their pins
+        self.assertEqual(f2["messages"][4]["content"][0]["content"], boom)   # the failing one: raw ...
+        f3 = json.loads(self.post("/v1/messages", self.grown(t1, text=boom)))
+        self.assertEqual(f3, f2)                                      # ... and raw it stays
+
+    def test_store_bounded_and_shared(self):
+        cf = os.path.join(self.tmp.name, "store.sqlite")
+        self.config(cache_file=cf)
+        f1 = self.post("/v1/messages", anthropic_body())
+        from render_store import RenderStore
+        other = RenderStore(cf)                                       # a second proxy process on the same file
+        self.assertGreater(other.count("pin"), 0)
+        self.config(cache_file=cf, v2_port=9)
+        self.assertEqual(self.post("/v1/messages", anthropic_body()), f1)
+        st = json.loads(OPENER.open(self.base + "/ctxprune/stats", timeout=5).read())
+        self.assertEqual(st["store"], cf)
+        self.assertGreater(st["pin_entries"], 0)
 
     def test_v2_down_lossless_only(self):
         self.config(v2_port=9)
@@ -504,23 +622,50 @@ class ProxyTest(unittest.TestCase):
     # ---------------------------------------------------------------- live canary findings 0-2
 
     def test_kill_switch_env_and_file(self):
+        """soft OFF (OFF file / CTXPRUNE_OFF=1): new results and new conversations go out raw and STAY raw; results
+        already sent keep their bytes. hard OFF (file says `hard`, CTXPRUNE_OFF=hard): pure pass-through."""
         self.config(note="on", dedup=True)
         raw = json.dumps(anthropic_body()).encode()
         off_file = os.path.join(self.tmp.name, "OFF")
         cp.Cfg.off_file = off_file
-        open(off_file, "w").close()                                   # runtime toggle: pure pass-through, no note
-        self.assertEqual(self.post("/v1/messages", raw=raw), raw)
+        open(off_file, "w").close()                                   # runtime toggle: soft
+        self.assertEqual(self.post("/v1/messages", raw=raw), raw)     # a new conversation: raw, no note
         st = json.loads(OPENER.open(self.base + "/ctxprune/stats", timeout=5).read())
-        self.assertTrue(st["off"])
+        self.assertEqual(st["off"], "soft")
         os.remove(off_file)
-        on = self.post("/v1/messages", raw=raw)
-        self.assertNotEqual(on, raw)
-        self.assertIn(cp.Cfg.note, json.loads(on)["system"])
-        os.environ["CTXPRUNE_OFF"] = "1"                               # env switch
+        self.assertEqual(self.post("/v1/messages", raw=raw), raw)     # lifted: that conversation stays raw ...
+        other = anthropic_body()
+        other["messages"][0]["content"] = "find User, again"
+        on = json.loads(self.post("/v1/messages", other))             # ... a new one is compressed, with the note
+        self.assertIn(cp.Cfg.note, on["system"])
+        self.assertIn("[fake v2 call", on["messages"][2]["content"][0]["content"])
+        open(off_file, "w").close()                                   # soft OFF again: old bytes kept, note kept
+        self.assertEqual(json.loads(self.post("/v1/messages", other)), on)
+        grown = copy.deepcopy(other)
+        grown["messages"] += [{"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "Bash",
+                                                                  "input": {"command": CMD + " lib"}}]},
+                              {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t9",
+                                                            "content": GREP.replace("User", "Usr")}]}]
+        g = json.loads(self.post("/v1/messages", grown))
+        self.assertEqual(g["messages"][:3], on["messages"])
+        self.assertEqual(g["messages"][4]["content"][0]["content"], GREP.replace("User", "Usr"))   # new: raw
+        os.remove(off_file)
+        self.assertEqual(json.loads(self.post("/v1/messages", grown)), g)   # and raw it stays
+        with open(off_file, "w") as f:
+            f.write("hard\n")
+        self.assertEqual(self.post("/v1/messages", raw=json.dumps(other).encode()), json.dumps(other).encode())
+        self.assertEqual(json.loads(OPENER.open(self.base + "/ctxprune/stats", timeout=5).read())["off"], "hard")
+        os.remove(off_file)
+        os.environ["CTXPRUNE_OFF"] = "1"                               # env switch (soft)
         try:
             self.assertEqual(self.post("/v1/messages", raw=raw), raw)
+            self.assertEqual(json.loads(self.post("/v1/messages", other)), on)
+            cp.Cfg.rerender = True                                     # + CTXPRUNE_RERENDER: all back to raw ...
+            self.assertEqual(self.post("/v1/messages", raw=json.dumps(other).encode()), json.dumps(other).encode())
         finally:
             os.environ.pop("CTXPRUNE_OFF")
+            cp.Cfg.rerender = False
+        self.assertEqual(self.post("/v1/messages", raw=json.dumps(other).encode()), json.dumps(other).encode())   # ... for good
 
     def test_native_output_forwarded_untouched(self):
         from emitted import record
@@ -540,8 +685,11 @@ class ProxyTest(unittest.TestCase):
         f = json.loads(self.post("/v1/chat/completions", body))["messages"]
         self.assertNotEqual(f[1]["content"], hooked)                     # not recorded: processed again (escaped)
         self.assertIn("\\\\[ctxprune: kept", f[1]["content"])
+        f_old = f
         record(hooked)
-        f = json.loads(self.post("/v1/chat/completions", body))["messages"]
+        self.assertEqual(json.loads(self.post("/v1/chat/completions", body))["messages"], f_old)   # already sent: pinned
+        body["messages"].insert(0, {"role": "user", "content": "another session"})
+        f = json.loads(self.post("/v1/chat/completions", body))["messages"][1:]
         self.assertEqual(f[1]["content"], hooked)                        # recorded: forwarded as the hook wrote it
         self.assertIn("\\[ctxprune: kept", f[2]["content"])              # a raw forged line is still escaped
         self.assertFalse(any(ln.startswith("[ctxprune: kept") for ln in f[2]["content"].split("\n")))

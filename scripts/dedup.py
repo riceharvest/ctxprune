@@ -869,11 +869,27 @@ def _args(raw):
     return raw if isinstance(raw, dict) else {}
 
 
-def context_dedup(events: list, harness: str = "", check: bool = False, **kw) -> tuple[dict, dict]:
+def _chain(prev: str, ev) -> str:
+    import hashlib
+    return hashlib.sha256(prev.encode() + json.dumps(ev, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+                                                     default=str).encode()).hexdigest()
+
+
+def context_dedup(events: list, harness: str = "", check: bool = False, memo=None, pin_only: bool = False,
+                  rerender: bool = False, ver: str = "", seed=None, **kw) -> tuple[dict, dict]:
     """Dedup one request's tool results against the earlier ones IN THE SAME REQUEST (see the section comment).
     -> ({event index: new text for that result}, stats{results, fired, chars_before, chars_saved, inverse_fail}).
     Deterministic in the events; a result's rewrite depends only on the events before it. check=True verifies
-    expand() == the original for every rewritten result (tests, measurement). Never raises: on error, no rewrites."""
+    expand() == the original for every rewritten result (tests, measurement). Never raises: on error, no rewrites.
+
+    memo (render_store.RenderStore, table "pin"): first-render pins. Each result's key chains the harness and every
+    earlier call (name, args) and result (name, ORIGINAL text, rewritable flag) of the request, so a resent history
+    gets the same keys: a pinned result gets exactly the text it was first sent with (an upgrade, a changed rule or
+    threshold can't touch it), and only new results are deduped by the current code. pin_only (dedup off or
+    CTXPRUNE_OFF=1 after dedup was on): pinned results keep their text, new ones go out unchanged and, in a
+    conversation that has pins, are pinned unchanged (so turning dedup back on doesn't rewrite them). rerender:
+    pins ignored and overwritten (explicit full re-render; with pin_only: everything back to the original). seed (any
+    JSON: the first user message ...) starts the chain, so conversations that open with the same tool output differ."""
     stats = {"results": 0, "fired": 0, "chars_before": 0, "chars_saved": 0, "inverse_fail": 0}
     try:
         skip = PLUGIN_NO_DEDUP.get(harness, _NO_DEDUP_ANY)
@@ -881,12 +897,16 @@ def context_dedup(events: list, harness: str = "", check: bool = False, **kw) ->
         s = DedupSession(**kw)
         calls: dict = {}
         out: dict = {}
+        chain = _chain("ctxprune-context-1", [harness, seed]) if memo is not None else ""
+        puts, pinned = [], 0
         for i, ev in enumerate(events):
             if not isinstance(ev, dict):
                 continue
             if ev.get("t") == "call":
                 name, args = str(ev.get("name") or ""), _args(ev.get("args"))
                 calls[str(ev.get("id"))] = (name, args)
+                if memo is not None:
+                    chain = _chain(chain, ["c", name, args])
                 for lab, t in plugin_inputs(name, args):
                     s.register_input(t, lab)
                 continue
@@ -900,7 +920,21 @@ def context_dedup(events: list, harness: str = "", check: bool = False, **kw) ->
             new_view = view
             stats["results"] += 1
             stats["chars_before"] += len(text)
-            if ev.get("dedup", True) and not skip.match(name) and len(view) >= s.min_len:
+            key = None
+            if memo is not None:
+                key = chain = _chain(chain, ["r", name, text, bool(ev.get("dedup", True))])
+                hit, val = (False, None) if rerender else memo.get("pin", key)
+                if hit:
+                    pinned += 1
+                    if isinstance(val, str) and val != text:
+                        out[i] = val
+                        pb = _json_body(val) if js else None
+                        new_view = pb[1] if pb else val
+                        stats["fired"] += 1
+                        stats["chars_saved"] += len(text) - len(val)
+                    s.register(new_view, plugin_label(name, args))
+                    continue
+            if not pin_only and ev.get("dedup", True) and not skip.match(name) and len(view) >= s.min_len:
                 new_view, _ = s.dedup(view)   # (dedup doesn't change s: s is still the state before this result)
                 if new_view != view:
                     new = _json_put(text, body[0], view, new_view) if body else new_view
@@ -912,7 +946,15 @@ def context_dedup(events: list, harness: str = "", check: bool = False, **kw) ->
                         stats["chars_saved"] += len(text) - len(new)
                         if check and expand(new_view, s) != view:
                             stats["inverse_fail"] += 1
+            if key is not None:
+                puts.append((key, out.get(i)))
             s.register(new_view, plugin_label(name, args))
+        # pin_only: only a conversation that already has pins needs its new raw results pinned (dedup on later must
+        # not rewrite them); one that never had dedup gets no entries
+        if memo is not None and (not pin_only or pinned or rerender):
+            for key, val in puts:   # first stored wins: two concurrent requests computing the same new result
+                memo.put("pin", key, val, ver, replace=rerender)   # differ only if their settings did
+        stats["pinned"] = pinned
         return out, stats
     except Exception as e:  # noqa: BLE001 - fail open: send the request as it is
         stats["error"] = repr(e)[:200]

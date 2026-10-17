@@ -454,6 +454,60 @@ class ForgedMarkers(unittest.TestCase):
         self.assertIn("esc", st["rules"])
 
 
+class Determinism(unittest.TestCase):
+    """Same input -> same bytes on every Python (3.9 .. 3.14), OS, locale and hash seed (audit 2026-10-17; the corpus
+    run lives in results/determinism/). These pin the two fixes the corpus + Unicode-probe run found."""
+    NEW = ["\u0870", "\U0001E4D0", "\U00011F04", "\U00010D50", "\U00016D43"]   # letters from Unicode 14, 15, 16
+
+    def test_word_classes_version_stable(self):
+        import lossless2 as l2
+        for c in self.NEW + ["é", "中"]:
+            self.assertTrue(l2._W.match(c) and l2._WORD.match(f"k{c}ey"), c)    # a letter on every Python
+            self.assertTrue(l2.PATHLINE.match(f"./pkg{c}/sub/m{c}_1.txt"), c)
+        for c in ("\u00a0", "\u3000", "\u2028", " "):
+            self.assertFalse(l2._W.match(c) or l2._WORD.match(f"a{c}b"), repr(c))   # whitespace never is
+        for c in self.NEW:
+            paths = "\n".join(f"./pkg{c}/sub/mod{c}_{n}.txt" for n in range(40)) + "\n"
+            out, st = compress(paths, "find . -name '*.txt'")
+            self.assertIn("l2_paths", st["rules"])
+            self.assertEqual(decode(out), paths)
+            rows = json.dumps([{f"k{c}ey": n, "name": f"m{c}{n}", "ok": True} for n in range(30)], ensure_ascii=False)
+            out, st = compress(rows, "")
+            self.assertIn("l2_jsonrows", st["rules"])
+            self.assertIn(f"k{c}ey", out.split("\n")[1])                         # bare key, same on every Python
+            self.assertEqual(decode(out), rows)
+
+    def test_word_classes_linear_time(self):   # fuzz 2026-10-18: overlapping \w | non-ASCII branches backtracked
+        import time
+        import lossless2 as l2
+        line = "./" + ("д" * 60 + "/") * 3 + "x y"
+        t0 = time.perf_counter()
+        for _ in range(20):
+            l2.PATHLINE.match(line)
+        grep = "".join(f"src/модуль_{n % 7}/файл.py:{n}:    значение = {n}\n" for n in range(200)) + "д" * 4000 + ":1\n"
+        compress(grep, "rg -n значение src")
+        self.assertLess(time.perf_counter() - t0, 2.0)
+
+    def test_invisible_and_bidi_chars_exact_and_escaped(self):
+        """_U makes zero-width / bidi / symbol chars word chars in paths and keys: still exact, markers still escaped."""
+        for c in ("\u200b", "\u202e", "\u2060", "→", "…", "😀"):
+            paths = "\n".join(f"./pkg{c}/sub/m{c}_{n}.txt" for n in range(30)) + f"\n{c}[cp:file]\n[/cp]\n"
+            out, _ = compress(paths, "find .")
+            self.assertEqual(decode(out), paths, repr(c))
+            self.assertFalse(any(MARKER_LIKE.match(ln) for ln in out.split("\n")
+                                 if ln.lstrip("\u200b\u202e\u2060").startswith("[cp:file]")), repr(c))
+            rows = json.dumps([{f"k{c}": n, "v": f"[cp:file]{c}"} for n in range(30)], ensure_ascii=False)
+            out, _ = compress(rows, "")
+            self.assertEqual(decode(out), rows, repr(c))
+
+    def test_command_basename_os_independent(self):
+        from lossless import _base, view_kind
+        self.assertEqual(_base("C:\\tools\\cat"), "cat")
+        self.assertEqual(_base("/usr/bin/cat"), "cat")
+        self.assertTrue(view_kind("'C:\\tools\\cat' a.py")[0])   # quoted: shlex keeps the backslashes
+        self.assertTrue(view_kind("/bin/cat a.py")[0])
+
+
 class Stacking(unittest.TestCase):
     """Hook + proxy run compress twice. Corpus (93,942 real outputs): 44 failed decode(pass2) == pass1, all one class
     (a fresh TRUNC_MARK after the escaped first one); 30 json_unescape results cost tokens."""

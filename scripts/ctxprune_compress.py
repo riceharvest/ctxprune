@@ -28,9 +28,12 @@ Usage: python3 ctxprune_compress.py [--command CMD] [--intent TEXT] [--tool NAME
 
 Cross-turn dedup (request time, dedup.context_dedup): the plugins call it on every model REQUEST, with the tool calls
 and results of that request in order (Hermes in-process via context(); Pi `context` / OpenCode messages.transform via
-  python3 ctxprune_compress.py --context HARNESS < {"events": [...]} > {"out": {"<event index>": "<new text>"}}
-). Off with CTXPRUNE_DEDUP=0 or CTXPRUNE_OFF=1 (-> {"out": {}}); fails open the same way. Log record (CTXPRUNE_LOG):
-  {ts, harness, stage: "context", results, fired, before, after, ms}  (counts only)
+  python3 ctxprune_compress.py --context HARNESS < {"events": [...], "seed": ...} > {"out": {"<event index>": "<new text>"}}
+). Off with CTXPRUNE_DEDUP=0 or CTXPRUNE_OFF=1; fails open the same way. Byte stability: what a result was first sent
+as is pinned (<state>/context-store.sqlite, render_store.py) and served again on every later request, across upgrades
+and toggles; off only stops NEW results from being deduped (pinned ones keep their text), CTXPRUNE_RERENDER=1 re-renders
+everything (context()). Log record (CTXPRUNE_LOG):
+  {ts, harness, stage: "context" | "context_pins", results, pinned, fired, before, after, ms}  (counts only)
 """
 
 from __future__ import annotations
@@ -74,6 +77,19 @@ def _log(path: str | None, rec: dict) -> None:
         pass
 
 
+def _argv_utf8(s):
+    """An argv string as the plugins sent it: Node passes UTF-8 bytes, but Python decodes argv with the LOCALE
+    encoding, so under LC_ALL=de_DE.iso88591 / ja_JP.eucjp a non-ASCII command came in as mojibake and changed the
+    output (dedup labels, grep path tokens; determinism audit 2026-10-17). Back to the bytes, then UTF-8. POSIX only
+    (Windows argv is UTF-16 already); identity on a UTF-8 locale."""
+    if not isinstance(s, str) or os.name == "nt":
+        return s
+    try:
+        return os.fsencode(s).decode("utf-8", "surrogateescape")
+    except (UnicodeError, ValueError):
+        return s
+
+
 def run(text: str, command: str | None = None, intent: str | None = None, tool: str | None = None,
         keep: float | None = None, min_chars: int | None = None, port: int | None = None,
         timeout: float | None = None, no_model: bool | None = None, harness: str | None = None,
@@ -101,19 +117,58 @@ def run(text: str, command: str | None = None, intent: str | None = None, tool: 
     return out, rec
 
 
-def context(events: list, harness: str | None = None, log: str | None = None) -> tuple[dict, dict]:
+CONTEXT_VERSION = "context-1"   # metadata on the pins only (render_store: the version that first rendered a result)
+_STORES: dict = {}
+
+
+def context_store_path() -> str:
+    """The first-render pins of the request-time dedup (shared by Hermes in-process and the Pi / OpenCode CLI calls).
+    Pi / OpenCode only start the CLI while dedup is on, or while this file exists (pins to keep serving: with dedup
+    off that is one CLI start per model request until the pins age out, 30 days unseen; then the file is removed)."""
+    return os.path.join(os.environ.get("CTXPRUNE_STATE") or os.path.expanduser("~/.cache/ctxprune"),
+                        "context-store.sqlite")
+
+
+def _context_store(path: str):
+    st = _STORES.get(path)
+    if st is None:
+        from render_store import RenderStore
+        st = _STORES[path] = RenderStore(path)
+    return st
+
+
+def context(events: list, harness: str | None = None, log: str | None = None, seed=None) -> tuple[dict, dict]:
     """Request-time cross-turn dedup for a harness plugin: -> ({event index: new text}, stats). The events are the
-    request's tool calls and results in order (dedup.context_dedup). Never raises; {} when off or on any error."""
+    request's tool calls and results in order (dedup.context_dedup). Never raises; {} when off or on any error.
+    Byte-stable across upgrades and toggles: every result's first rendering is pinned (context_store_path(), keyed by
+    the request prefix), and a result already sent always gets its pinned text. Dedup off / CTXPRUNE_OFF=1 after
+    dedup was on: pinned results keep their text, new ones go out unchanged. CTXPRUNE_RERENDER=1: pins ignored and
+    overwritten (with CTXPRUNE_OFF=1: everything back to the original; one prompt-cache miss per conversation).
+    seed: what identifies the conversation besides its tool calls (the first user message, the system prompt), so
+    two conversations that start with the same tool output don't share pins."""
     t0 = time.perf_counter()
     try:
-        if os.environ.get("CTXPRUNE_OFF", "") in ("1", "true", "yes"):
-            return {}, {"stage": "off"}
         from ctxprune_core import Settings
         harness = harness or os.environ.get("CTXPRUNE_HARNESS") or ""
-        if not Settings.from_env(harness=harness).dedup:
-            return {}, {"stage": "dedup_off"}
+        off = os.environ.get("CTXPRUNE_OFF", "") in ("1", "true", "yes")
+        rerender = os.environ.get("CTXPRUNE_RERENDER", "").strip().lower() in ("1", "true", "yes", "on")
+        dedup = Settings.from_env(harness=harness).dedup
+        path = context_store_path()
+        pin_only = off or not dedup
+        if pin_only and not os.path.exists(path):
+            return {}, {"stage": "off" if off else "dedup_off"}
         from dedup import context_dedup
-        out, st = context_dedup(events, harness)
+        memo = _context_store(path)
+        out, st = context_dedup(events, harness, memo=memo, pin_only=pin_only, rerender=rerender,
+                                ver=CONTEXT_VERSION, seed=seed)
+        if pin_only and memo.db is not None and memo.count("pin") == 0:   # every pin aged out (render_store.evict):
+            memo.close()                                                  # nothing left to keep, so the plugins stop
+            _STORES.pop(path, None)                                       # starting the CLI per request
+            for ext in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + ext)
+                except OSError:
+                    pass
         if out:   # a ctxprune_proxy stacked behind the harness forwards these untouched (emitted.py)
             try:
                 from emitted import record
@@ -122,7 +177,8 @@ def context(events: list, harness: str | None = None, log: str | None = None) ->
             except ImportError:   # a bundle without the registry: dedup still applies
                 pass
         _log(log or os.environ.get("CTXPRUNE_LOG") or None,
-             {"ts": time.time(), "harness": harness, "stage": "context", "results": st.get("results"),
+             {"ts": time.time(), "harness": harness, "stage": "context" if not pin_only else "context_pins",
+              "results": st.get("results"), "pinned": st.get("pinned"),
               "fired": st.get("fired"), "before": st.get("chars_before"),
               "after": (st.get("chars_before") or 0) - (st.get("chars_saved") or 0),
               "ms": round((time.perf_counter() - t0) * 1000, 1), **({"error": st["error"]} if "error" in st else {})})
@@ -132,11 +188,12 @@ def context(events: list, harness: str | None = None, log: str | None = None) ->
 
 
 def main_context(harness: str, log: str | None) -> int:
-    """--context HARNESS: stdin {"events": [...]} -> stdout {"out": {"<index>": text}}; {"out": {}} on any error."""
+    """--context HARNESS: stdin {"events": [...], "seed": any} -> stdout {"out": {"<index>": text}}; {"out": {}} on
+    any error."""
     res: dict = {}
     try:
         req = json.loads(sys.stdin.buffer.read().decode("utf-8", "surrogatepass"))
-        out, _ = context(req.get("events") or [], harness, log)
+        out, _ = context(req.get("events") or [], harness, log, req.get("seed"))
         res = {str(k): v for k, v in out.items()}
     except BaseException:  # noqa: BLE001
         res = {}
@@ -174,6 +231,7 @@ def main() -> int:
         ap.add_argument("--log", default=None)
         ap.add_argument("--input-file", default=None, help="read the text from this file instead of stdin")
         a, _unknown = ap.parse_known_args()   # unknown flags: ignore (fail open, never crash a harness)
+        a.command, a.intent, a.tool, a.target = (_argv_utf8(x) for x in (a.command, a.intent, a.tool, a.target))
         if a.input_file:
             with open(a.input_file, "rb") as f:
                 raw = f.read()

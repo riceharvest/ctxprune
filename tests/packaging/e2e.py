@@ -388,7 +388,16 @@ def main() -> int:
         check(st.get("request_dedup", 0) > 0, f"stats count per-request dedup ({st.get('request_dedup')} chars)")
         r = subprocess.run([py, cli, "--context=pi"], input=json.dumps({"events": evs}), capture_output=True,
                            text=True, env=dict(e.env, CTXPRUNE_OFF="1"))
-        check(json.loads(r.stdout or "{}").get("out") == {}, "plugin --context: CTXPRUNE_OFF=1 -> no rewrites")
+        check(json.loads(r.stdout or "{}").get("out") == outs,
+              "plugin --context: CTXPRUNE_OFF=1 keeps the first-render pins (same bytes, prompt cache intact)")
+        evs2 = [dict(x, text=x["text"].replace("PASSED", "passed")) if x["t"] == "result" else x for x in evs]   # never sent: no pins
+        r = subprocess.run([py, cli, "--context=pi"], input=json.dumps({"events": evs2}), capture_output=True,
+                           text=True, env=dict(e.env, CTXPRUNE_OFF="1"))
+        check(json.loads(r.stdout or "{}").get("out") == {}, "plugin --context: CTXPRUNE_OFF=1 -> no new rewrites")
+        r = subprocess.run([py, cli, "--context=pi"], input=json.dumps({"events": evs}), capture_output=True,
+                           text=True, env=dict(e.env, CTXPRUNE_OFF="1", CTXPRUNE_RERENDER="1"))
+        check(json.loads(r.stdout or "{}").get("out") == {}, "plugin --context: CTXPRUNE_OFF=1 + CTXPRUNE_RERENDER=1 "
+              "-> everything back to the original")
         if a.wheel:
             p = e.run("upgrade", "--spec", os.path.abspath(a.wheel))
             check(p.returncode == 0 and "claude-code:" in p.stdout, f"upgrade --spec wheel + refresh "

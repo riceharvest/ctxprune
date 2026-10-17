@@ -6,9 +6,12 @@ compression arm into the default arm without any sign. run_episode.sh wraps ever
 summarize.py marks a hook arm episode with zero logged calls (or only errors) as invalid.
 
 Usage (settings.json command): python3 hook_wrap.py --log EP/hook.jsonl -- <hook command ...>
-Log line: {ts, rc, ms, tool, keys, before, after, action: updated|passthrough|bad_shape|error|timeout}
+Log line: {ts, rc, ms, tool, id (tool_use_id), keys, before, after, action: updated|passthrough|bad_shape|error|timeout}
           (+ mode for Grep; persisted, persisted_size, ptr_kept for Bash output Claude Code persisted to a file).
-          The text field is `content` for the Grep tool, `stdout` otherwise.
+          The text field is `content` for the Grep tool, `file.content` for Read, `stdout` otherwise.
+          Read (boundary trim, scripts/read_trim.py) also logs path, start / lines (the view as Claude Code made it)
+          and, when updated, start_after / lines_after (the kept view): trimmed prefix = start .. start_after - 1,
+          trimmed suffix = start_after + lines_after .. start + lines - 1.
 Fails open: on any error nothing is printed, so Claude Code keeps the original output.
 """
 
@@ -34,9 +37,19 @@ def main() -> None:
     try:
         data = json.loads(raw)
         rec["tool"] = data.get("tool_name")
+        rec["id"] = str(data.get("tool_use_id") or "")
         resp = data.get("tool_response")
         field = "content" if rec["tool"] == "Grep" else "stdout"
-        if isinstance(resp, dict):
+        if rec["tool"] == "Read" and isinstance(resp, dict) and isinstance(resp.get("file"), dict):
+            fl = resp["file"]
+            ti = data.get("tool_input") or {}
+            rec["keys"] = sorted(resp)
+            rec["path"] = ti.get("file_path") if isinstance(ti, dict) else None
+            rec["before"] = len(fl["content"]) if isinstance(fl.get("content"), str) else None
+            rec["start"] = fl.get("startLine")
+            rec["lines"] = len(fl["content"].split("\n")) if isinstance(fl.get("content"), str) else None
+            resp = None   # the Read branch below decides `updated`
+        elif isinstance(resp, dict):
             rec["keys"] = sorted(resp)                      # evidence for the tool's output schema on this version
             rec["before"] = len(resp.get(field) or "") if isinstance(resp.get(field) or "", str) else None
             if resp.get("persistedOutputPath"):
@@ -67,7 +80,11 @@ def main() -> None:
         else:
             j = json.loads(out)
             upd = (j.get("hookSpecificOutput") or {}).get("updatedToolOutput")
-            if isinstance(upd, dict) and isinstance(upd.get(field), str):
+            uf = upd.get("file") if isinstance(upd, dict) and rec.get("tool") == "Read" else None
+            if isinstance(uf, dict) and isinstance(uf.get("content"), str):   # Read boundary trim
+                rec["action"], rec["after"] = "updated", len(uf["content"])
+                rec["start_after"], rec["lines_after"] = uf.get("startLine"), len(uf["content"].split("\n"))
+            elif isinstance(upd, dict) and isinstance(upd.get(field), str):
                 rec["action"], rec["after"] = "updated", len(upd[field])
                 if isinstance(resp, dict) and resp.get("persistedOutputPath"):
                     rec["ptr_kept"] = "persistedOutputPath" in upd

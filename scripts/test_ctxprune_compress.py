@@ -36,6 +36,29 @@ class Fake(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
 
+class Argv(unittest.TestCase):
+    """The plugins pass --command as UTF-8 argv; under a non-UTF-8 locale Python used to decode it with the locale
+    encoding (mojibake in the dedup label / grep tokens -> other bytes than on a UTF-8 locale)."""
+
+    def test_non_utf8_locale_same_bytes(self):
+        import subprocess
+        loc = next((x for x in ("de_DE.iso88591", "de_DE.ISO-8859-1", "en_US.iso88591", "ja_JP.eucjp")
+                    if subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.count(x)), None)
+        if loc is None or os.name == "nt":
+            self.skipTest("no non-UTF-8 locale installed")
+        cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ctxprune_compress.py")
+        text = "".join(f"caf\u00e9:{n}:    x = {n}\n" for n in range(1, 40))   # a hit path only the command names
+        outs = []
+        for lc in ("C.UTF-8", loc):
+            env = {**os.environ, "LC_ALL": lc, "LANG": lc, "PYTHONUTF8": "0", "CTXPRUNE_OFF": ""}
+            argv = [sys.executable, "-I", cli, "--command=rg -n x caf\u00e9", "--tool=bash", "--no-model"]
+            p = subprocess.run([a.encode("utf-8") for a in argv], input=text.encode(), capture_output=True, env=env)
+            outs.append(p.stdout)
+        self.assertEqual(outs[0], outs[1])
+        self.assertNotEqual(outs[0], text.encode())
+        self.assertEqual(C._argv_utf8("abc"), "abc")
+
+
 class Caps(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

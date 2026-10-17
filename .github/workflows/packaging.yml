@@ -80,6 +80,15 @@ jobs:
       - name: Non-ASCII hook I/O through the installed hook under non-UTF-8 code pages
         run: env -u PYTHONIOENCODING "$BIN/python" tests/packaging/codepage_hook.py
 
+      - name: Determinism corpus (sha256 of every output; compared across the matrix below)
+        run: '"$BIN/python" tests/packaging/determinism.py --out "determinism-${{ matrix.os }}-py${{ matrix.python }}.json"'
+
+      - name: Upload the determinism digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: determinism-${{ matrix.os }}-py${{ matrix.python }}
+          path: determinism-${{ matrix.os }}-py${{ matrix.python }}.json
+
       - name: Install / doctor / uninstall e2e in a throwaway HOME
         run: '"$BIN/python" tests/packaging/e2e.py --ctxprune "$BIN/ctxprune" --wheel dist/*.whl'
 
@@ -89,3 +98,39 @@ jobs:
         with:
           name: ctxprune-dist
           path: dist/
+
+  determinism:
+    name: same bytes on every OS x Python
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: determinism-*
+          merge-multiple: true
+          path: det
+      - name: Compare the digests of all cells
+        shell: python
+        run: |
+          import glob, json, sys
+          cells = {}
+          for f in sorted(glob.glob("det/*.json")):
+              with open(f, encoding="utf-8") as fh:
+                  cells[f[4:-5]] = json.load(fh)
+          for name, c in cells.items():
+              print(f"{c['digest']}  {name}  (python {c['python']}, {c['platform']})")
+          ok = len(cells) == 15
+          if not ok:
+              print(f"expected 15 cells, got {len(cells)}")
+          ref = next(iter(cells.values()), None)
+          for name, c in cells.items():
+              diff = sorted(k for k in set(ref["cases"]) | set(c["cases"]) if ref["cases"].get(k) != c["cases"].get(k))
+              if diff:
+                  ok = False
+                  print(f"DIFFERS {name}: {', '.join(diff[:20])}")
+              if c.get("fails"):
+                  ok = False
+                  print(f"FAILS {name}: {c['fails']}")
+          print("all cells identical" if ok else "determinism check FAILED")
+          sys.exit(0 if ok else 1)

@@ -61,8 +61,16 @@ import json
 import re
 import sys
 
-HIT = re.compile(r"^((?:[\w.@~+-]|/(?!/))*[\w.@~+-][^\s:]*?)([:-])(\d+)\2(.*)$")   # reference only: see _hit_match
-PATHLINE = re.compile(r"^(?:\./|~/|/)?(?:[\w.@+-]+/)+[\w.@+-]+/?$")
+# Word chars for paths / keys: ASCII \w plus ANY non-ASCII non-space char. Plain \w follows each Python's Unicode
+# database (3.9 = Unicode 13 ... 3.14 = Unicode 16), so a letter added in Unicode 14+ was a path char on one Python
+# and not on another (determinism audit 2026-10-17: same input, different bytes on 3.9 vs 3.14). This union is the
+# same set on every version (the White_Space property has not changed since Unicode 6.3). The two branches must stay
+# DISJOINT (ASCII spelled out, not \w): with \w | _U a Cyrillic letter matched both and `(...|...)+` backtracked
+# exponentially on a non-matching line (fuzz: 15 s on a 4 kB grep output).
+_U = r"[^\x00-\x7f\s]"
+_A = "A-Za-z0-9_"
+HIT = re.compile(rf"^((?:[{_A}.@~+-]|{_U}|/(?!/))*(?:[{_A}.@~+-]|{_U})[^\s:]*?)([:-])(\d+)\2(.*)$")   # reference only: see _hit_match
+PATHLINE = re.compile(rf"^(?:\./|~/|/)?(?:(?:[{_A}.@+-]|{_U})+/)+(?:[{_A}.@+-]|{_U})+/?$")
 # Markers (tokenizer study 2026-10-17 §4): one shared prefix `[cp` / `[/cp]`, so the H2 escaper and the note need one
 # pattern. The older `[ctxprune...]` forms still decode (outputs written by earlier versions), each with its own end.
 HB, PB, END = "[cp:file]", "[cp:dir]", "[/cp]"
@@ -123,8 +131,8 @@ def _est_lines(lines: list[str]) -> int:
 
 # ---------------------------------------------------------------- hits
 
-_W = re.compile(r"[\w.@~+-]")
-_APREFIX = re.compile(r"(?:[\w.@~+-]|/(?!/))*")
+_W = re.compile(rf"[{_A}.@~+-]|{_U}")
+_APREFIX = re.compile(rf"(?:[{_A}.@~+-]|{_U}|/(?!/))*")
 _STOP = re.compile(r"[\s:]")
 _SPLIT = re.compile(r"(?=([:-])(\d+)\1)")
 _DIGITS = re.compile(r"\d+")
@@ -602,7 +610,7 @@ def _dec_blockref(lines: list[str]) -> list[str]:
 
 JCFG = [(False, None), (False, (",", ":")), (True, None), (True, (",", ":"))]   # (ensure_ascii, separators)
 JLABEL = ["", "; compact", "; ascii", "; ascii compact"]
-_NAME = r'(?:[\w-]+|"(?:[^"\\\n]|\\.)*")'       # a key as is when it is a word, else as a JSON string
+_NAME = rf'(?:(?:[{_A}-]|{_U})+|"(?:[^"\\\n]|\\.)*")'   # a key as is when it is a word (_WORD), else as a JSON string
 _COL = re.compile(rf"({_NAME})(?:\.({_NAME}))?(\(json\))?")   # key | key.sub (one-level flattened) + (json)
 _COLNC = rf"{_NAME}(?:\.{_NAME})?(?:\(json\))?"
 ROWS_HDR = re.compile(rf"^\[cp:rows #(\d{{1,4}}) TSV ({_COLNC}(?:, {_COLNC})*)"
@@ -622,7 +630,7 @@ def _jload(s: str):
         return None
 
 
-_WORD = re.compile(r"^[\w-]+$")
+_WORD = re.compile(rf"^(?:[{_A}-]|{_U})+$")   # version-stable word (_U)
 
 
 def _nm(key: str) -> str:

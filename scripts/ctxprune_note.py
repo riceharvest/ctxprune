@@ -29,6 +29,14 @@ NOTE = r"Tool output [ctxprune]/[cp:] marks are exact; only omitted lines are mi
 NOTE_MIN = r"[ctxprune]/[cp:] marks are exact; only omitted lines are missing. Line-start \[ means [."
 
 NOTES = {"on": NOTE, "min": NOTE_MIN, "off": None}
+# Every note text any ctxprune version has sent (append the old text here when NOTE / NOTE_MIN change): the proxy pins
+# each conversation's note (it never swaps the text mid-conversation) and treats any of these as "already present".
+NOTE_HISTORY = (
+    NOTE, NOTE_MIN,
+    "Tool outputs: [ctxprune] marks are exact; only [… omitted …] lines are missing. Re-read those lines only if needed.",
+    "Tool outputs: [ctxprune] marks are exact; only [… omitted …] lines are missing. If needed, use the footer's sed.",
+    "[ctxprune] marks are exact; only omitted lines are missing.",
+)
 
 
 def note_for(mode: str | None) -> str | None:

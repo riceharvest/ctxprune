@@ -92,6 +92,12 @@ def _tokens(command: str | None) -> list[str]:
         return command.split()
 
 
+def _base(tok: str) -> str:
+    """Program name of a command token, the same on every OS: os.path.basename is ntpath on Windows (splits on `\\`)
+    and posixpath elsewhere, so `C:\\bin\\cat` was a viewer on one OS only (determinism audit 2026-10-17)."""
+    return re.split(r"[\\/]", tok)[-1]
+
+
 def _pipelines(toks: list[str]) -> list[list[str]]:
     """Program names per pipeline: list operators (&&, ||, ;, &, newline) split pipelines, | splits stages."""
     pipes: list[list[str]] = [[]]
@@ -106,7 +112,7 @@ def _pipelines(toks: list[str]) -> list[list[str]]:
             continue
         if re.match(r"^[A-Za-z_]\w*=", tok) or (after_wrapper and tok.startswith("-")):
             continue
-        name = os.path.basename(tok)
+        name = _base(tok)
         if name in WRAPPERS:
             after_wrapper = True
             continue
@@ -458,9 +464,9 @@ def _first_stage_view(toks: list[str]) -> bool:
         if not stage_start:
             continue
         words = tok.split()
-        if words and (os.path.basename(words[0]).lower() in VIEWERS or os.path.basename(tok).lower() in VIEWERS):
+        if words and (_base(words[0]).lower() in VIEWERS or _base(tok).lower() in VIEWERS):
             return True
-        if os.path.basename(tok) == "git" and _git_view(toks[k + 1:]):
+        if _base(tok) == "git" and _git_view(toks[k + 1:]):
             return True
     return False
 
@@ -471,7 +477,7 @@ def view_kind(command: str | None) -> tuple[bool, bool]:
     toks = _tokens(command)
     pipes = _pipelines(toks)
     first = any(p[0].lower() in VIEWERS for p in pipes) or _first_stage_view(toks)
-    if not first and len(toks) >= 3 and os.path.basename(toks[0]) in SHELLS and toks[1] in ("-c", "-lc", "-ic", "-lic"):
+    if not first and len(toks) >= 3 and _base(toks[0]) in SHELLS and toks[1] in ("-c", "-lc", "-ic", "-lic"):
         first = view_kind(toks[2])[0]   # `bash -lc "<script>"` as one string (Codex shell calls)
     return first, first or any(prog.lower() in VIEWERS for p in pipes for prog in p)
 

@@ -33,7 +33,7 @@ MIN_CLAUDE_CODE = (2, 1, 121)   # updatedToolOutput with the full tool object
 HOOK_MATCHER = "Bash|PowerShell|Grep|mcp__.*"   # PowerShell: Windows Claude Code (lands with lossless-transforms)
 # the scripts the shipping paths import (wheel: ctxprune/_rt; checked by `ctxprune doctor`)
 SAFE_MODULES = ("ctxprune_core", "ctxprune_compress", "lossless", "lossless2", "dedup", "recover", "view_safe",
-                "lossless_hook", "emitted", "spill", "read_trim")   # stdlib only: what the self-contained plugin bundles ship
+                "lossless_hook", "emitted", "spill", "read_trim", "render_store")   # stdlib only: what the self-contained plugin bundles ship
 MODEL_MODULES = ("v2_hook", "v2_server", "methods", "export_v2_onnx", "line_encode")
 RUNTIME_MODULES = SAFE_MODULES + MODEL_MODULES + ("ctxprune_proxy", "ctxprune_note")
 
@@ -268,10 +268,10 @@ def _patch_context() -> None:
     if orig is None or getattr(orig, "_ctxprune_glue", False):
         return
 
-    def context(events, harness=None, log=None):
-        if off():
-            return {}, {"stage": "off"}
-        out, st = orig(events, harness, log)
+    def context(events, harness=None, log=None, *a, **kw):
+        # no kill-switch short cut here: with CTXPRUNE_OFF=1 the runtime still serves the first-render pins of
+        # results already sent (byte-stable prompt cache) and leaves new ones unchanged; it reads the env itself
+        out, st = orig(events, harness, log, *a, **kw)
         try:
             saved = int((st or {}).get("chars_saved") or 0)
             if out and saved > 0:

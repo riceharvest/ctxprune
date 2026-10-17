@@ -24,13 +24,28 @@ Not touched (decisions):
   - file read/edit/write tools (Read, read_file, view, edit, write, apply_patch, str_replace_editor, ...; --skip-tools
     regex): the agent edits against those exact bytes (same rule as the hook, PLAN §3.0). Images, non-tool messages.
   - error results (Anthropic is_error: true): kept, lossless stage only (never the model; PLAN §2.65 D6).
-Cache safety (PLAN §2.65 D5): harnesses resend the whole history every turn, so each tool result must map to the same
-bytes on every turn. Content-addressed cache: key = sha256(version, settings, tool name, args, is_error, original text) ->
-compressed text, in memory and (--cache-file) appended to a JSONL that is reloaded at startup. The first bytes
-forwarded are canonical: a fail-open (model down) result is cached too, so a model coming back later can't change
-an old result. Intent is not in the key (a harness trimming old assistant text can't change old bytes). Every result
-is treated the same regardless of its position (no "keep the newest N raw"). For a cold cache (restart without
---cache-file) run v2_server with --round so recomputation is deterministic.
+Cache safety (PLAN §2.65 D5): harnesses resend the whole history every turn, and a cached prompt prefix is re-read
+~85 times, so a tool result already sent must map to the same bytes on every later turn, across restarts, upgrades
+and setting changes. Two layers, one sqlite file (render_store.py; default <state>/proxy-store.sqlite, --cache-file):
+  pins     key = chain over the session seed (system prompt + first message as received) and the original (tool,
+           args, is_error, content) of every earlier result in the request -> the bytes this result was first sent
+           with (after dedup, view-safe, native checks: the whole per-result decision, _serve). The version that
+           rendered it is metadata, not key: an upgrade (new markers, rules, thresholds, SKIP_TOOLS), a preset / dedup
+           / paths / note change, OFF, a model coming back or a pruned emitted registry never touch a pinned result.
+           New results and new conversations get the current code and settings. A history edit (compaction, a pruned
+           result) re-keys everything after it: the provider cache misses there anyway, so that costs nothing extra.
+  content  sha256(VERSION, settings, tool, args, is_error, guard bit, text) -> compressed text: the compute cache for
+           unpinned results (parallel sessions, identical outputs: one model call). A fail-open (model down) result
+           is cached too. A legacy proxy-3 JSONL --cache-file is imported into it once, so the upgrade to pins keeps
+           the bytes the old proxy sent.
+Bounded: an in-memory LRU over sqlite (WAL, shared by processes, first stored wins); entries unseen for 30 days go,
+and over 512 MB the least recently seen go, never one seen within 3 days (render_store.py). Intent is not in any key
+(a harness trimming old assistant text can't change old bytes). --rerender / CTXPRUNE_RERENDER=1: pins ignored and
+overwritten (explicit full re-render: one prompt-cache miss per conversation). An error while rendering ONE result
+sends that result raw (pinned raw); the others keep their pins. For a cold store (deleted, or a request whose
+history was never seen) run v2_server with --round so recomputation is deterministic.
+Remaining one-time misses: hard OFF and lifting it; --rerender; a store that was deleted / evicted (unseen >= 3 days)
+with a changed version or settings; a request that fails as a whole (unparseable body: forwarded as is).
 
 Note (--note on|min, default off): appends the constant ctxprune_note.NOTE / NOTE_MIN to the system prompt of every
 rewritten-API request, including requests with no tool result yet (so turn 1 and turn N have the same prefix):
@@ -41,7 +56,9 @@ rewritten-API request, including requests with no tool result yet (so turn 1 and
                 a system message inserted at index 0.
   /responses    `instructions` -> + "\n\n" + note; absent -> note (instructions are not carried over by
                 previous_response_id, so every request gets it).
-Skipped when the note text is already there (e.g. the Claude Code SessionStart hook also runs).
+Skipped when the note text (or any earlier version's, ctxprune_note.NOTE_HISTORY) is already there (e.g. the Claude
+Code SessionStart hook also runs). Pinned per conversation (session_note): the note text and on/off a conversation
+started with stay for its whole life; a new NOTE text or --note change reaches new conversations only.
 
 Hermes read_file (--view-safe on, default): a skipped `read_file` result that is Hermes' JSON wrapper
 ({"content": "N|code...", "total_lines": ...}) gets view_safe.wrapper_unescape: the content field unescaped under a
@@ -55,9 +72,13 @@ first and receive the harness's API key; there, start the proxy before the harne
 (`ss -ltnp 'sport = :8787'` shows this PID), or pick a private port. (A Unix-socket / token-file mode needs harness
 support for socket base URLs and is not built; the rented boxes are single-user.)
 
-Kill switch (live canary finding 0): CTXPRUNE_OFF=1 in the proxy's env, or the file <state>/OFF (--off-file; checked
-per request, so `touch ~/.cache/ctxprune/OFF` disables a running proxy and `rm` re-enables it) -> pure pass-through:
-original bytes, no note. Stacked behind a native integration (canary finding 2): a tool result whose exact bytes the
+Kill switch (live canary finding 0), checked per request (off_mode): CTXPRUNE_OFF=1 in the proxy's env, or the file
+<state>/OFF (--off-file; `touch ~/.cache/ctxprune/OFF` / `rm` it on a running proxy) -> soft OFF: results already sent
+keep their pinned bytes and conversations their note, new results go out raw and are pinned raw (they stay raw when
+OFF is lifted): no prompt-cache miss either way. With CTXPRUNE_RERENDER=1 too: everything goes back to the original
+bytes and is pinned raw (one miss per conversation). `echo hard > <state>/OFF`: hard OFF, pure pass-through with
+original bytes, no note and no store at all (the escape hatch if the proxy itself misbehaves): one miss per
+conversation now and one when it is lifted (the pins come back). Stacked behind a native integration (canary finding 2): a tool result whose exact bytes the
 hook / plugin recorded in emitted.py's registry (same --state / CTXPRUNE_STATE) is forwarded untouched, so its real
 markers are not escaped as if the tool had printed them; anything else is processed (and escaped) as usual.
 JSON wrappers (canary finding 1): a JSON object around multi-line text is unwrapped, the full pipeline runs on the
@@ -67,7 +88,8 @@ Endpoints: GET /ctxprune/stats (counts, chars, cache hits; answered locally). Lo
 request {ts, api, path, stream, results:[{id, tool, before, after, stage, cache, ms}], bytes_in, bytes_out, ms}.
 
 Usage: python3 ctxprune_proxy.py --upstream https://api.openai.com [--port 8787] [--keep 0.5] [--min-chars 6000]
-         [--v2-port 8765] [--no-model] [--note on|min|off] [--cache-file ~/.cache/ctxprune/proxy-cache.jsonl] [--log proxy.jsonl]
+         [--v2-port 8765] [--no-model] [--note on|min|off] [--cache-file ~/.cache/ctxprune/proxy-store.sqlite]
+         [--rerender] [--log proxy.jsonl]
 Then point the harness at it, e.g. OPENAI_BASE_URL=http://127.0.0.1:8787/v1, ANTHROPIC_BASE_URL=http://127.0.0.1:8787.
 """
 
@@ -87,6 +109,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from render_store import RenderStore, store_path_for  # noqa: E402
 
 VERSION = "proxy-3"  # proxy-3: JSON wrappers unwrapped + full pipeline (canary finding 1); proxy-2: H2 marker escaping; bump when lossless/v2 output for the same input changes
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -123,51 +147,35 @@ class Cfg:
     max_body = 64 << 20       # request bodies above this get 413 (audit L2)
     state = ""                # shared with the native integrations (emitted.py registry, OFF file); "" = env/default
     off_file = ""             # this file existing = pass-through (runtime kill switch); "" = <state>/OFF
+    rerender = False          # ignore (and overwrite) the first-render pins: explicit full re-render (CTXPRUNE_RERENDER=1)
 
 
 class Cache:
-    """sha256 key -> compressed text (None = forwarded unchanged). First value stored wins; optional JSONL on disk."""
+    """Compute cache: sha256 content key (cache_key: VERSION + settings + tool + args + text) -> compressed text (None
+    = forwarded unchanged), so the same output computed twice (parallel sessions, a cold pin) costs one model call.
+    First value stored wins. Backed by the `content` table of the render store (render_store.py); a legacy proxy-3
+    JSONL --cache-file is imported once, so this upgrade itself keeps the bytes of outputs already sent."""
 
-    def __init__(self, path: str | None = None):
-        self.path, self.mem, self.lock = path, {}, threading.Lock()
+    def __init__(self, store):
+        self.store, self.lock = store, threading.Lock()
         self.key_locks: dict[str, threading.Lock] = {}
-        if path and os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        r = json.loads(line)
-                        self.mem.setdefault(r["k"], r["t"])
-                    except (ValueError, KeyError, TypeError):
-                        continue  # torn last line etc.
 
     def key_lock(self, k: str) -> threading.Lock:
         with self.lock:
             return self.key_locks.setdefault(k, threading.Lock())
 
     def get(self, k: str):
-        with self.lock:
-            return (True, self.mem[k]) if k in self.mem else (False, None)
+        return self.store.get("content", k)
 
     def put(self, k: str, t: str | None) -> str | None:
+        v = self.store.put("content", k, t, VERSION)
         with self.lock:
-            if k in self.mem:
-                return self.mem[k]
-            self.mem[k] = t
             self.key_locks.pop(k, None)
-            if self.path:
-                try:
-                    d = os.path.dirname(self.path)
-                    if d:
-                        os.makedirs(d, exist_ok=True)
-                    with open(self.path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps({"k": k, "t": t}, ensure_ascii=False) + "\n")
-                        f.flush()
-                except (OSError, UnicodeEncodeError):
-                    pass
-            return t
+        return v
 
 
-CACHE = Cache()
+STORE = RenderStore(None)
+CACHE = Cache(STORE)
 STATS_LOCK = threading.Lock()
 STATS: dict = {}
 
@@ -371,6 +379,119 @@ def compress_text(text: str, slot: "Slot") -> tuple[str, dict]:
     return out, rec
 
 
+# ---------------------------------------------------------------- first-render pins (upgrade / toggle stability)
+# Every tool result of a request is served through _serve(): its pin key chains the session seed (system prompt +
+# first message, as received) and the ORIGINAL (tool, args, is_error, content) of every earlier result in the request,
+# so the same history resent gives the same keys, and a key names "this output at this place in this conversation".
+# A pinned result gets exactly the bytes it was first sent with, whatever changed since (VERSION, preset, dedup,
+# paths, note, OFF, a SKIP_TOOLS change, the emitted registry pruned, a model that came back); only unpinned results
+# (new outputs) see the current code and settings. A history edit (compaction, a pruned or trimmed result) changes the
+# keys from that point on; the provider prompt cache misses there anyway, so a re-render costs nothing extra.
+# Ids (tool_call_id ...) are not in the key: harnesses may rewrite them, and the args + content already identify it.
+
+_RQ = threading.local()   # per request: .chain (running pin key), .soft_off
+
+
+def _canon(content):
+    """Content as the pin key sees it: cache_control markers (they move between turns) dropped."""
+    if isinstance(content, list):
+        return [{k: v for k, v in p.items() if k != "cache_control"} if isinstance(p, dict) else p for p in content]
+    if isinstance(content, dict):
+        return {k: v for k, v in content.items() if k != "cache_control"}
+    return content
+
+
+def _blob(x) -> bytes:
+    return json.dumps(x, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+
+
+def session_seed(api: str, body: dict) -> str:
+    """Fingerprint of the conversation: its system prompt and first message as the harness sent them (before the
+    note). New sessions get new pins (current settings); a resent history gets its old ones."""
+    if api == "anthropic":
+        msgs = body.get("messages") if isinstance(body.get("messages"), list) else []
+        sysp, first = body.get("system"), msgs[0] if msgs else None
+    elif api == "responses":
+        inp = body.get("input")
+        sysp, first = body.get("instructions"), inp[0] if isinstance(inp, list) and inp else inp
+    else:
+        msgs = body.get("messages") if isinstance(body.get("messages"), list) else []
+        sysp = next((m.get("content") for m in msgs if isinstance(m, dict) and m.get("role") in ("system", "developer")), None)
+        first = next((m for m in msgs if isinstance(m, dict) and m.get("role") == "user"), None)
+    if isinstance(first, dict):
+        first = {"role": first.get("role"), "content": _canon(first.get("content"))}
+    return hashlib.sha256(_blob([api, _canon(sysp), first])).hexdigest()
+
+
+def _pin_key(slot: "Slot", content) -> str | None:
+    if getattr(_RQ, "chain", None) is None:
+        return None
+    _RQ.chain = hashlib.sha256(_RQ.chain.encode() + _blob([slot.tool, slot.args_key, slot.is_error, _canon(content)])
+                               ).hexdigest()
+    return _RQ.chain
+
+
+def _textlen(content) -> int:
+    return len(content) if isinstance(content, str) else len(_texts(content)) if isinstance(content, list) else 0
+
+
+def _replay(slot: "Slot", served) -> None:
+    """Side effects of a result the pipeline did not compute now (pinned or soft-off): the refetch guard and the dedup
+    session see what the model sees, as when it was computed."""
+    label = (slot.command or slot.tool or "")[:200]
+    texts = [served] if isinstance(served, str) else [p["text"] for p in served if isinstance(p, dict) and
+                                                      isinstance(p.get("text"), str) and p["text"]] \
+        if isinstance(served, list) else []
+    for t in texts:
+        if not slot.skipped:
+            _g_note(slot, t)
+        _dd_register(t, label)
+
+
+def _serve(slot: "Slot", content, compute, recs: list):
+    """The pinned per-result decision: the stored first rendering when there is one, else compute() (current code
+    and settings; raw under soft OFF), stored as this result's first rendering. A compute error -> the raw content,
+    pinned too (never a request-wide fail-open that would revert every old result)."""
+    if not isinstance(content, (str, list)) or not content:
+        return content
+    key = _pin_key(slot, content)
+    if key is not None and not Cfg.rerender:
+        hit, val = STORE.get("pin", key)
+        if hit:
+            served = content if val is None else json.loads(val)
+            _replay(slot, served)
+            recs.append({"id": slot.call_id, "tool": slot.tool, "before": _textlen(content),
+                         "after": _textlen(served), "stage": "pinned", "cache": "pin"})
+            bump(tool_results=1, pinned_results=1, changed_results=int(served != content),
+                 chars_before=_textlen(content), chars_after=_textlen(served))
+            return served
+    if getattr(_RQ, "soft_off", False):
+        served = content
+        _replay(slot, served)
+        recs.append({"id": slot.call_id, "tool": slot.tool, "before": _textlen(content), "after": _textlen(content),
+                     "stage": "off", "cache": "none"})
+    else:
+        n = len(recs)
+        try:
+            served = compute()
+        except Exception as e:  # noqa: BLE001 - this result raw, the others keep their pins
+            del recs[n:]
+            served = content
+            _replay(slot, served)
+            bump(fail_open_results=1)
+            recs.append({"id": slot.call_id, "tool": slot.tool, "before": _textlen(content),
+                         "after": _textlen(content), "stage": "error", "error": repr(e)[:200], "cache": "none"})
+    if key is not None:
+        val = STORE.put("pin", key, None if served == content else json.dumps(served, ensure_ascii=True),
+                        VERSION, replace=Cfg.rerender)
+        won = content if val is None else json.loads(val)
+        if won != served:   # another process pinned this result first: its bytes are canonical
+            served = won
+            if recs:
+                recs[-1]["after"] = _textlen(served)
+    return served
+
+
 # ---------------------------------------------------------------- tool calls, intent
 
 def parse_args(raw) -> tuple[dict | None, str]:
@@ -526,13 +647,10 @@ def walk_chat(body: dict, recs: list) -> None:
                 name, raw, it = last_fn if last_fn and last_fn[0] == m.get("name") else (m.get("name"), None, last_text)
                 cid = m.get("name")
             slot = Slot(cid, name, raw, False, it)
-            if slot.skipped:
-                new = _view_safe(m.get("content"), slot, recs)
-                if new is not m.get("content"):
-                    msgs[i] = {**m, "content": new}
-                continue
-            new = _rewrite_parts(m.get("content"), slot, recs)
-            if new is not m.get("content"):
+            c = m.get("content")
+            new = _serve(slot, c, (lambda c=c, slot=slot: _view_safe(c, slot, recs)) if slot.skipped else
+                         (lambda c=c, slot=slot: _rewrite_parts(c, slot, recs)), recs)
+            if new is not c:
                 msgs[i] = {**m, "content": new}
 
 
@@ -567,13 +685,11 @@ def walk_responses(body: dict, recs: list) -> None:
             cid = it.get("call_id") or it.get("id")
             name, raw, itx = calls.get(cid, ("", None, last_text))  # previous_response_id: call not in this request
             slot = Slot(cid, name, raw, False, itx)
-            if slot.skipped:
-                new = _view_safe(it.get("output"), slot, recs)
-                if new is not it.get("output"):
-                    items[i] = {**it, "output": new}
-                continue
-            new = _rewrite_parts(it.get("output"), slot, recs, ("input_text", "output_text", "text"))
-            if new is not it.get("output"):
+            c = it.get("output")
+            new = _serve(slot, c, (lambda c=c, slot=slot: _view_safe(c, slot, recs)) if slot.skipped else
+                         (lambda c=c, slot=slot: _rewrite_parts(c, slot, recs, ("input_text", "output_text", "text"))),
+                         recs)
+            if new is not c:
                 items[i] = {**it, "output": new}
 
 
@@ -605,13 +721,10 @@ def walk_anthropic(body: dict, recs: list) -> None:
                     continue
                 name, raw, itx = calls.get(b.get("tool_use_id"), ("", None, last_text))
                 slot = Slot(b.get("tool_use_id"), name, raw, b.get("is_error"), itx)
-                if slot.skipped:
-                    new = _view_safe(b.get("content"), slot, recs)
-                    if new is not b.get("content"):
-                        content[j] = {**b, "content": new}
-                    continue
-                new = _rewrite_parts(b.get("content"), slot, recs)
-                if new is not b.get("content"):
+                c = b.get("content")
+                new = _serve(slot, c, (lambda c=c, slot=slot: _view_safe(c, slot, recs)) if slot.skipped else
+                             (lambda c=c, slot=slot: _rewrite_parts(c, slot, recs)), recs)
+                if new is not c:
                     content[j] = {**b, "content": new}
 
 
@@ -630,6 +743,13 @@ def _append_note(content, note: str):
     return None
 
 
+def _has_note(text: str, note: str) -> bool:
+    """The note (this one, or any text an earlier ctxprune version used: ctxprune_note.NOTE_HISTORY) is already there,
+    e.g. added by a Claude Code SessionStart hook of another version."""
+    from ctxprune_note import NOTE_HISTORY
+    return any(n and n in text for n in (note,) + NOTE_HISTORY)
+
+
 def add_note(api: str, body: dict, note: str) -> bool:
     """Append the note to the request's system prompt in place; True when the body changed."""
     if api == "anthropic":
@@ -638,13 +758,13 @@ def add_note(api: str, body: dict, note: str) -> bool:
         # CC 2.1.302, canary 2026-10-17) as a role "system" message after it. Text parts only, never tool results,
         # so a tool output quoting the note can't flip the decision between turns.
         for m in msgs if isinstance(msgs, list) else []:
-            if isinstance(m, dict) and m.get("role") in ("user", "system") and note in _texts(m.get("content")):
+            if isinstance(m, dict) and m.get("role") in ("user", "system") and _has_note(_texts(m.get("content")), note):
                 return False
         sysp = body.get("system")
         if sysp is None or sysp == "" or sysp == []:
             body["system"] = note
             return True
-        if note in (sysp if isinstance(sysp, str) else _texts(sysp)):
+        if _has_note(sysp if isinstance(sysp, str) else _texts(sysp), note):
             return False
         new = _append_note(sysp, note)
         if new is None:
@@ -656,7 +776,7 @@ def add_note(api: str, body: dict, note: str) -> bool:
         if not ins:
             body["instructions"] = note
             return True
-        if not isinstance(ins, str) or note in ins:
+        if not isinstance(ins, str) or _has_note(ins, note):
             return False
         body["instructions"] = ins + "\n\n" + note
         return True
@@ -667,7 +787,7 @@ def add_note(api: str, body: dict, note: str) -> bool:
         for i, m in enumerate(msgs):
             if isinstance(m, dict) and m.get("role") in ("system", "developer"):
                 c = m.get("content")
-                if note in (c if isinstance(c, str) else _texts(c)):
+                if _has_note(c if isinstance(c, str) else _texts(c), note):
                     return False
                 new = _append_note(c, note)
                 if new is None:
@@ -679,20 +799,44 @@ def add_note(api: str, body: dict, note: str) -> bool:
     return False
 
 
+def _state_default() -> str:
+    return os.environ.get("CTXPRUNE_STATE") or os.path.expanduser("~/.cache/ctxprune")
+
+
 def _state() -> str:
-    return Cfg.state or os.environ.get("CTXPRUNE_STATE") or os.path.expanduser("~/.cache/ctxprune")
+    return Cfg.state or _state_default()
+
+
+HARD = ("hard", "full", "raw")
+
+
+def off_mode() -> str:
+    """Kill switch, checked per request: "" (on), "soft" or "hard".
+      soft: CTXPRUNE_OFF=1|true|yes (the same switch the hooks and plugins read), or the OFF file (default
+            <state>/OFF) existing: results already sent keep their pinned bytes (and conversations their note), new
+            results go out raw and stay raw after OFF is lifted. No prompt-cache miss either way. With
+            CTXPRUNE_RERENDER=1 as well: everything back to the original bytes, pinned raw (one miss per conversation).
+      hard: the OFF file says `hard` (`echo hard > ~/.cache/ctxprune/OFF`): pure pass-through, original bytes, no
+            note, no store (the escape hatch when the proxy itself misbehaves): one miss per conversation now and
+            one when it is lifted (the pins come back).
+    `touch` / `rm` the file to toggle a running proxy."""
+    if os.environ.get("CTXPRUNE_OFF", "").strip().lower() in ("1", "true", "yes"):
+        return "soft"
+    try:
+        f = Cfg.off_file or os.path.join(_state(), "OFF")
+        if not os.path.exists(f):
+            return ""
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                return "hard" if fh.read(64).strip().lower() in HARD else "soft"
+        except OSError:
+            return "soft"
+    except Exception:
+        return ""
 
 
 def off() -> bool:
-    """Kill switch, checked per request: CTXPRUNE_OFF=1 in the proxy's env, or the OFF file (default
-    <state>/OFF, e.g. ~/.cache/ctxprune/OFF) existing -> pure pass-through (no rewrite, no note). `touch` / `rm` the
-    file to toggle a running proxy. Toggling mid-session changes old tool results once (one prompt-cache miss)."""
-    if os.environ.get("CTXPRUNE_OFF", "") in ("1", "true", "yes"):
-        return True
-    try:
-        return os.path.exists(Cfg.off_file or os.path.join(_state(), "OFF"))
-    except Exception:
-        return False
+    return off_mode() != ""
 
 
 def api_of(method: str, path: str) -> str | None:
@@ -711,12 +855,27 @@ def api_of(method: str, path: str) -> str | None:
 WALKERS = {"chat": walk_chat, "responses": walk_responses, "anthropic": walk_anthropic}
 
 
-def rewrite(api: str, raw: bytes) -> tuple[bytes, list, bool]:
-    """-> (body to forward, per-result records, stream flag). Original bytes when nothing changed. Raises on bad JSON."""
+def session_note(seed: str) -> str | None:
+    """The note decision pinned per conversation (session_seed): its first request's note (or none) is kept for the
+    whole conversation, so a new NOTE text, --note on/off or OFF only reaches new conversations (the note sits at the
+    top of the prompt: changing it would miss the whole cache)."""
+    k = "note:" + seed
+    if not Cfg.rerender:
+        hit, v = STORE.get("pin", k)
+        if hit:
+            return v
+    return STORE.put("pin", k, None if getattr(_RQ, "soft_off", False) else Cfg.note, VERSION, replace=Cfg.rerender)
+
+
+def rewrite(api: str, raw: bytes, soft_off: bool = False) -> tuple[bytes, list, bool]:
+    """-> (body to forward, per-result records, stream flag). Original bytes when nothing changed. Raises on bad JSON.
+    soft_off: results and note keep their pinned first rendering, new ones go out raw (and are pinned raw)."""
     body = json.loads(raw)
     if not isinstance(body, dict):
         return raw, [], False
     recs: list = []
+    seed = session_seed(api, body)
+    _RQ.chain, _RQ.soft_off = seed, soft_off
     if Cfg.dedup:
         from dedup import DedupSession
         _DD.s = DedupSession()
@@ -726,9 +885,10 @@ def rewrite(api: str, raw: bytes) -> tuple[bytes, list, bool]:
         _DD.g, _DD.call_t = Guard({}, turns=st.guard_turns), {}
     try:
         WALKERS[api](body, recs)
+        note = session_note(seed)
     finally:
-        _DD.s = _DD.g = None
-    noted = bool(Cfg.note) and add_note(api, body, Cfg.note)
+        _DD.s = _DD.g = _RQ.chain = None
+    noted = bool(note) and add_note(api, body, note)
     stream = bool(body.get("stream"))
     if not noted and not any(r["after"] != r["before"] for r in recs):
         return raw, recs, stream
@@ -810,19 +970,25 @@ class Proxy(BaseHTTPRequestHandler):
         if self.command == "GET" and self.path.split("?")[0] == "/ctxprune/stats":
             with STATS_LOCK:
                 snap = dict(STATS)
-            snap["cache_entries"] = len(CACHE.mem)
-            snap["off"] = off()
+            snap["cache_entries"] = STORE.count("content")
+            snap["pin_entries"] = STORE.count("pin")
+            snap["store"] = STORE.path or "memory"
+            snap["store_error"] = STORE.error
+            snap["off"] = off_mode() or False
             return self._json(200, snap)
         bump(requests=1)
         api = api_of(self.command, self.path)
         stream, rec = False, None
         log_path = self.path.split("?", 1)[0]   # audit L3: query strings (may carry keys) never reach the log
-        if api and off():
+        mode = off_mode() if api else ""
+        if api and mode == "hard":
             bump(off_requests=1)
-            rec = {"ts": time.time(), "api": api, "path": log_path, "off": True}
+            rec = {"ts": time.time(), "api": api, "path": log_path, "off": "hard"}
         elif api and body and not self.headers.get("Content-Encoding"):
+            if mode:
+                bump(off_requests=1)
             try:
-                new, recs, stream = rewrite(api, body)
+                new, recs, stream = rewrite(api, body, soft_off=bool(mode))
                 rec = {"ts": time.time(), "api": api, "path": log_path, "stream": stream, "results": recs,
                        "bytes_in": len(body), "bytes_out": len(new)}
                 if new is not body:
@@ -883,9 +1049,12 @@ def configure(upstream: str, keep: float | None = None, min_chars: int | None = 
               no_model: bool = False, cache_file: str | None = None, log: str | None = None,
               skip_tools: str = SKIP_TOOLS, v2_timeout: float = 20.0, timeout: float = 900.0, dedup: bool | None = None,
               note: str = "off", view_safe: bool = True, max_body: int = 64 << 20, preset: str | None = None,
-              force_lossy: bool = False, harness: str = "", state: str = "", off_file: str = "") -> None:
-    """keep / min_chars None = the preset's; preset None = CTXPRUNE_PRESET, else safe (ctxprune_core.PRESETS)."""
-    global CACHE
+              force_lossy: bool = False, harness: str = "", state: str = "", off_file: str = "",
+              rerender: bool | None = None) -> None:
+    """keep / min_chars None = the preset's; preset None = CTXPRUNE_PRESET, else safe (ctxprune_core.PRESETS).
+    cache_file: the render store (sqlite; a legacy `.jsonl` path is imported into `<same name>.sqlite`); None = memory
+    only (tests; main() defaults to <state>/proxy-store.sqlite)."""
+    global CACHE, STORE
     from ctxprune_note import note_for
     if dedup is None:   # opt-in: CTXPRUNE_DEDUP=1 (ctxprune_core.dedup_on)
         from ctxprune_core import dedup_on
@@ -895,8 +1064,17 @@ def configure(upstream: str, keep: float | None = None, min_chars: int | None = 
     Cfg.skip_tools, Cfg.log_path, Cfg.v2_timeout, Cfg.timeout = re.compile(skip_tools), log, v2_timeout, timeout
     Cfg.preset, Cfg.force_lossy, Cfg.harness = preset, force_lossy, harness
     Cfg.state, Cfg.off_file = os.path.expanduser(state or ""), os.path.expanduser(off_file or "")
+    Cfg.rerender = (os.environ.get("CTXPRUNE_RERENDER", "").strip().lower() in ("1", "true", "yes", "on")
+                    if rerender is None else rerender)
     _resolve()
-    CACHE = Cache(os.path.expanduser(cache_file) if cache_file else None)
+    STORE.close()
+    if cache_file:
+        STORE = RenderStore(store_path_for(cache_file))
+        if os.path.expanduser(cache_file) != STORE.path:
+            STORE.import_jsonl(cache_file, "content", "legacy-jsonl")   # proxy-3 cache: same keys, same bytes
+    else:
+        STORE = RenderStore(None)
+    CACHE = Cache(STORE)
     _model_down_until[0] = 0.0
     reset_stats()
 
@@ -922,7 +1100,13 @@ def main() -> None:
     ap.add_argument("--v2-port", type=int, default=8765)
     ap.add_argument("--v2-timeout", type=float, default=20.0)
     ap.add_argument("--no-model", action="store_true", help="lossless stage only")
-    ap.add_argument("--cache-file", default=None, help="JSONL cache shared across restarts (recommended)")
+    ap.add_argument("--cache-file", default=None,
+                    help="render store (sqlite) that keeps what was sent for every result across restarts and "
+                    "upgrades (default <state>/proxy-store.sqlite; `none` = memory only; a legacy .jsonl path is "
+                    "imported into <name>.sqlite)")
+    ap.add_argument("--rerender", action="store_true",
+                    help="ignore and overwrite the pinned first renderings (CTXPRUNE_RERENDER=1): every old result "
+                    "is re-rendered with the current code and settings, one prompt-cache miss per conversation")
     ap.add_argument("--log", default=None, help="per-request JSONL log")
     ap.add_argument("--skip-tools", default=SKIP_TOOLS, help="regex of tool names never touched")
     ap.add_argument("--timeout", type=float, default=900.0)
@@ -937,15 +1121,21 @@ def main() -> None:
                     "else ~/.cache/ctxprune): emitted.py registry + the OFF file")
     ap.add_argument("--off-file", default="", help="pass-through while this file exists (default <state>/OFF)")
     a = ap.parse_args()
-    configure(a.upstream, a.keep, a.min_chars, a.v2_port, a.no_model, a.cache_file, a.log, a.skip_tools,
+    cf = a.cache_file
+    if cf is None:
+        cf = os.path.join(os.path.expanduser(a.state) if a.state else _state_default(), "proxy-store.sqlite")
+    elif cf.strip().lower() in ("none", "", ":memory:"):
+        cf = None
+    configure(a.upstream, a.keep, a.min_chars, a.v2_port, a.no_model, cf, a.log, a.skip_tools,
               a.v2_timeout, a.timeout, None if a.dedup is None else a.dedup == "on", a.note, a.view_safe == "on",
               int(a.max_body_mb * (1 << 20)),
-              a.preset, a.force_lossy, a.harness, a.state, a.off_file)
+              a.preset, a.force_lossy, a.harness, a.state, a.off_file, a.rerender or None)
     srv = make_server(a.port)
     st = Cfg.settings
     mode = f"preset {st.preset}: " + ("lossless only" if not st.model else
                                       f"v2 on :{a.v2_port} keep {st.keep} >= {st.min_chars} chars, {st.select or 'server'} select")
-    print(f"ctxprune proxy: 127.0.0.1:{a.port} -> {a.upstream} ({mode}; note {a.note}; cache {len(CACHE.mem)} entries)",
+    print(f"ctxprune proxy: 127.0.0.1:{a.port} -> {a.upstream} ({mode}; note {a.note}; store {STORE.path or 'memory'}: "
+          f"{STORE.count('pin')} pins, {STORE.count('content')} cached)",
           flush=True)
     try:
         srv.serve_forever()

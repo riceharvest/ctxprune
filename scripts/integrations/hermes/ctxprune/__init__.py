@@ -337,6 +337,20 @@ def _cow_set(obj, path, value):
     return c
 
 
+def _seed(request):
+    """The conversation's system prompt + first user message (first-render pins are per conversation)."""
+    def text(c):
+        if isinstance(c, list):
+            return [p.get("text") for p in c if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        return c if isinstance(c, str) else None
+    msgs = request.get("messages") if isinstance(request.get("messages"), list) else request.get("input")
+    msgs = msgs if isinstance(msgs, list) else []
+    first = next((text(m.get("content")) for m in msgs if isinstance(m, dict) and m.get("role") == "user"), None)
+    sysm = next((text(m.get("content")) for m in msgs if isinstance(m, dict) and m.get("role") in ("system",
+                                                                                                  "developer")), None)
+    return [text(request.get("system")) or text(request.get("instructions")) or sysm, first]
+
+
 def _on_llm_request(request):
     if request.get("previous_response_id"):   # server-side history: the numbering would not match what the model sees
         return None
@@ -344,7 +358,7 @@ def _on_llm_request(request):
     events, paths = _request_events(request)
     if sum(1 for e in events if e["t"] == "result") < 2:
         return None
-    out, _st = cc.context(events, "hermes")
+    out, _st = cc.context(events, "hermes", seed=_seed(request))
     new = request
     for i, text in out.items():
         if i in paths and isinstance(text, str):
@@ -352,12 +366,21 @@ def _on_llm_request(request):
     return {"request": new, "source": "ctxprune", "reason": "cross-turn dedup"} if new is not request else None
 
 
+def _context_pins_exist():
+    d = os.environ.get("CTXPRUNE_STATE") or os.path.expanduser("~/.cache/ctxprune")
+    return os.path.exists(os.path.join(d, "context-store.sqlite"))
+
+
 def on_llm_request(request=None, **kwargs):
     """llm_request middleware: Hermes passes this callback its own copy of the provider request; returning
-    {"request": ...} replaces it for this call only."""
+    {"request": ...} replaces it for this call only. Dedup is opt-in (CTXPRUNE_DEDUP=1). With dedup off or
+    CTXPRUNE_OFF=1 it still runs while first-render pins exist (ctxprune_compress.context: results already sent keep
+    their deduped text, new ones go out unchanged), so a toggle never rewrites history the provider has cached."""
     _note_target(kwargs)
-    if not isinstance(request, dict) or _off() or \
-            os.environ.get("CTXPRUNE_DEDUP", "").strip().lower() not in ("1", "true", "yes", "on"):   # opt-in
+    if not isinstance(request, dict):
+        return None
+    if (_off() or os.environ.get("CTXPRUNE_DEDUP", "").strip().lower() not in ("1", "true", "yes", "on")) \
+            and not _context_pins_exist():
         return None
     return _within_budget(_on_llm_request, request)
 

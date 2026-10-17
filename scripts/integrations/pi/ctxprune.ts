@@ -16,10 +16,12 @@
 // `[ctxprune: lines a–b identical to output #k above (`cmd`)]`, pointing at an earlier result IN THAT REQUEST) and
 // returns the rewritten messages for this call only (Pi passes the handler a clone; the session keeps the originals).
 // Deterministic in the request prefix, so the prompt cache sees the same bytes. Read/edit/write results are counted
-// but never rewritten. Opt-in: only with CTXPRUNE_DEDUP=1 (Qwen3.8 comprehension probe); CTXPRUNE_OFF=1: off.
+// but never rewritten. Opt-in: only with CTXPRUNE_DEDUP=1 (Qwen3.8 comprehension probe); CTXPRUNE_OFF=1: off for
+// new results (results already sent keep their pinned text: off()).
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 const SKIP = /^(read|edit|write|multiedit|multi_edit|apply_patch|patch|notebook.*)$/i;
 const CLI = process.env.CTXPRUNE_CLI || `${homedir()}/ctxprune-v2/scripts/ctxprune_compress.py`;
@@ -78,7 +80,7 @@ function standIn(tool, input) {
   try { return `${tool} ${JSON.stringify(a)}`.slice(0, 500); } catch (e) { return tool; }
 }
 
-function contextDedup(events) {
+function contextDedup(events, seed) {
   return new Promise((resolve) => {
     try {
       const child = execFile(PY, [CLI, "--context=pi"], {
@@ -94,16 +96,25 @@ function contextDedup(events) {
         }
       });
       child.stdin.on("error", () => {});
-      child.stdin.end(JSON.stringify({ events }));
+      child.stdin.end(JSON.stringify({ events, seed }));
     } catch (e) {
       resolve({});
     }
   });
 }
 
+// Dedup is opt-in. With dedup off or CTXPRUNE_OFF=1 the CLI still runs while first-render pins exist
+// (<state>/context-store.sqlite): results already sent keep their deduped text and new ones go out unchanged, so a
+// toggle never rewrites history the provider has cached (ctxprune_compress.context).
 function off() {
-  return ["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") ||
-    !["1", "true", "yes", "on"].includes((process.env.CTXPRUNE_DEDUP || "").toLowerCase());   // dedup is opt-in
+  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") &&
+    ["1", "true", "yes", "on"].includes((process.env.CTXPRUNE_DEDUP || "").toLowerCase());
+  if (on) return false;
+  try {
+    return !existsSync(join(process.env.CTXPRUNE_STATE || join(homedir(), ".cache", "ctxprune"), "context-store.sqlite"));
+  } catch (e) {
+    return true;
+  }
 }
 
 // The tool calls and results of one request, in order; where[k] = the message index of result event k.
@@ -133,7 +144,8 @@ export async function onContext(event) {
     if (!msgs || off()) return undefined;
     const { events, where } = contextEvents(msgs);
     if (events.filter((e) => e.t === "result").length < 2) return undefined;
-    const out = await contextDedup(events);
+    const first = msgs.find((m) => m && m.role === "user");   // first-render pins are per conversation
+    const out = await contextDedup(events, first ? JSON.stringify(first.content) : null);
     let changed = false;
     for (const [k, text] of Object.entries(out)) {
       const i = where[k];
