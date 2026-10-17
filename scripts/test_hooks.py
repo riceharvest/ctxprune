@@ -301,6 +301,73 @@ class Dedup(unittest.TestCase):
             self.assertEqual(out2, "")
 
 
+class WindowsHost(unittest.TestCase):
+    """Windows: a piped stdin is decoded with the ANSI code page unless Python runs in UTF-8 mode, and fcntl does not
+    exist (robustness audit 2026-10-17, results/robustness)."""
+
+    TEXT = "\r\n".join(f"src\\app\\módulo\\usuário_{k // 8}.py:{k}:    print('café 日本語 Привет {k}')" for k in range(1, 30))
+
+    def ev(self, tool="PowerShell"):
+        return {"hook_event_name": "PostToolUse", "tool_name": tool, "transcript_path": "/nonexistent.jsonl",
+                "tool_input": {"command": "Select-String -Path src\\*.py -Pattern café"},
+                "tool_response": {"stdout": self.TEXT, "stderr": "", "interrupted": False, "isImage": False}}
+
+    def test_code_page_stdin_keeps_non_ascii_exact(self):
+        raw = json.dumps(self.ev(), ensure_ascii=False).encode("utf-8")   # what Claude Code (Node) writes
+        for enc in ("cp1252", "cp936", "cp932"):   # cp1252 gave mojibake (café -> cafÃ©), cp936/cp932 no output
+            for script, args in (("lossless_hook.py", []), ("v2_hook.py", ["--preset", "safe"])):
+                p = subprocess.run([sys.executable, os.path.join(HERE, script), *args], input=raw,   # no -I: it drops
+                                   # PYTHONIOENCODING, the stand-in for the Windows code page
+                                   capture_output=True, timeout=30, env=dict(os.environ, PYTHONIOENCODING=enc))
+                self.assertTrue(p.stdout, (enc, script, p.stderr[-300:]))
+                new = upd_of(p.stdout.decode("ascii"))["stdout"]   # json.dump's \\uXXXX form: any code page
+                self.assertIn(GROUP_MARK, new, (enc, script))
+                self.assertEqual(decode(new), self.TEXT, (enc, script))
+
+    def test_dedup_lock_without_fcntl(self):
+        body = "\n".join(f"config_value_{i} = compute_setting({i}, mode='strict')  # línea {i}" for i in range(60))
+        calls = []
+
+        class FakeMsvcrt:   # what Windows has instead of fcntl
+            LK_NBLCK = 2
+
+            @staticmethod
+            def locking(fd, mode, n):
+                calls.append((mode, n))
+
+        with tempfile.TemporaryDirectory() as td:
+            tr = os.path.join(td, "t.jsonl")
+            with open(tr, "w") as f:
+                f.write(json.dumps({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": body}]}}) + "\n")
+            ev = {"tool_name": "PowerShell", "session_id": "w1", "tool_use_id": "tu2", "transcript_path": tr,
+                  "tool_input": {"command": "Get-Content settings.py"},
+                  "tool_response": {"stdout": "header\n" + body, "stderr": "", "interrupted": False, "isImage": False}}
+            with mock.patch.dict(os.environ, {"CTXPRUNE_STATE": td, "CTXPRUNE_DEDUP": "1"}), \
+                    mock.patch.dict(sys.modules, {"fcntl": None, "msvcrt": FakeMsvcrt}):
+                import importlib
+                importlib.reload(lossless_hook)
+                out = run_inproc(lossless_hook, [], ev)
+            importlib.reload(lossless_hook)
+            new = json.loads(out)["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
+            self.assertTrue(new.startswith("header\n[ctxprune: lines 1–60 identical to output #1 above"), new[:200])
+            self.assertEqual(calls, [(FakeMsvcrt.LK_NBLCK, 1)])
+
+    def test_dedup_lock_busy_on_windows_is_skipped(self):
+        import dedup
+
+        class Busy:
+            LK_NBLCK = 2
+
+            @staticmethod
+            def locking(fd, mode, n):
+                raise PermissionError(13, "locked")
+
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(sys.modules, {"fcntl": None, "msvcrt": Busy}):
+            with open(os.path.join(td, "x.lock"), "a") as f:
+                self.assertRaises(BlockingIOError, dedup._lock_nb, f)
+
+
 class Wrap(unittest.TestCase):
     def test_hook_wrap_logs_grep_update(self):
         with tempfile.TemporaryDirectory() as d:

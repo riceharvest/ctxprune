@@ -132,6 +132,15 @@ def parse_args(argv: list[str], spec: dict) -> dict:
     return out
 
 
+def read_event() -> dict:
+    """The hook JSON from stdin as UTF-8 bytes. Not json.load(sys.stdin): on Windows a piped stdin is decoded with the
+    ANSI code page (cp1252, cp936, ...) unless Python runs in UTF-8 mode, so non-ASCII tool output came back as mojibake
+    (cp1252: `café` -> `cafÃ©`, written back to the model) or failed to decode (cp936/cp932: no compression).
+    json.loads(bytes) detects UTF-8/16/32 itself. stdout stays json.dump's ASCII (\\uXXXX) form: safe in any code page."""
+    buf = getattr(sys.stdin, "buffer", None)   # (a text-only stdin, e.g. a test's StringIO: read it as text)
+    return json.loads(buf.read() if buf is not None else sys.stdin.read())
+
+
 class _NS:
     def __init__(self, d: dict):
         self.__dict__.update(d)
@@ -283,7 +292,7 @@ def main() -> None:
     try:
         a = _NS(parse_args(sys.argv[1:], {"persisted": (str, "drop", ("skip", "keep", "drop")),   # hooktest: B shows
                                           "dedup": (str, "", ("", "on", "off"))}))                # inline
-        ev = json.load(sys.stdin)
+        ev = read_event()
         if spill_or_read(ev, True):
             return
         # model off here: a persisted output (> ~30k) never gets under the inline cap with lossless alone (red team:

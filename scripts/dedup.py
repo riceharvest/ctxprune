@@ -369,6 +369,23 @@ def _prune(d: Path) -> None:
         pass
 
 
+def _lock_nb(f) -> None:
+    """Exclusive non-blocking lock on an open lock file, released when it is closed; BlockingIOError while another
+    hook holds it. fcntl does not exist on Windows (the hook used to die there with ImportError, so CTXPRUNE_DEDUP=1
+    never deduped and every call logged an error): msvcrt locks the first byte instead."""
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as e:
+            raise BlockingIOError(str(e)) from e
+        return
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def _popen(path, mode="w"):
     from recover import private_open
     return private_open(path, mode)
@@ -565,14 +582,13 @@ class HookSession:
         if not tr or not os.path.exists(tr):
             return None
         try:
-            import fcntl
             import time
             d = _state(self.dir)
             with _popen(d / f"{self.key}.lock", "a") as lk:
                 t_end = time.monotonic() + 2.0
                 while True:
                     try:
-                        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        _lock_nb(lk)
                         break
                     except BlockingIOError:
                         if time.monotonic() > t_end:

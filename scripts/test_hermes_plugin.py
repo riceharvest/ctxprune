@@ -14,17 +14,35 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="ctxprune-hermes-test-")
-os.environ.update(CTXPRUNE_SCRIPTS=HERE, CTXPRUNE_NO_MODEL="1", CTXPRUNE_STATE=TMP,
-                  CTXPRUNE_LOG=os.path.join(TMP, "log.jsonl"))
-for k in ("CTXPRUNE_SKIP_TOOLS", "CTXPRUNE_VIEW_TOOLS"):
-    os.environ.pop(k, None)
-while HERE in sys.path:   # (unittest discover adds it) the plugin must add it itself, at the end
-    sys.path.remove(HERE)
-N_PATH = len(sys.path)
-_spec = importlib.util.spec_from_file_location(
-    "hermes_ctxprune", os.path.join(HERE, "integrations", "hermes", "ctxprune", "__init__.py"))
-plug = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(plug)
+plug = None
+N_PATH = 0
+_SAVED_PATH: list = []
+_SAVED_ENV: dict = {}
+
+
+def setUpModule():
+    """Not at import time: `python -m unittest a b c` imports every test module first, and the ones after this one
+    still need HERE on sys.path and their own env (no CTXPRUNE_NO_MODEL). tearDownModule puts both back."""
+    global plug, N_PATH
+    _SAVED_ENV.update(os.environ)
+    os.environ.update(CTXPRUNE_SCRIPTS=HERE, CTXPRUNE_NO_MODEL="1", CTXPRUNE_STATE=TMP,
+                      CTXPRUNE_LOG=os.path.join(TMP, "log.jsonl"))
+    for k in ("CTXPRUNE_SKIP_TOOLS", "CTXPRUNE_VIEW_TOOLS"):
+        os.environ.pop(k, None)
+    _SAVED_PATH[:] = sys.path
+    while HERE in sys.path:   # (unittest adds it) the plugin must add it itself, at the end
+        sys.path.remove(HERE)
+    N_PATH = len(sys.path)
+    spec = importlib.util.spec_from_file_location(
+        "hermes_ctxprune", os.path.join(HERE, "integrations", "hermes", "ctxprune", "__init__.py"))
+    plug = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plug)
+
+
+def tearDownModule():
+    sys.path[:] = _SAVED_PATH + [p for p in sys.path if p not in _SAVED_PATH]
+    os.environ.clear()
+    os.environ.update(_SAVED_ENV)
 
 CODE = [f'    log("step {i}", key="v")' for i in range(300)]
 PADDED = "\n".join(f"{i + 1:6d}|{ln}" for i, ln in enumerate(CODE))          # older Hermes gutter

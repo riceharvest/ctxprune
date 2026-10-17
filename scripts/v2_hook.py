@@ -83,9 +83,9 @@ def main() -> None:
             "dedup": (str, "", ("", "on", "off")), "persisted": (str, None, ("skip", "keep", "drop")),
             "preset": (str, None, tuple(PRESETS))}
     try:
-        from lossless_hook import _NS, parse_args
+        from lossless_hook import _NS, parse_args, read_event
         a = _NS(parse_args(sys.argv[1:], spec))
-        ev = json.load(sys.stdin)
+        ev = read_event()   # UTF-8 bytes, not the Windows code page (lossless_hook.read_event)
         if ev.get("tool_name") == "Read":   # only the opt-in boundary trim (read_trim.py) ever touches a Read
             from lossless_hook import spill_or_read
             spill_or_read(ev, False)
