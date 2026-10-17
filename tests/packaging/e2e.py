@@ -37,6 +37,20 @@ def has_marker(out: str) -> bool:
     return "[cp:" in out or "[ctxprune" in out
 
 
+def config_dir(home: str) -> str:
+    """glue.config_dir() for the throwaway HOME (Env sets APPDATA / XDG_CONFIG_HOME inside it)."""
+    if os.name == "nt":
+        return os.path.join(home, "AppData", "Roaming", "ctxprune")
+    return os.path.join(home, ".config", "ctxprune")
+
+
+def stats_path(home: str) -> str:
+    """glue's default stats log for the throwaway HOME (%LOCALAPPDATA% on Windows, XDG_STATE_HOME elsewhere)."""
+    if os.name == "nt":
+        return os.path.join(home, "AppData", "Local", "ctxprune", "stats.jsonl")
+    return os.path.join(home, ".local", "state", "ctxprune", "stats.jsonl")
+
+
 def real_home() -> str:
     try:
         import pwd
@@ -51,6 +65,8 @@ def real_snapshot() -> dict:
              ".config/opencode/plugins", ".config/opencode/opencode.json", ".pi/agent/extensions",
              ".pi/agent/settings.json", ".codex/config.toml", ".dsh/cordis.patch.yml", ".config/ctxprune",
              ".config/systemd/user/ctxprune-proxy.service"]
+    if os.name == "nt":   # glue.config_dir() on Windows
+        paths.append("AppData/Roaming/ctxprune")
     out = {}
     for p in paths:
         full = os.path.join(h, p)
@@ -176,7 +192,7 @@ def after_install_checks(home: str, harness: str, exe_dir: str) -> None:
         check(len(ours) == 1 and ours[0][0] == "Bash|PowerShell|Grep|mcp__.*" and "plugin_cli.py\" hook claude-code" in ours[0][1]
               and ("echo user-hook" in [h[1] for h in hooks]),
               "claude-code: exactly one ctxprune hook (old v0.2.1 + research hooks replaced), user hook kept")
-        bdir = j(".config", "ctxprune", "backups", "claude-code", "settings.json")
+        bdir = os.path.join(config_dir(home), "backups", "claude-code", "settings.json")
         check(os.path.exists(bdir), "claude-code: original settings.json backed up")
     elif harness == "hermes":
         t = read(j(".hermes", "config.yaml"))
@@ -233,14 +249,16 @@ def bundle_checks(e: "Env", home: str) -> None:
         if not os.path.exists(link) and os.name != "nt":
             os.symlink(sys.executable, link)
     env["PATH"] = shim + os.pathsep + env.get("PATH", "")
-    r = subprocess.run(cmd, shell=True, input=json.dumps(ev), capture_output=True, text=True, env=env)
+    # Claude Code runs hook commands through a POSIX shell (Git Bash on Windows), never cmd.exe
+    sh = [shutil.which("sh"), "-c", cmd] if os.name == "nt" else cmd
+    r = subprocess.run(sh, shell=os.name != "nt", input=json.dumps(ev), capture_output=True, text=True, env=env)
     try:
         got = json.loads(r.stdout)["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
     except (ValueError, KeyError, TypeError):
         got = ""
     check(0 < len(got) < len(sample) and has_marker(got),
           f"ctxprune-safe hook via its hooks.json command: {len(sample)} -> {len(got)} ({r.stderr[-200:]})")
-    r = subprocess.run(cmd, shell=True, input=json.dumps(ev), capture_output=True, text=True,
+    r = subprocess.run(sh, shell=os.name != "nt", input=json.dumps(ev), capture_output=True, text=True,
                        env=dict(env, CTXPRUNE_OFF="1"))
     check(r.stdout.strip() == "", "ctxprune-safe hook: CTXPRUNE_OFF=1 -> no replacement")
     # the Hermes bundle, loaded the way Hermes does (package dir + register(ctx)), with a plain interpreter
@@ -339,10 +357,12 @@ def main() -> int:
             st = json.loads(p.stdout)
             check(st["calls"] >= 1 and st["saved"] > 0 and st["tokens_saved_est"] > 0, f"stats: {st['calls']} calls, "
                   f"{st['saved']} chars, ~{st['tokens_saved_est']} tokens, ${st['usd_est']}")
-            log = read(os.path.join(home, ".local", "state", "ctxprune", "stats.jsonl")) or ""
+            log = read(stats_path(home))
+            check(bool(log), f"stats log written ({stats_path(home)})")
+            log = log or ""
             check("User.get" not in log and "grep" not in log, "stats log holds no tool output and no commands")
             if os.name != "nt":
-                mode = os.stat(os.path.join(home, ".local", "state", "ctxprune", "stats.jsonl")).st_mode & 0o777
+                mode = os.stat(stats_path(home)).st_mode & 0o777
                 check(mode == 0o600, f"stats log mode {oct(mode)}")
             p = e.run("stats")
             check(p.returncode == 0 and "tokens saved" in p.stdout, "stats (text)")
