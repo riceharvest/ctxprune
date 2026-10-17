@@ -1,6 +1,6 @@
 """ctxprune command line.
 
-    ctxprune install claude-code|hermes|pi|opencode|dsh|codex|--all [--preset safe|model]
+    ctxprune install claude-code|hermes|pi|opencode|dsh|codex|--all [--preset safe|balanced|aggressive]
     ctxprune uninstall <harness>|--all
     ctxprune upgrade [--spec SPEC] [--dry-run]       upgrade the package, then refresh every installed integration
     ctxprune doctor                                   versions + a canary call through every installed integration
@@ -29,7 +29,7 @@ def _hook(argv: list) -> int:
         from . import glue
         glue.boot()
         v = glue.resolved("claude-code")
-        dedup = "on" if v.get("dedup", True) else "off"
+        dedup = "on" if v.get("dedup") else "off"
         if v.get("model"):   # a lossy preset: v2_hook resolves keep/min_chars/persisted from the same table
             import v2_hook as h
             args = ["--preset", v.get("requested") or v["preset"], "--dedup", dedup]

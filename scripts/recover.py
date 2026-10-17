@@ -266,8 +266,10 @@ def _self_test() -> None:
         out2 = recoverable(src2, keep=keep_from_pieces(src2, [0, 5]), state=td)   # pieces a, d
         assert out2.split("\n")[:4] == ["a\r", "[… lines 2–3 omitted …]", "d", "[… line 5 omitted …]"], out2
         f2 = re.search(r"lines A–B of (\S+) ", out2).group(1)
-        assert open(f2, newline="").read() == src2 and oct(os.stat(f2).st_mode & 0o777) == "0o600"
-        assert oct(os.stat(os.path.dirname(f2)).st_mode & 0o777) == "0o700"
+        assert open(f2, newline="").read() == src2
+        if os.name != "nt":   # POSIX modes; Windows has no 0600/0700 (st_mode reports 0o666 / 0o777, ACLs decide)
+            assert oct(os.stat(f2).st_mode & 0o777) == "0o600"
+            assert oct(os.stat(os.path.dirname(f2)).st_mode & 0o777) == "0o700"
         assert recoverable(src2, compressed="a\n[… 4 lines omitted …]", state=td) is None   # can't map: fail closed
         # L4: a tampered content-addressed file is rewritten, not trusted
         open(f, "w").write("tampered\n" * 30)

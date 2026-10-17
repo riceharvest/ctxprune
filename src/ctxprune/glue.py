@@ -134,16 +134,18 @@ def preset_name() -> str:
 
 def resolved(harness: str = "") -> dict:
     """ctxprune_core.resolve_preset for this harness (the preset table + per-harness opt-outs + CTXPRUNE_FORCE_LOSSY),
-    plus the env kill switches the pipeline honours (CTXPRUNE_NO_MODEL, CTXPRUNE_DEDUP=0)."""
+    plus the env switches the pipeline honours (CTXPRUNE_NO_MODEL; CTXPRUNE_DEDUP=1 / 0 via ctxprune_core.dedup_on:
+    dedup is opt-in in every preset)."""
     try:
         force = os.environ.get("CTXPRUNE_FORCE_LOSSY", "").lower() in _TRUE
-        v = dict(_core().resolve_preset(preset_name(), harness, force))
+        core = _core()
+        v = dict(core.resolve_preset(preset_name(), harness, force))
+        v["dedup"] = core.dedup_on(bool(v.get("dedup")))
     except Exception:
-        v = {"preset": FALLBACK_PRESET, "requested": FALLBACK_PRESET, "model": False, "dedup": True}
+        v = {"preset": FALLBACK_PRESET, "requested": FALLBACK_PRESET, "model": False,
+             "dedup": os.environ.get("CTXPRUNE_DEDUP", "").strip().lower() in _TRUE}
     if os.environ.get("CTXPRUNE_NO_MODEL", "").lower() in _TRUE:
         v["model"] = False
-    if os.environ.get("CTXPRUNE_DEDUP", "") == "0":
-        v["dedup"] = False
     return v
 
 

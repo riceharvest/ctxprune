@@ -7,8 +7,8 @@ Claude Code marketplace need).
                                                     + claude-code-plugin-safe/ (the `ctxprune-safe` plugin)
 
 The bundled scripts are byte copies of scripts/ (glue.SAFE_MODULES + glue.py), so a bundle is regenerated, never
-edited. `safe` bundles ship no model code at all (no onnx, no download, no localhost server): only lossless rules,
-plus cross-turn dedup in the Claude Code hook. No __pycache__ / .pyc is written (Hermes catalog rule 17).
+edited. `safe` bundles ship no model code at all (no onnx, no download, no localhost server): only lossless rules
+(cross-turn dedup only with CTXPRUNE_DEDUP=1). No __pycache__ / .pyc is written (Hermes catalog rule 17).
 """
 
 from __future__ import annotations
@@ -126,11 +126,11 @@ def register(ctx):
 '''
 
 HERMES_DESC_SAFE = ("Lossless rewrite of tool results before they reach the model: grep-style hits grouped under "
-                    "their path, repeated lines replaced by a reference to the first copy (each kept only if it "
-                    "decodes back to the exact original), read_file/terminal JSON wrappers unescaped with every other "
-                    "key kept. patch/edit/memory/todo results are never touched. Before each LLM call (llm_request middleware) a "
-                    "tool result repeating an earlier one in the same request becomes a reference to it. Stdlib "
-                    "Python, no model, no network.")
+                    "their path, runs of identical lines counted, JSON record lists written as rows (each structural "
+                    "rule kept only if it decodes back to the exact original), read_file/terminal JSON wrappers "
+                    "unescaped with every other key kept. patch/edit/memory/todo results are never touched. Opt-in "
+                    "(CTXPRUNE_DEDUP=1): before each LLM call (llm_request middleware) a tool result repeating an "
+                    "earlier one in the same request becomes a reference to it. Stdlib Python, no model, no network.")
 
 CC_HOOK_SH = '''#!/bin/sh
 # ctxprune-safe: run the bundled stdlib hook (scripts/rt/) with the first working Python 3.9+. No pip, no network.
@@ -148,7 +148,7 @@ exit 0
 '''
 
 CC_HOOK_PY = '''"""ctxprune-safe Claude Code hook ({sentinel}, ctxprune {version}): scripts/lossless_hook.py from the bundled
-stdlib runtime (rt/), lossless rules + cross-turn dedup, never the model. Fails open: any error -> no output."""
+stdlib runtime (rt/), lossless rules (+ cross-turn dedup with CTXPRUNE_DEDUP=1), never the model. Fails open: any error -> no output."""
 
 import os
 import sys
@@ -166,8 +166,7 @@ def main():
         os.environ["CTXPRUNE_PRESET"] = "safe"
         g.boot()   # private umask, rt/ on sys.path (appended), CTXPRUNE_OFF + counts-only stats
         import lossless_hook
-        dedup = "off" if os.environ.get("CTXPRUNE_DEDUP") == "0" else "on"
-        sys.argv = [lossless_hook.__file__, "--dedup", dedup]
+        sys.argv = [lossless_hook.__file__]   # dedup: off unless CTXPRUNE_DEDUP=1 (Settings.from_env)
         lossless_hook.main()
     except BaseException:
         pass
@@ -236,9 +235,9 @@ def build_claude_code(root: str, keep_marketplace: bool = True) -> list:
     if os.path.isdir(os.path.join(pdir, "scripts", "rt")):
         shutil.rmtree(os.path.join(pdir, "scripts", "rt"))
     plugin = {"name": "ctxprune-safe", "version": __version__,
-              "description": "Lossless: rewrites big Bash, Grep and MCP tool outputs into a shorter form without "
-                             "dropping anything (grep hits grouped by file, repeated lines and earlier outputs "
-                             "referenced). Stdlib Python, no model, no network; fails open.",
+              "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without "
+                             "dropping content (grep hits grouped by file, repeated lines counted, JSON lists as "
+                             "rows). Stdlib Python, no model, no network; fails open.",
               "author": AUTHOR, "homepage": REPO, "repository": REPO, "license": "0BSD",
               "keywords": ["context", "tokens", "tool-output", "lossless", "compression"]}
     hooks = {"hooks": {"PostToolUse": [{"matcher": glue.HOOK_MATCHER, "hooks": [

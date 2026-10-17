@@ -407,7 +407,12 @@ class V(BaseHTTPRequestHandler):
         json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         b = json.dumps({"text": "ok"}).encode()
         self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
-ps, vs = ThreadingHTTPServer(("127.0.0.1", 0), P), ThreadingHTTPServer(("127.0.0.1", 0), V)
+class S(ThreadingHTTPServer):
+    def server_bind(self):   # skip HTTPServer's socket.getfqdn(): a slow reverse lookup on macOS CI runners
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+ps, vs = S(("127.0.0.1", 0), P), S(("127.0.0.1", 0), V)
 for srv in (ps, vs):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 os.environ["http_proxy"] = os.environ["HTTP_PROXY"] = "http://127.0.0.1:%d" % ps.server_address[1]
@@ -422,7 +427,7 @@ b = v2_hook.v2_compress("x\ny", "i", 0.5, vs.server_address[1], 5)
 print(json.dumps([a, b, hits]))
 """
         with tempfile.TemporaryDirectory() as td:
-            p = subprocess.run([sys.executable, "-I", "-c", code, HERE, td], capture_output=True, text=True, timeout=30,
+            p = subprocess.run([sys.executable, "-I", "-c", code, HERE, td], capture_output=True, text=True, timeout=120,
                                env={k: v for k, v in os.environ.items() if k.lower() != "no_proxy"})
         a, b, hits = json.loads(p.stdout.strip().splitlines()[-1])
         self.assertEqual((a, b), ("ok", "ok"), p.stderr)

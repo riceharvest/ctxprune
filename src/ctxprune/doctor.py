@@ -92,7 +92,12 @@ def _canary_env(td: str, off: bool = False) -> dict:
 
 
 def _shrunk(out, text: str = SAMPLE) -> bool:
-    return isinstance(out, str) and 0 < len(out) < len(text) and "[ctxprune" in out
+    return isinstance(out, str) and 0 < len(out) < len(text) and has_marker(out)
+
+
+def has_marker(out: str) -> bool:
+    """A ctxprune marker: the short `[cp: ...]` ones (lossless.GROUP_MARK etc.) or the long `[ctxprune ...` ones."""
+    return "[cp:" in out or "[ctxprune" in out
 
 
 def _run(cmd, env: dict, stdin: str, shell: bool = False, timeout: float = 60):

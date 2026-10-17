@@ -32,6 +32,11 @@ def check(cond: bool, what: str) -> None:
         FAILS.append(what)
 
 
+def has_marker(out: str) -> bool:
+    """A ctxprune marker: the short `[cp: ...]` ones (lossless.GROUP_MARK etc.) or the long `[ctxprune ...` ones."""
+    return "[cp:" in out or "[ctxprune" in out
+
+
 def real_home() -> str:
     try:
         import pwd
@@ -233,7 +238,7 @@ def bundle_checks(e: "Env", home: str) -> None:
         got = json.loads(r.stdout)["hookSpecificOutput"]["updatedToolOutput"]["stdout"]
     except (ValueError, KeyError, TypeError):
         got = ""
-    check(0 < len(got) < len(sample) and "[ctxprune" in got,
+    check(0 < len(got) < len(sample) and has_marker(got),
           f"ctxprune-safe hook via its hooks.json command: {len(sample)} -> {len(got)} ({r.stderr[-200:]})")
     r = subprocess.run(cmd, shell=True, input=json.dumps(ev), capture_output=True, text=True,
                        env=dict(env, CTXPRUNE_OFF="1"))
@@ -351,13 +356,13 @@ def main() -> int:
             evs += [{"t": "call", "id": f"c{i}", "name": "bash", "args": {"command": "pytest -q"}},
                     {"t": "result", "id": f"c{i}", "name": "bash", "text": big}]
         r = subprocess.run([py, cli, "--context=pi"], input=json.dumps({"events": evs}), capture_output=True,
-                           text=True, env=e.env)
+                           text=True, env=dict(e.env, CTXPRUNE_DEDUP="1"))   # dedup is opt-in in every preset
         try:
             outs = json.loads(r.stdout)["out"]
         except (ValueError, KeyError):
             outs = {}
         new = next(iter(outs.values()), "")
-        check(outs and len(new) < len(big) and "[ctxprune" in new, f"plugin --context dedup: the repeated "
+        check(outs and len(new) < len(big) and has_marker(new), f"plugin --context dedup: the repeated "
               f"{len(big)}-char result -> {len(new)} chars ({r.stderr[-200:]})")
         st = json.loads(e.run("stats", "--json").stdout)
         check(st.get("request_dedup", 0) > 0, f"stats count per-request dedup ({st.get('request_dedup')} chars)")

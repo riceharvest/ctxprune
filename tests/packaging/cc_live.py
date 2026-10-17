@@ -6,7 +6,7 @@
 
 The mock answers the first agent request with a Bash tool_use (`grep -rn User src` over a generated file), then
 records the tool_result Claude Code sends back on the next request: that is the text the model would really see.
-Passes when it is the ctxprune-compressed form (smaller, "[ctxprune" marker), then repeats with CTXPRUNE_OFF=1 and
+Passes when it is the ctxprune-compressed form (smaller, a "[cp:" / "[ctxprune" marker), then repeats with CTXPRUNE_OFF=1 and
 expects the raw grep output. Needs `claude` on PATH; uses a dummy API key, never the user's credentials or HOME.
 """
 
@@ -177,13 +177,13 @@ def main() -> int:
             return 2
         raw = subprocess.run(["grep", "-rn", "User", "src"], cwd=work, capture_output=True, text=True).stdout
         p, seen = run_once(a.claude, home, work, port, args, False, mock)
-        ok = isinstance(seen, str) and "[ctxprune" in seen and len(seen) < len(raw)
+        ok = isinstance(seen, str) and ("[cp:" in seen or "[ctxprune" in seen) and len(seen) < len(raw)
         print(("ok   " if ok else "FAIL ") + f"{label}: the model received {len(seen or '')} chars for a "
               f"{len(raw)}-char grep output" + ("" if ok else f"\n  claude exit {p.returncode}: {p.stdout[-400:]} "
                                                           f"{p.stderr[-400:]}\n  seen: {str(seen)[:300]!r}"))
         fails += not ok
         p, seen = run_once(a.claude, home, work, port, args, True, mock)
-        ok = isinstance(seen, str) and "[ctxprune" not in seen and seen.startswith(raw.rstrip("\n"))   # CC may append a reminder
+        ok = isinstance(seen, str) and "[cp:" not in seen and "[ctxprune" not in seen and seen.startswith(raw.rstrip("\n"))   # CC may append a reminder
         print(("ok   " if ok else "FAIL ") + f"{label}: CTXPRUNE_OFF=1 -> the model received the raw output"
               + ("" if ok else f" (claude exit {p.returncode}; seen {len(seen or '')} chars, tail {str(seen)[-300:]!r}, "
                                f"raw tail {raw[-120:]!r})"))
