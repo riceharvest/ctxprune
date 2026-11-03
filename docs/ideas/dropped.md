@@ -1,0 +1,355 @@
+# Dropped by the scope filter (342)
+
+## drop-harness (268)
+
+- #1 Transcript ledger — parses ~/.claude private transcript files
+- #70 Auto-start ctxprune serve from a SessionStart hook — SessionStart hook auto-start
+- #72 Matcher expansion — tests hook matcher support for WebFetch/Task
+- #106 Per-project MCP allowlist — per-project MCP allowlist is harness config
+- #107 CLAUDE.md/AGENTS.md lossless rewrite — rewrites CLAUDE.md/AGENTS.md memory files
+- #110 PreCompact guidance — PreCompact guidance needs harness compact command
+- #146 Rebuild in-context set from transcript_path after compaction — parses hook transcript_path JSONL, private log format
+- #147 Resume-time transcript surgery dropping superseded tool results — rewrites session JSONL before resume, harness-specific
+- #150 Hide human-only skills via disable-model-invocation — skill frontmatter setting
+- #151 Scope plugins per project with enabledPlugins — enabledPlugins settings
+- #152 Skill and agent description diet with CI lint — skill and agent descriptions, plugin manifest
+- #153 Demote rare CLAUDE.md sections to on-demand skills or scoped rules — CLAUDE.md sections moved to skills or rules
+- #154 CLAUDE.md per-section usage telemetry from transcripts — CLAUDE.md sections and transcripts are harness-specific
+- #155 Lean launch profile for headless and workflow runs — harness CLI launch flags
+- #156 Switch off account-level connectors in coding repos — harness env var for connectors
+- #158 Inline shell injections in commands bypass the hook — slash-command and skill shell injection, harness feature
+- #161 Sweep skill-listing char budget downward — skill listing budget env var
+- #177 Next-action agreement replay on recorded trajectories — replays saved Claude Code transcripts
+- #190 Host truncation ordering probe: does the hook see everything? — probes host output caps relative to hook ordering
+- #192 Route lint and typecheck to IDE diagnostics, not shell — depends on IDE diagnostics tools of particular agents
+- #193 Launch-time quiet environment per agent config — per-agent static config files
+- #197 Failing commands may bypass the PostToolUse hook entirely — PostToolUseFailure hook event semantics
+- #198 Lower Claude Code's native output caps as a baseline — Claude Code settings.json output caps
+- #207 Budgeted symbol-graph repo map at SessionStart — SessionStart hook injection using host filesystem
+- #211 Guard Write over existing files; suggest Edit — PreToolUse hook plus host filesystem check
+- #212 Machine-readable rewrite plus compact renderer for test runners — needs pre-execution command rewrite via PreToolUse hook
+- #237 Parallel same-batch calls can stub each other — PostToolUse concurrency and PostToolBatch hook events
+- #238 PreModelSwitch hook asks before forfeiting a warm cache — Claude Code PreModelSwitch hook
+- #239 Log resume cold-cache flag and context size — resume-event hook payload fields
+- #240 Append report-size contract to Agent prompts — PreToolUse updatedInput on subagent tool
+- #241 Wrapper dedupes other hooks' repeated additionalContext — wraps other hooks' additionalContext output
+- #242 Deny repeat Skill invocations already in context — Skill tool, PreToolUse and transcript_path are harness features
+- #243 Block oversized pastes in UserPromptSubmit, save to file — UserPromptSubmit hook block-and-save flow
+- #244 Re-inject saved-output index after compaction — SessionStart/PostCompact hook injection
+- #245 Separate ledger and rate for subagent tool calls — keys on hook-input agent_id field
+- #246 Join hook savings log to OTel by prompt id — hook prompt id and Claude Code OTel
+- #247 Competing PostToolUse registrations: duplicates and other trimmers — competing hook registrations in settings files
+- #249 ToolSearch fetch precision: schemas loaded versus tools used — ToolSearch deferred-tool mechanism is harness-specific
+- #250 Tune ENABLE_TOOL_SEARCH threshold and pin hot MCP tools — harness env var and per-server settings
+- #251 Confine chatty MCP servers to one subagent — subagent frontmatter config
+- #253 Per-tool or toolset allowlist inside one MCP server — harness per-tool deny rules and server flags
+- #255 Steer file pushes from push_files to git push — PreToolUse deny steering, no payload rewrite possible
+- #271 Savings ceiling: bill decomposition from transcript usage fields — bill decomposition from Claude Code transcript fields
+- #273 Install-time savings forecast with a not-worth-it verdict — install-time scan of harness transcripts
+- #274 Live statusline meter plus session-end realized-savings receipt — statusLine and SessionEnd harness features
+- #280 Throttle compression rate by plan usage-window burn — statusLine plan-usage payload and subscription windows
+- #293 Hook client timeout equals host timeout, so fallback cannot finish — hook timeout in settings.json
+- #295 Does updatedToolOutput persist across resume, compaction and later turns? — tests Claude Code updatedToolOutput persistence behaviour
+- #296 Plugin cold path: uvx resolve and model download exceed timeout — plugin hook cold path and timeout
+- #303 Warm shared prefix once before fanning out subagents — subagent fan-out orchestration, not payload rewrite
+- #306 Probe-question recall test for /compact, including chained compactions — tests /compact, a harness command
+- #334 Ledger walks parentUuid chain from leaf, not file order — walks session JSONL parentUuid, private log format
+- #335 Sweep --autocompact window against per-turn read cost — Claude Code --autocompact flag
+- #336 Task-boundary /clear nudge from identifier overlap at UserPromptSubmit — UserPromptSubmit hook and /clear
+- #337 Deterministic session handoff digest at SessionEnd instead of resuming — SessionEnd hook and transcript format
+- #339 Memoize read-only Agent reports by git tree hash and prompt — PreToolUse hook on subagent tool, git tree
+- #340 Subagent writes full report to file, returns digest and path — subagent definition and prompt contract
+- #342 Post-compaction restore audit: summary versus re-attached files and skills — Claude Code compaction re-attach behaviour
+- #343 Lint memory files for dead paths, symbols and commands — lints CLAUDE.md and auto-memory files
+- #344 Audit SessionStart injections duplicated on resume, clear and compact — SessionStart hooks and plugins
+- #345 Stub the ExitPlanMode result's echo of the approved plan — ExitPlanMode and plan file are harness features
+- #346 Route PDF Read to pdftotext via PreToolUse — PreToolUse deny of Read tool
+- #374 Recovery-path permission probe for saved originals — Claude Code permission modes and allow rules
+- #401 Generate Read deny rules for vendored and generated paths — generates harness permissions.deny settings
+- #402 Steer symbol lookups to LSP instead of grep-then-Read — Claude Code LSP tool, CLAUDE.md or hook steering
+- #432 Census of cold-start prefix sizes per subagent type — Claude Code subagent types and transcript usage fields
+- #435 Stop-hook alert when cache reads collapse mid-session — Stop hook and transcript_path
+- #437 Controlled cache-bust matrix for mid-session toggles — measures harness toggles (/effort, plugins, MCP reconnect)
+- #441 Thinking cost as residual of output_tokens minus visible text — relies on Claude Code transcript thinking blocks
+- #443 Audit fixed per-call overhead: Bash description, long MCP names — Claude Code Bash description arg and .mcp.json keys
+- #444 Replace whole-list TodoWrite rewrites with per-item task updates — Claude Code TodoWrite tool, deny via hook
+- #445 Append commit attribution trailers via git hook, not model output — harness attribution setting and git hook
+- #446 Expand PR body placeholder from commit log in a hook — PreToolUse updatedInput expansion
+- #447 Deny third identical Edit pair; steer to sed or codemod — PreToolUse deny and steering
+- #451 Bash replay token: !N re-runs an earlier command verbatim — PreToolUse updatedInput command expansion
+- #452 Mine recurring command lines into short project aliases — cross-session logs and CLAUDE.md alias line
+- #453 Register serve as an HTTP hook, skipping Python spawn — Claude Code http hook handler type
+- #488 Project-scope install: repo-root file and portable guarded command — settings.json hook install scope
+- #489 ctxprune doctor: synthetic hook event, heartbeat, effective config — settings.json hook command and heartbeat
+- #493 In-process Claude Agent SDK PostToolUse callback using ctxprune — Claude Agent SDK hook callback
+- #500 Turn off built-in git instructions, bundled skills and attachments — harness settings and env vars
+- #501 Probe: does a partial Read satisfy Edit's read-first check — probes Claude Code Edit read-first check
+- #505 Drop repeated 'Shell cwd was reset' Bash trailers — targets Claude Code's own cwd-reset trailer string
+- #536 Hoist files every sibling subagent reads into shared prefix — subagent prompt design
+- #539 Trim ToolSearch selects to schemas not yet in context — ToolSearch, PreToolUse, transcript_path are harness features
+- #541 Substitution replay: '!3 s/old/new/' patches an earlier command — PreToolUse updatedInput command patching
+- #542 Move CLAUDE.md rationale into stripped block HTML comments — CLAUDE.md loader comment stripping
+- #543 Canary probe: which manifest and frontmatter fields reach model — plugin manifest and frontmatter fields
+- #544 Audit eager @import chains that expand into every prompt — CLAUDE.md @import chains
+- #545 Trim custom subagents: omitClaudeMd and explicit tools allowlist — subagent frontmatter config
+- #546 Run multi-step skills with context: fork — skill frontmatter context fork
+- #547 Disable auto-memory in headless and throwaway sessions — auto-memory harness setting
+- #548 Replace derivable CLAUDE.md sections with regeneration commands — edits CLAUDE.md memory files
+- #549 Enforce CLAUDE.md rules by hook or config, delete prose — harness hooks, permissions, CLAUDE.md prose
+- #550 Delta-debug always-on instruction bullets against replay suite — ablates always-on memory-file instruction bullets
+- #551 Split cold skill-body sections into on-demand reference files — skill body restructuring
+- #552 Census nested CLAUDE.md lazy loads; apply claudeMdExcludes — nested CLAUDE.md loading setting
+- #571 Fork-from-prefix A/B: finish recorded runs from the compression point — resumes recorded sessions headless, harness resume
+- #577 OpenAI-compatible fake summarizer model backed by token pruning — relies on harness summarizer slots and endpoint config
+- #580 PreToolUse hook runs the command, denies with digest as reason — uses per-harness PreToolUse deny hooks
+- #583 Strip stale environment_details blocks from Cline and Roo history — Cline and Roo environment_details block only
+- #584 Native session-log adapters give exact token ledgers per agent — adapters for each harness's private log format
+- #586 Fan one generated-path list out to every agent's ignore file — per-harness ignore config files
+- #587 Gemini CLI BeforeModel hook stubs aged results, no proxy — Gemini CLI BeforeModel hook
+- #588 Compress Reads of host-persisted oversized tool-result files — host-persisted tool-result files and Read matcher
+- #592 Stream-aware rates: keep more of stderr than stdout — separate stdout/stderr streams are host-only, not in API payload
+- #597 Mem0-style add/update/skip gate on memory file writes — PreToolUse hook on memory directory writes
+- #599 SWE-agent-style syntax check after Edit and Write — PostToolUse on Edit/Write runs host file checks
+- #623 Skip unchanged loop and cron wakeups at UserPromptSubmit — UserPromptSubmit hook source field
+- #624 Filter poll_event turns: webhook and Monitor events — UserPromptSubmit hook poll_event source
+- #625 SubagentStop blocks over-long reports for a digest rewrite — SubagentStop hook
+- #627 Compress Stop-gate and other hook feedback channels — Stop/UserPromptSubmit hook feedback channels
+- #628 Key keep rate on duration_ms and effort — needs hook-input duration_ms and effort fields
+- #630 Compact at the cold-cache boundary, nudged by idle gap — Stop and UserPromptSubmit hooks, systemMessage
+- #631 Ledger-computed PreCompact instructions: live paths kept, dead results named — PreCompact hook
+- #632 One consolidated note per parallel batch via PostToolBatch — PostToolBatch hook event
+- #633 Diff hook schema text from installed claude binary per release — parses Claude binary's embedded hook schema text
+- #634 Seen-set digest injected into recurring scheduled sessions — Stop and SessionStart hooks
+- #656 Retrospective difference-in-differences at install date from transcripts — hook install date and Claude Code transcripts
+- #658 Zero-token per-call savings line via hook systemMessage — hook systemMessage output field
+- #661 Export savings ledger to git notes, OTLP counters, Actions summary — Stop hook appends the ledger
+- #683 Ledger overcount guard: dedupe usage per message id, cross-check ccusage — Claude Code JSONL message-id quirk
+- #685 Run formatters in Stop hook, not per-edit PostToolUse — Stop hook formatter and harness modified-file reminder
+- #686 Codex output knobs: tool_output_token_limit, model_verbosity, reasoning summary — Codex config knobs
+- #687 Codex auto-compact limit and compact_prompt override sweep — Codex config settings
+- #690 Sweep CLAUDE_CODE_MAX_OUTPUT_TOKENS against truncated tool_use inputs — Claude Code environment variable
+- #692 Route read-only subagents and utility work to Haiku — subagent frontmatter and env var; tokens unchanged
+- #716 Deny parent reads of subagent transcripts and task output files — PreToolUse deny on harness subagent transcript paths
+- #717 Cap subagent turns with maxTurns from the observed tail — subagent frontmatter maxTurns
+- #718 Steer follow-ups to continue a finished subagent, not respawn — PreToolUse hook on subagent tool
+- #719 Downgrade Explore thoroughness from 'very thorough' for narrow lookups — PreToolUse rewrite of subagent tool input
+- #720 Fan out headless children by forking a warmed parent session — claude --resume --fork-session CLI feature
+- #721 Delegation leakage: parent re-reads files its subagents already read — subagent sidechain is harness-specific
+- #722 Stub aged skill bodies in history; allow reload on demand — Skill invocation bodies are a harness feature
+- #724 Partial compaction from a rewind point keeps the cached prefix — Claude Code rewind menu
+- #725 Resume-from-summary versus full resume on stale large sessions — Claude Code resume modes
+- #726 BM25 memory retrieval at UserPromptSubmit instead of an always-loaded index — UserPromptSubmit hook over auto-memory files
+- #727 Share one brief file across parallel Agent prompts — Claude Code Agent tool prompt steering
+- #752 Install/uninstall settings.json round-trip: backup, atomic write, byte-identical — settings.json install and uninstall mechanics
+- #753 Exact plugin version pin in lockstep with plugin.json — plugin.json and plugin hook packaging
+- #764 LangChain content_and_artifact tools: compressed content, raw artifact — LangChain ToolMessage artifact feature
+- #779 Edit old_string elision marker expanded by PreToolUse — PreToolUse updatedInput expansion
+- #787 Diff-neighbourhood card: changed symbols with caller signatures — UserPromptSubmit hook injection from host git state
+- #813 Snap wakeup intervals out of the cache TTL dead zone — PreToolUse rewrite of CronCreate input
+- #815 Split first-request writes into shared prefix versus session-unique head — session usage logs, skills and CLAUDE.md trimming
+- #816 UserPromptSubmit guard for thinking keywords that bust message cache — UserPromptSubmit hook
+- #817 Subagent versus inline exploration break-even by main-context size — subagent delegation analysis tied to harness and cache pricing
+- #820 PreToolUse stagger of parallel Agent calls until first child warms — PreToolUse hook on Agent calls
+- #821 Attribute cold-cache gaps to user, tool time, retries, permission prompts — transcript timestamps and permission prompts
+- #822 Continue-versus-respawn gate on subagent cache age and size — subagent continuation and cache TTL
+- #823 Drop TodoWrite activeForm duplicate via proxy schema edit — Claude Code TodoWrite schema and hook
+- #826 Hook-computed end-of-turn change receipt replaces model recap — Stop hook, systemMessage and CLAUDE.md rule
+- #827 Write elision markers expanded from disk by PreToolUse — PreToolUse updatedInput expansion
+- #828 Revise plans with Edit on the plan file — ExitPlanMode and plan-file handling
+- #831 Repo-relative paths and no cd prefix in tool calls — PreToolUse updatedInput and CLAUDE.md steering
+- #832 Closed-schema final reports for headless subagents — harness headless structured-output subagent reports
+- #844 cost-state records as offline ground truth for the ledger — undocumented Claude Code cost-state records
+- #866 Install canary through the real host proves replacement is honored — tests Claude Code updatedToolOutput honoring
+- #867 Refuse ephemeral interpreter paths when writing the hook command — validates hook command written to settings
+- #868 Probe where CTXPRUNE_* reaches hooks; plugin userConfig fallback — env reach into hooks, plugin userConfig
+- #871 Key rate and threshold on permission_mode and headless runs — keys on hook-input permission_mode
+- #877 Idle-time memory consolidation by a cheap model at SessionEnd — SessionEnd hook, auto-memory, cloud LLM
+- #901 Digest agent transcript JSONL to role, text and tool lines — depends on products' private transcript log formats
+- #913 SubagentStart hook hands children the parent's read manifest — SubagentStart hook
+- #914 Replace default system prompt in non-coding headless runs — harness system-prompt flags and output styles
+- #915 Test exclude-dynamic-system-prompt-sections for cross-directory cache sharing — Claude Code CLI flag
+- #916 Measure context left behind by /context, /cost and /mcp output — harness slash-command output
+- #917 Pass through output of commands run from skill directories — skill and plugin cache directories
+- #918 Lint CLAUDE.md bullets restating the built-in prompt or other layers — lints CLAUDE.md bullets
+- #920 Map Codex AGENTS.md chain loads and project_doc_max_bytes cap — Codex AGENTS.md loading and config cap
+- #921 Detect duplicate skills, commands and agents across scopes — Claude Code skill and command listing across plugin scopes
+- #947 opencode plugin: port the hook via tool.execute.after — opencode plugin API
+- #949 Prune Codex, Cline and Aider history files before resume — private history file formats of Codex, Cline, Aider
+- #950 Cross-agent edit-format token census: whole, diff, udiff, apply_patch — tallies from each agent's private logs
+- #951 Aider side calls: auto-commit messages and repo-map churn — Aider side calls and config flags
+- #952 Roo and Cline mode tool groups shrink embedded tool docs — Roo and Cline mode config and prompt override files
+- #954 Codex execpolicy rules forbid verbose commands with a hint — Codex execpolicy rules file
+- #960 Match ReadMcpResourceTool, which mcp__.* misses — hook matcher for one harness's built-in resource tool
+- #965 Switch off background requests: suggestions, recap, idle compaction, check-ins — Claude Code background request settings and env vars
+- #966 Lean spawn prompts and idle shutdown for agent teams — Claude Code agent teams and subagent profile config
+- #967 UserPromptSubmit resolves named files and symbols to path:line — UserPromptSubmit hook injection from host search
+- #968 Per-release empty-session token baseline canary — per-Claude-Code-release baseline canary
+- #969 Net token effect of AGENTS.md: file on versus off — AGENTS.md memory file measurement
+- #971 Log statusline prompt_cache fields to prove no hook cache misses — Claude Code statusline fields
+- #973 Probe double loading when CLAUDE.md imports AGENTS.md — CLAUDE.md import and memory-file loading behaviour
+- #994 Auto mode may block PreToolUse rewrites: probe every permission mode — Claude Code auto mode and PreToolUse permissions
+- #995 Auto-mode classifier overflow: denied calls and early compaction cost — Claude Code auto-mode classifier
+- #996 Silent-success checks: async PostToolUse hook wakes model only on failure — async PostToolUse hook with asyncRewake
+- #997 Block bare thank-you prompts in UserPromptSubmit when nothing awaits reply — UserPromptSubmit and Stop hooks
+- #998 Pre/Post worktree diff receipt replaces output of mutating commands — needs Pre/PostToolUse hooks and host git state
+- #999 Skip Stop-hook verifiers on turns that changed nothing — Stop hook verifiers are harness hook events
+- #1000 Census of hook-injected context by event, plugin and surviving turns — hook-injected context by event and plugin
+- #1004 Collapse the deferred tool-name roster to per-server lines — ToolSearch deferred-roster reminder is Claude Code specific
+- #1005 Evict idle loaded deferred-tool schemas at cold-cache boundary — depends on ToolSearch deferred loading and cache-cold timing
+- #1011 Probe whether MCP prompts and resources enter the request — Claude Code MCP prompts and resources behaviour
+- #1024 Ledger pricing guard: usage tier, speed and iterations fields — ledger from local Claude Code transcript usage records
+- #1025 Count savings against host-visible output, not raw output — Claude Code oversized-result persistence and preview
+- #1037 Probe features lost when ANTHROPIC_BASE_URL points at a proxy — probes Claude Code behaviour with custom base URL
+- #1043 Route title and summary side calls to a local model — Claude Code title and recap side calls, env vars
+- #1045 Hook stdin decoding corrupts non-ASCII under C and cp1252 locales — hook stdin decoding in hook entrypoint
+- #1061 Terminal-Bench with real Claude Code to exercise the live hook — exercises Claude Code's PostToolUse hook
+- #1062 Classifier-compress CLAUDE.md and skill bodies once, keep backups — rewrites CLAUDE.md and skill files at install
+- #1087 Archive auto-memory entries that are never read or date-expired — auto-memory files, transcripts and session hook
+- #1089 Subagent frontmatter preloads: skills and memory per spawn — subagent frontmatter config
+- #1090 Route context-answerable side questions to /btw — /btw slash command and hook
+- #1091 Compaction summary anatomy: tokens per section and content type — Claude Code compaction summary and PreCompact
+- #1093 Orientation card at SessionStart resume and compact — SessionStart hook
+- #1094 Deny Agent spawns that are single-file or single-symbol lookups — PreToolUse gate on Claude Code Agent spawns
+- #1095 Deterministic evidence manifest appended to subagent results — SubagentStop hook and subagent result plumbing
+- #1103 PDF outline-first: deny whole Read, offer bookmarks and page index — PreToolUse deny of Read tool
+- #1125 Install should detect settings layers that stop hooks running — checks harness settings layers at install
+- #1126 LangChain 1.0 wrap_tool_call middleware port of the hook — LangChain middleware API
+- #1127 LangGraph llm_input_messages stubs aged ToolMessages, state untouched — LangGraph pre_model_hook is one framework's feature
+- #1147 Classical Chinese rewrite of always-on rules, kill-test first — CLAUDE.md rule rewriting; also tokenizer dependent
+- #1172 Read Claude Code's built-in cache-break diagnosis labels — Claude Code binary diagnoser labels
+- #1173 Probe segment-split and overage-sensitive cache TTL env vars — Claude Code environment variables
+- #1179 Lint SessionStart and UserPromptSubmit hooks for volatile bytes — lints SessionStart/UserPromptSubmit hook output
+- #1180 Probe Claude Code's own context-management flag, not a proxy — probes Claude Code's internal flag and Anthropic API edit
+- #1181 Zlib-ratio gate sends repetitive Write content to generator scripts — PreToolUse deny on Write
+- #1182 Steer new-file Writes to cp plus Edit of a sibling — PreToolUse deny on Write
+- #1183 Normalise-then-match healing of failed Edit anchors — PreToolUse rewrite of Edit input
+- #1186 Closed-loop narration governor via PostToolUse feedback — PostToolUse hook and transcript_path
+- #1187 Deny new report-style markdown files at Write — PreToolUse deny on Write
+- #1188 Delegate bulk code generation to a cheaper model, file-out — Haiku subagent delegation
+- #1196 PreToolUse warm-up: load the model while the command runs — needs PreToolUse hook event for warm-up
+- #1203 Mine host-persisted tool-results files as the large-output corpus — host-persisted tool-results file layout
+- #1204 Mirror content-free digests before host transcript retention purge — Stop hook and Claude Code transcript retention
+- #1211 Wrapper shell functions captured by Claude Code's shell snapshot — Claude Code shell snapshot mechanism
+- #1222 ctxprune launcher: per-session settings overlay, env and serve — claude --settings launcher overlay
+- #1223 Install flags bake rate and threshold into hook command — bakes options into settings.json hook command
+- #1224 Did-you-mean paths on ENOENT misses to save retry turns — failure hook plus host git ls-files lookup
+- #1230 Adapters: Pydantic AI, OpenAI Agents SDK, Vercel AI SDK — per-framework hook adapters
+- #1259 Output-handle macros expanded in Agent prompts and comment bodies — PreToolUse macro expansion
+- #1260 Speculative next-command prefetch via PostToolUse additionalContext — hook runs predicted commands on host
+- #1263 Host-native dedup baseline probe before building stubs — probes what Claude Code itself collapses
+- #1267 Replace skill-body code blocks the model retypes with scripts — skill bodies and scripts directory
+- #1268 Lint skill bodies that restate their own frontmatter description — skill frontmatter linting
+- #1269 Switch off claude.ai account-synced skills in coding repos — account-synced skills toggle
+- #1270 Shorten plugin names that prefix every skill and tool — plugin manifest naming
+- #1272 Does an explicit agent tools allowlist lengthen the Agent listing? — subagent definitions and Agent tool listing
+- #1273 Output tokens added by output styles and style-injecting plugins — Claude Code output styles and plugins
+- #1274 Lowercase shouted emphasis in instruction files, with compliance check — instruction-file editing; model-compliance claim
+- #1275 Collapse near-duplicate few-shot examples inside skills and CLAUDE.md — edits skill and CLAUDE.md files
+- #1276 Output-language tax of the language setting — Claude Code language setting
+- #1277 Attribute tool calls induced by CLAUDE.md directives — CLAUDE.md directives memory file
+- #1278 Consolidate sibling skills behind one router skill — skill consolidation, plugin skill structure
+- #1299 Stub superseded final_file_content echoes in Cline and Roo — Cline and Roo final_file_content echo format
+- #1305 Gemini CLI BeforeToolSelection hook narrows the tool menu per turn — Gemini CLI BeforeToolSelection hook
+- #1307 Continue HTTP context provider serves pruned files for @-attachments — Continue and Zed context provider extensions
+- #1308 Errors-only diagnostics profile for agent edit-feedback loops — VS Code profile settings
+- #1320 Repo token-weight tree joined with agent access counts — joins Claude Code transcripts, deny/ignore settings
+- #1346 SessionStart and CwdChanged write toolchain-specific quiet env via CLAUDE_ENV_FILE — CLAUDE_ENV_FILE and SessionStart hook
+- #1347 ConfigChange hook defers mid-session edits that rewrite the cached prefix — ConfigChange hook
+- #1348 UserPromptExpansion gate for slash-command bodies already in context — UserPromptExpansion hook and slash commands
+- #1349 Probe which hook events see user-typed bash-mode commands — probes which hook events see bash-mode commands
+- #1350 Hook-supplied sessionTitle to skip the title-generation side call — SessionStart hook output field
+- #1351 PreToolUse appends a brevity clause to WebFetch prompts — relies on WebFetch's internal small-model summarizer
+- #1352 Move tool-specific CLAUDE.md bullets into once-per-session PreToolUse hints — CLAUDE.md bullets moved into PreToolUse hook hints
+- #1353 Map context segments by which hook event can rewrite them — maps segments by harness hook event
+- #1355 Incremental transcript tailer so stateful hooks stay under 50 ms — tails product's private session JSONL transcript
+- #1359 Fill token-bound request fields from the previous call — PreToolUse copies fields between tool calls
+- #1360 ToolSearch recall at k under schema and description edits — Claude Code ToolSearch deferred-tool ranking
+- #1381 Week-over-week bill movers: decompose spend into drivers — spend decomposition from Claude Code transcripts
+- #1382 Prevalence-first triage: detector per idea over local transcripts — detectors over local Claude Code transcripts
+- #1394 Probe hook stdout size caps and ensure_ascii inflation — hook stdout caps and encoding
+- #1396 Note-to-output attribution when several results are compressed — hook additionalContext note placement issue
+- #1402 Workflow cards induced from green runs, Agent Workflow Memory style — SessionEnd job and skills
+- #1403 Delta-merge memory edits with counters, not full LLM rewrites — CLAUDE.md memory file consolidation
+
+## drop-scope (37)
+
+- #77 Steering snippet for CLAUDE.md — CLAUDE.md steering advice to the agent
+- #109 Image tokens — image tokens, non-text media
+- #111 Output-token diet — steers the model's output style
+- #252 Prefer gh CLI with --json fields over GitHub MCP — advice on which tools users steer agents toward
+- #341 Evict aged images and PDFs from history with text stubs — non-text media: images and PDFs
+- #352 Hash-stub repeated screenshots at PostToolUse — screenshot image handling
+- #353 Launch browser MCP with phone viewport and no inline images — browser MCP config and image tokens
+- #354 Verify image tokens depend on pixels, not format or colour — image tokens, non-text media
+- #436 Keep fan-out system prompt and cwd byte-identical — advice on configuring fan-out child prompts
+- #463 Ship model weights in a PyPI wheel for locked-down sandboxes — packaging: ship weights in wheel
+- #723 Route compaction summaries to a cheaper model on cold cache — model routing price lever, not token saving
+- #733 Crop follow-up screenshots to the changed region — screenshot image cropping
+- #734 Choose screenshot scale by an OCR-stability probe — screenshot image scaling
+- #735 PreToolUse OCR swap for Read of text-dominant screenshots — screenshot image handling, hook-based
+- #736 Run computer-use displays at XGA with zoom on demand — computer-use display configuration, images
+- #737 Fuse multi-step browser flows into one Playwright script — nudges agent behaviour via hook note or skill
+- #738 Select video keyframes by scene change, not fixed fps — video frame selection, non-text media
+- #825 Proxy stop_sequences for mined closing pleasantries — steers model output style via stop_sequences
+- #830 UserPromptSubmit answer-length hint keyed to prompt class — steers answer length, output style
+- #833 Terse-reasoning instruction to shrink thinking tokens (Chain of Draft) — prompting advice to steer reasoning style
+- #872 Setup-agent eval: can a fresh agent follow AGENTS.md? — evaluates setup docs, not token saving
+- #873 Shorten harness-forced path prefixes: project root, temp dirs, worktrees — user launch-environment advice (symlink), not a rewrite
+- #919 Audit the token tax of non-English instruction files — advice to translate instruction files
+- #922 Point agents at raw AGENTS.md, skipping the GitHub page — README and docs packaging for agent install
+- #956 Pre-run install and build in setup scripts, not agent turns — advice on configuring agent setup scripts
+- #1099 Blocklist trackers, ads and consent widgets in browser MCP — browser server configuration, not a text transform
+- #1100 Visual-regression failures: Read only the diff image — image reads, PreToolUse steering
+- #1101 Settle-before-capture: one stable screenshot instead of retakes — screenshot capture wrapper
+- #1102 Text probes instead of screenshots for layout and plot checks — advice to agents to avoid screenshots
+- #1105 Desktop accessibility-API text instead of computer-use screenshots — steers away from screenshots, non-text media
+- #1129 Retriever-native MMR and score threshold before any compression — advice on configuring retriever settings
+- #1131 Pruning lets refine-mode synthesis collapse into one call — advice on choosing synthesis mode
+- #1184 Offload counting, sorting and diffing from reasoning to commands — steering advice on offloading work to commands
+- #1189 Batch independent Edits into one assistant message — advice on batching edits
+- #1191 Denser reasoning language test: Chinese or symbolic shorthand — steers model reasoning language
+- #1217 Composite Action: cache model, start serve, upload originals — CI packaging recipe, not a token transform
+- #1220 Shrink AGENTS self-check fixture and make it pre-pass-proof — docs self-check fixture for AGENTS.md
+
+## drop-model (33)
+
+- #160 Effort and thinking budget sweep by task type — thinking budget and effort levels are model-specific
+- #282 API-native clear_tool_uses edit via proxy or SDK loop — Anthropic context-editing API feature
+- #283 Proxy upgrades cache_control to 1h TTL on observed idle gaps — Anthropic cache_control TTL rewriting
+- #284 Proxy keep-alive pings to hold the prompt cache warm — Anthropic prompt-cache TTL and pricing specific keep-alive
+- #289 Pin cache locality across OpenRouter, LiteLLM and OpenAI-style gateways — provider-specific cache routing and prompt_cache_key features
+- #290 Inject missing cache_control breakpoints for Claude behind OpenAI-format agents — injects Anthropic cache_control breakpoints
+- #431 Breakpoint before unique task text in fan-out children — cache_control breakpoint placement
+- #433 Calibrate subscription-quota weights per token class — vendor subscription quota weights
+- #439 Test the 20-block cache lookback on parallel tool batches — tests Anthropic-specific 20-block lookback
+- #442 Per-request thinking budget keyed to preceding tool result — Anthropic extended-thinking budget parameter
+- #502 Render giant read-only logs as PNG; compare image tokens — depends on vendor image-token costs and vision reading
+- #664 Pricing-cliff guard: compress harder just below the premium tier — one vendor's 200k premium pricing tier
+- #666 Rewrite clear_thinking keep:all to thinking_turns in proxy — Anthropic clear_thinking context_management edit
+- #667 Strip cache_control from requests whose prefix is never reread — strips Anthropic cache_control
+- #671 Stub aged server-tool result blocks in resent history — Anthropic server-tool blocks with encrypted_content
+- #672 Proxy adds defer_loading to tool arrays for non-Claude-Code clients — Anthropic tool-search beta API feature
+- #769 Anthropic citations instead of verbatim quoting in RAG answers — Anthropic citations API billing behaviour
+- #811 Validate a cache simulator against recorded usage fields — simulates Anthropic breakpoint caching rules
+- #814 Downgrade 1h cache writes to 5m for gap-free sessions — Anthropic 1h versus 5m cache TTL tiers
+- #819 Keep-alive ping must match thinking parameters, so max_tokens=1 may fail — Anthropic thinking budget and cache invalidation rules
+- #972 Probe which thinking-budget knobs bind per model — per-model thinking-budget knobs
+- #1038 Programmatic tool calling keeps bulky MCP results out of context — Anthropic programmatic tool calling API feature
+- #1039 API-native compaction edit for loops lacking their own compactor — Anthropic API-native compaction edit
+- #1041 Responses API previous_response_id: compress function_call_output on arrival — OpenAI Responses previous_response_id server-side state
+- #1044 Inject content caps into server-side web_fetch and web_search tools — Anthropic server web_fetch/web_search API params
+- #1174 Inventory spare cache_control slots in real Claude Code requests — Anthropic cache_control slot inventory
+- #1175 Measure how much cache survives an edit deep in history — Anthropic lookback window measurement
+- #1176 Cache checkpoints before big tool results for cheap later stubbing — cache_control breakpoints
+- #1178 Does a new user prompt rewrite earlier turns' cache? — Anthropic thinking-block stripping behaviour
+- #1375 TTL-edge guard: skip model path when hook latency flips cache — vendor 5-minute prompt cache TTL
+- #1388 Extended prompt-cache retention for OpenAI-format agents via gateway — OpenAI and Gemini cache retention API features
+- #1389 Team gateway on one workspace key shares cached prefixes — Anthropic workspace-level cache isolation
+- #1392 Run non-urgent headless agent turns through Message Batches — Anthropic Message Batches API, price lever
+
+## drop-cloud (4)
+
+- #404 Cheap-LLM extractive line picker for outputs over 50 KB — runtime call to hosted LLM
+- #663 Local-model profile: threshold from prefill tokens per second — self-hosted local-model prefill economics
+- #857 Subtract last green run's log from a failing run — needs network fetch and gh auth credentials at runtime
+- #1306 Cross-vendor bulk reader: headless gemini or codex answers questions — runtime call to another vendor's cloud CLI
