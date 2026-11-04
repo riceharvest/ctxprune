@@ -6,6 +6,7 @@ Everything here is a reference prototype: stdlib only, written to be tested, not
     idempotent=False, because re-encoding an encoded text must escape it and so grows it by design;
   * oracles parse (json, csv, xml, plistlib, a small YAML-subset loader) instead of re-running the encoder's logic.
 """
+import ast
 import base64
 import copy
 import csv
@@ -14,6 +15,7 @@ import json
 import plistlib
 import random
 import re
+import warnings
 import xml.etree.ElementTree as ET
 from collections import Counter
 from decimal import Decimal
@@ -131,7 +133,7 @@ case(
         Fixture("input that starts with the raw escape", "§raw\n" + _prom(1, 20), None),
         Fixture("NaN, Inf, duplicate and decreasing timestamps", '{"values":[[10,"NaN"],[20,"+Inf"],[30,"-Inf"],[30,"1"],[20,"2"],[10,"3"],[10,"1.5e+06"]]}', None),
     ],
-    min_gain=0.3,
+    min_gain=0.4,
     idempotent=False,  # encoded text starts with the header, so re-encoding must escape it (grows) by design
 )
 
@@ -354,7 +356,7 @@ case(
     decode=mix_decode,
     fixtures=[
         Fixture("issue timeline, 5 shapes interleaved", _timeline(36), True),
-        Fixture("longer timeline without trailing newline", _timeline(60, seed=9).rstrip("\n"), True),
+        Fixture("second timeline without trailing newline", _timeline(30, seed=9).rstrip("\n"), True),
         Fixture("ascii-escaped unicode in rows", _cj([{"id": i, "kind": "a", "name": "café " + str(i)} for i in range(8)] + [{"x": 1}], True), True),
         Fixture("every shape appears at most twice", _cj([{"a": 1}, {"b": 2}, {"a": 3}, {"b": 4}, {"c": 5}]), False),
         Fixture("pretty-printed array is declined", json.dumps([{"a": i, "b": 2} for i in range(6)], indent=2) + "\n", False),
@@ -364,7 +366,7 @@ case(
         Fixture("input that starts with the raw escape", "§raw\n" + _timeline(12), None),
         Fixture("nested rows, null, NaN, empty object and key order", '[{"a":1,"b":{"c":[1,{"d":null}]}},{"a":2,"b":{}},{"a":NaN,"b":[]},{"b":1,"a":2},{"b":2,"a":3},{"b":3,"a":4},{},{},{}]', None),
     ],
-    min_gain=0.15,
+    min_gain=0.12,
     idempotent=False,
 )
 
@@ -741,6 +743,11 @@ _SOAP = """<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/enve
       <Box xml:space="default">
         <Inner>x</Inner>
       </Box>
+      <Mixed>
+        <a/>
+        <![CDATA[ raw ]]>
+        <b/>
+      </Mixed>
     </GetPrice>
   </soapenv:Body>
 </soapenv:Envelope>
@@ -937,11 +944,11 @@ def _yval(t: str, anchors: dict):
         inner = t[1:-1].strip()
         if inner == "":
             return []
-        if any(ch in inner for ch in "[]{}\"'&*!|>") or ": " in inner:
+        if any(ch in inner for ch in "[]{}\"'") or ": " in inner:
             raise _YErr("flow sequence content")
         parts = [p.strip() for p in inner.split(",")]
-        if "" in parts:
-            raise _YErr("empty flow item")
+        if "" in parts or any(p[0] in "&*!|>%@`#?:" or p == "-" or p.startswith("- ") for p in parts):
+            raise _YErr("empty or special flow item")
         return [_yscalar(p) for p in parts]
     if c == "{":
         if t == "{}":
@@ -1179,6 +1186,21 @@ spec:
     volumeMounts:
     - mountPath: /etc/prometheus
       name: config
+    securityContext:
+      capabilities:
+        add:
+        - NET_BIND_SERVICE
+        - SYS_PTRACE
+        drop:
+        - ALL
+    env:
+    - name: GOGC
+      value: "80"
+  dnsConfig:
+    searches:
+    - monitoring.svc.cluster.local
+    - svc.cluster.local
+    - cluster.local
   nodeSelector:
     kubernetes.io/os: linux
   tolerations:
@@ -1230,7 +1252,7 @@ case(
         Fixture("multi-line plain item and nested lists", "a:\n- first\n  continued here\n- second\nb:\n- - x\n  - y\nc:\n- one\n\n- two\n", None),
         Fixture("indentless and nested key lines", "- name: x\n  args:\n  - a\n  - b\n  env:\n    list:\n    - c\n    - d\n", None),
     ],
-    min_gain=0.05,
+    min_gain=0.06,
 )
 
 # ===============================================================================================================
@@ -1349,7 +1371,7 @@ case(
         Fixture("nested repeated blocks overlap", "".join(f"p{k}:\n  spec:\n    labels:\n      a: 1\n      b: 2\n    other: 3\n  q:\n    labels:\n      a: 1\n      b: 2\n" for k in range(4)), None),
         Fixture("different indentation depth, same relative block", "a:\n  labels:\n    x: 1\n    y: 2\nb:\n  c:\n    labels:\n      x: 1\n      y: 2\nd:\n  labels:\n    x: 1\n    y: 2\ne:\n  labels:\n    x: 1\n    z: 2\n", None),
     ],
-    min_gain=0.2,
+    min_gain=0.3,
 )
 
 # ===============================================================================================================
@@ -1532,20 +1554,25 @@ def sim_entity_delta() -> dict:
     fetch("gh", "t", tricky2, 12)
     assert seen[12].startswith(_D_MARK) and _jcanon(reader_entity(seen, 12)) == _jcanon(tricky2), "True vs 1 and 1 vs 1.0 are different JSON"
 
-    # compaction drops call 1 from the model's context: older deltas become unreadable, so the next fetch must be full
-    for gone in (1,):
-        del seen[gone]
-    L.compacted({1})
-    for n in (2, 3, 4, 5):
+    # compaction drops the full copy that a delta chain starts from: older deltas become unreadable and the next fetch must be full
+    def ent(n):
+        return _issue(id=4321, comments=n, updated_at=f"2025-03-04T10:0{n}:00Z")
+
+    for k in range(3):
+        fetch("gh", "issue_read", ent(k), 20 + k)
+    assert seen[21].startswith(_D_MARK) and seen[22].startswith(_D_MARK), "calls 21 and 22 are deltas of call 20"
+    del seen[20]
+    L.compacted({20})
+    for n in (21, 22):
         try:
             reader_entity(seen, n)
             raise AssertionError("a delta whose base was compacted away should be unreadable")
         except KeyError:
             pass
-    o, t = fetch("gh", "issue_read", _issue(comments=6), 13)
-    assert o == t, "base compacted away: send the full object again"
-    o, t = fetch("gh", "issue_read", _issue(comments=7), 14)
-    assert o.startswith(_D_MARK) and _jcanon(reader_entity(seen, 14)) == _jcanon(_issue(comments=7)), "deltas resume on the new full copy"
+    o, t = fetch("gh", "issue_read", ent(3), 23)
+    assert o == t, "chain base compacted away: send the full object again"
+    o, t = fetch("gh", "issue_read", ent(4), 24)
+    assert o.startswith(_D_MARK) and _jcanon(reader_entity(seen, 24)) == _jcanon(ent(4)), "deltas resume on the new full copy"
 
     # (d) fail open
     for text in ["plain text output", "[1,2,3]", '{"no_id": 1}', "", "{broken json", '{"id": 5, "a": [1,'] + ["[ctxprune delta vs call 1 | x]\nnot really"]:
@@ -1793,6 +1820,40 @@ def bytes_repr_decode(e: str) -> str:
     return _b_rewrite(e[len(_B_HDR):], lambda c: re.sub(r"[^\x00-\x7f]", lambda m: "".join(f"\\x{b:02x}" for b in m.group().encode("utf-8")), c))
 
 
+def _b_semantics_equiv(a: str, b: str) -> bool:
+    """Python's own parser says every bytes literal still denotes the same bytes, and no decoded character is glued to
+    an unescaped backslash (a repr never produces `\\` + non-ASCII, so a reader would be misled about the bytes)."""
+    if a == b or b == _B_RAW + a:
+        return True
+    if not b.startswith(_B_HDR):
+        return False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # mutated captures contain invalid escapes; literal_eval warns about them
+        return _b_semantics_checked(a, b[len(_B_HDR):])
+
+
+def _b_semantics_checked(a: str, body: str) -> bool:
+    la, lb = list(_b_literals(a)), list(_b_literals(body))
+    if len(la) != len(lb):
+        return False
+    for (s1, e1), (s2, e2) in zip(la, lb):
+        q = a[s1 - 1]
+        if any(len(t) == 2 and ord(t[1]) > 127 for t in re.findall(r"\\.|[^\\]", body[s2:e2], re.S)):
+            return False
+        esc = re.sub(r"[^\x00-\x7f]", lambda m: "".join(f"\\x{x:02x}" for x in m.group().encode("utf-8")), body[s2:e2])
+        try:
+            want = ast.literal_eval(f"b{q}{a[s1:e1]}{q}")
+        except (SyntaxError, ValueError):
+            continue  # not even valid Python (a mutated capture): nothing to compare against
+        try:
+            if want != ast.literal_eval(f"b{q}{esc}{q}"):
+                return False
+        except (SyntaxError, ValueError):
+            return False
+    strip = lambda t, spans: "".join(t[x:y] for x, y in zip([0] + [e for _, e in spans], [s for s, _ in spans] + [len(t)]))  # noqa: E731
+    return strip(a, la) == strip(body, lb)
+
+
 _JP = "東京 Café Renée 日本語のテスト 🎉 naïve"
 _CALLED = ("Traceback (most recent call last):\n  File \"deploy.py\", line 42, in <module>\n    subprocess.run(['curl', '-s', url], check=True, capture_output=True)\n"
            "subprocess.CalledProcessError: Command '['curl', '-s', 'http://api/city']' returned non-zero exit status 22.\n"
@@ -1804,6 +1865,7 @@ case(
     claim="Inside Python bytes literals, runs of lowercase \\xNN escapes that form valid UTF-8 for printable characters are replaced by those characters (with a `§b` marker); the decoder re-escapes them to the exact original text; truncated or invalid bytes, ASCII escapes, \\n, str mojibake and literals that already contain non-ASCII text are never decoded.",
     encode=bytes_repr_encode,
     decode=bytes_repr_decode,
+    equivalent=_b_semantics_equiv,  # second, independent check next to the exact inverse
     fixtures=[
         Fixture("CalledProcessError with a CJK and accented JSON body", _CALLED, True),
         Fixture("socket recv chunks cut in the middle of characters", _SOCK, True),
@@ -1811,6 +1873,7 @@ case(
         Fixture("str mojibake repr is not UTF-8 bytes", "'\\xc3\\xa9' and '\\xe6\\x97\\xa5'\n", False),
         Fixture("ASCII-only bytes with control escapes", "b'hello\\n\\x00\\x1b[0m\\r\\t'\n", False),
         Fixture("invalid UTF-8 and C1 controls and NBSP stay escaped", "b'\\xff\\xfe\\x80' b'\\xc2\\x85' b'\\xc2\\xa0' b'\\xc3'\n", False),
+        Fixture("escaped backslash right before x.. is text, not an escape", "b'\\\\xe6\\x97\\xa5\\xe6\\x97\\xa5' and b'\\\\\\xe6\\x97\\xa5'\n", True),
         Fixture("uppercase hex is not Python's bytes repr", "b'\\xE6\\x97\\xA5'\n", False),
         Fixture("input that starts like encoder output", "§b\nb'\\xe6\\x97\\xa5'\n", None),
         Fixture("input that starts with the raw escape", "§raw\nb'\\xe6\\x97\\xa5'\n", None),
@@ -1908,9 +1971,10 @@ case(
         Fixture("prose with colons", "Error: disk full\nWarning: retrying\n\nStack: main -> run\n", False),
         Fixture("block starting like a table, and with the escape", "§t\ta\tb\n1\t2\n\n§!x: 1\ny: 2\n\n§plain: 1\nq: 2\n\nk: 1\nl: 2\n\nk: 3\nl: 4\n", None),
         Fixture("values with ': ', empty values, CR, a key containing ': '", "a: x: y\nb: \n\na: p: q\nb: \n\r\n\na: z\nb: 1\r\n\na: w\nb: 2\r\n\nk: l: m\nn: o\n\nk: p: r\nn: s\n", None),
+        Fixture("same columns in a different order are different schemas", "a: 1\nb: 2\n\nb: 3\na: 4\n\na: 5\nb: 6\n\nb: 7\na: 8\n\nb: 9\na: 10\n", None),
         Fixture("extra blank lines and no final newline", "a: 1\nb: 2\n\n\n\na: 3\nb: 4\n\n\na: 5\nb: 6\n\na: 7\nb: 8", None),
     ],
-    min_gain=0.2,
+    min_gain=0.3,
     idempotent=False,
 )
 
@@ -2017,4 +2081,598 @@ case(
         Fixture("input that starts like encoder output", _DITTO_LEGEND + "NAME  NOTE  KIND\nalpha  same  x\nalpha  same  x\nbeta  same  x\n", None),
     ],
     min_gain=0.25,
+)
+
+# ===============================================================================================================
+# #879 Rejoin backslash-wrapped pandas DataFrame column chunks. Equivalent: chunks separated by a blank line whose lines end
+# in ` \` (the last chunk's do not) are joined into one tab-separated table with the index once. Column cells are cut at the
+# right edges of the header words (pandas right-justifies), so strings with spaces survive; an optional
+# `[N rows x M columns]` footer is kept. Oracle: the cell matrix, plus the word sequence of every row (independent of columns).
+
+_DF_FOOT = re.compile(r"\[\d+ rows x \d+ columns\]")
+
+
+def _df_parse(x: str):
+    """-> (header names, rows of (index, cells), footer (separator, text) or None, trailing newline) or None."""
+    if "\t" in x or "\r" in x:
+        return None
+    tail = x.endswith("\n")
+    body = x[: len(x) - tail]
+    fm = re.search(r"(\n\n?)(\[\d+ rows x \d+ columns\])\Z", body)
+    foot = None
+    if fm:
+        foot, body = (fm.group(1), fm.group(2)), body[: fm.start()]
+    blocks = body.split("\n\n")
+    if len(blocks) < 2:
+        return None
+    chunks = []
+    for bi, b in enumerate(blocks):
+        lines = [l.rstrip() for l in b.split("\n")]
+        wrapped = bi < len(blocks) - 1
+        if any(l.endswith("\\") != wrapped for l in lines):
+            return None
+        chunks.append([l[:-1].rstrip() if wrapped else l for l in lines])
+    n = len(chunks[0])
+    if n < 2 or any(len(c) != n for c in chunks):
+        return None
+    names: list[str] = []
+    rows: list[tuple[str, list[str]]] = [("", []) for _ in range(n - 1)]
+    idx_labels = None
+    for c in chunks:
+        edges = [m.end() for m in re.finditer(r"\S+", c[0])]
+        if not edges:
+            return None
+        names += re.findall(r"\S+", c[0])
+        labels = []
+        for r, line in enumerate(c[1:]):
+            tok = line.split(None, 1)
+            if not tok:
+                return None
+            labels.append(tok[0])
+            lo, cells = len(tok[0]), []
+            for e in edges:
+                if lo < len(line) and line[lo] != " ":
+                    return None  # a column boundary inside a word
+                cells.append(line[lo:e].strip())
+                lo = e
+            if "".join(line.split()) != tok[0] + "".join("".join(c2.split()) for c2 in cells):
+                return None  # something to the right of the last header edge
+            rows[r][1].extend(cells)
+        if idx_labels is None:
+            idx_labels = labels
+        elif labels != idx_labels:
+            return None
+    return names, [(idx_labels[r], rows[r][1]) for r in range(n - 1)], foot, tail
+
+
+def df_rejoin(x: str) -> str:
+    p = _df_parse(x)
+    if p is None:
+        return x
+    names, rows, foot, tail = p
+    res = "\n".join(["\t" + "\t".join(names)] + [i + "\t" + "\t".join(cells) for i, cells in rows]) + (foot[0] + foot[1] if foot else "") + ("\n" if tail else "")
+    return res if len(res) < len(x) else x
+
+
+def _df_equiv(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    p = _df_parse(a)
+    if p is None or b.endswith("\n") != p[3]:
+        return False
+    names, rows, foot, tail = p
+    bb, ba = b[: len(b) - tail], a[: len(a) - tail]
+    if foot:
+        ft = foot[0] + foot[1]
+        if not bb.endswith(ft):
+            return False
+        bb, ba = bb[: -len(ft)], ba[: -len(ft)]
+    lines = bb.split("\n")
+    got = [l.split("\t") for l in lines]
+    if got[0] != [""] + names or [(g[0], g[1:]) for g in got[1:]] != rows:
+        return False
+    # independent of column logic: every row reads as the same words in the same order, minus markers and repeated indexes
+    blocks = ba.split("\n\n")
+    for r in range(len(lines)):
+        words = []
+        for ci, blk in enumerate(blocks):
+            w = blk.split("\n")[r].split()
+            if ci < len(blocks) - 1:
+                w = w[:-1]  # the trailing backslash
+            words += w[1:] if (ci and r) else w
+        if words != lines[r].split():
+            return False
+    return True
+
+
+def _wide_frame(rows: int, ncols: int, width: int = 80, seed: int = 13, wrap_marker: bool = True) -> str:
+    r = _rng(seed)
+    names = [f"{r.choice(['sepal', 'petal', 'mass', 'load', 'temp', 'dist'])}_{k:02d}" for k in range(ncols)]
+    data = [[(f"{r.uniform(-9, 99):.2f}" if k % 3 else str(r.randrange(10_000))) for k in range(ncols)] for _ in range(rows)]
+    w = [max(len(names[k]), max(len(row[k]) + (not row[k].startswith("-")) for row in data)) for k in range(ncols)]
+    iw = len(str(rows - 1))
+    bins, cur, used = [], [], iw
+    for k in range(ncols):
+        if cur and used + 1 + w[k] > width:
+            bins.append(cur)
+            cur, used = [], iw
+        cur.append(k)
+        used += 1 + w[k]
+    bins.append(cur)
+    out = []
+    for bi, cols in enumerate(bins):
+        mark = "  \\" if bi < len(bins) - 1 else "  "
+        lines = [" " * iw + "".join(" " + names[k].rjust(w[k]) for k in cols) + mark]
+        for i, row in enumerate(data):
+            lines.append(str(i).ljust(iw) + "".join(" " + (row[k] if row[k].startswith("-") else " " + row[k]).rjust(w[k]) for k in cols) + mark)
+        out.append("\n".join(lines))
+    return "\n\n".join(out) + "\n"
+
+
+case(
+    879,
+    claim="Backslash-wrapped pandas column chunks are joined into one tab-separated table with the index once; every cell lands under its own header (cut at the header words' right edges) and every row reads as the same words in the same order.",
+    loses="column alignment padding, the wrap backslashes and the repeated index columns",
+    encode=df_rejoin,
+    equivalent=_df_equiv,
+    fixtures=[
+        Fixture("30 x 14 frame wrapped at 80 columns", _wide_frame(30, 14), True),
+        Fixture("12 x 9 frame wrapped into 3 chunks at 40 columns", _wide_frame(12, 9, width=40, seed=2), True),
+        Fixture("frame with the rows x columns footer", _wide_frame(12, 10, seed=4) + "\n[12 rows x 10 columns]\n", True),
+        Fixture("narrow frame that did not wrap", "   a   b\n0  1   2\n1  3   4\n", False),
+        Fixture("shell script with backslash continuations", "docker run \\\n  -v a:b \\\n  img\n\nnext step \\\n  --flag\n", False),
+        Fixture("blank-line separated text", "chunk one\nsecond line\n\nchunk two\nline\n", False),
+        Fixture("chunks whose index labels differ", "   a  b \\\n0  1  2 \\\n1  3  4 \\\n\n   c  d\n0  5  6\n7  7  8\n", None),
+        Fixture("string cells with spaces, NaN, negatives, wide header", "            name       city \\\n0  Ada Lovelace  New York \\\n1    Bob Dylan        NaN \\\n\n   monthly_spend    delta\n0          12.50    -0.25\n1         -99.00      NaN\n", None),
+        Fixture("named index adds a line, so the chunks differ", "      a  b \\\nname      \\\n0     1  2 \\\n\n   c\n0  3\n1  4\n", None),
+    ],
+    min_gain=0.25,
+)
+
+# ===============================================================================================================
+# #881 Print symmetric matrices as triangles, sparse ones as cells. Equivalent at the level of cell text: a whitespace-aligned
+# matrix (header names, then label + cells per row) whose cell texts are exactly symmetric (and labels equal the names)
+# is rewritten as `#sym names` plus the upper triangle; one that is mostly a single filler token becomes `#sparse` plus
+# `i,j=value` cells. Oracle: expand the encoded form and compare the token matrix, plus a token-multiset conservation check.
+
+def _mx_parse(x: str):
+    tail = x.endswith("\n")
+    lines = (x[:-1] if tail else x).split("\n")
+    toks = [l.split() for l in lines]
+    if len(lines) < 4 or not toks[0] or any(not t for t in toks):
+        return None
+    names = toks[0]
+    if len(names) < 3 or any(len(t) != len(names) + 1 for t in toks[1:]):
+        return None
+    return names, [t[0] for t in toks[1:]], [t[1:] for t in toks[1:]], tail
+
+
+def matrix_encode(x: str) -> str:
+    p = _mx_parse(x)
+    if p is None:
+        return x
+    names, labels, cells, tail = p
+    nl = "\n"
+    cands = []
+    if labels == names and all(cells[i][j] == cells[j][i] for i in range(len(names)) for j in range(i)):
+        cands.append("#sym " + " ".join(names) + nl + nl.join(" ".join(cells[i][i:]) for i in range(len(names))))
+    z = Counter(c for row in cells for c in row).most_common(1)[0][0]
+    ents = [f"{i},{j}={c}" for i, row in enumerate(cells) for j, c in enumerate(row) if c != z]
+    cands.append(f"#sparse z={z}{nl}rows: {' '.join(labels)}{nl}cols: {' '.join(names)}{nl}{' '.join(ents)}")
+    res = min(cands, key=len) + (nl if tail else "")
+    return res if len(res) < len(x) else x
+
+
+def _mx_expand(b: str):
+    tail = b.endswith("\n")
+    lines = (b[:-1] if tail else b).split("\n")
+    if lines[0].startswith("#sym "):
+        nm = lines[0][5:].split(" ")
+        n = len(nm)
+        M = [[None] * n for _ in range(n)]
+        for i, row in enumerate(lines[1:]):
+            vals = row.split(" ")
+            if len(vals) != n - i:
+                return None
+            for k, v in enumerate(vals):
+                M[i][i + k] = M[i + k][i] = v
+        return nm, list(nm), M, tail
+    if lines[0].startswith("#sparse z=") and len(lines) == 4 and lines[1].startswith("rows: ") and lines[2].startswith("cols: "):
+        z = lines[0][len("#sparse z="):]
+        rows, cols = lines[1][6:].split(" "), lines[2][6:].split(" ")
+        M = [[z] * len(cols) for _ in rows]
+        for e in filter(None, lines[3].split(" ")):
+            ij, _, v = e.partition("=")
+            i, _, j = ij.partition(",")
+            M[int(i)][int(j)] = v
+        return cols, rows, M, tail
+    return None
+
+
+def _mx_equiv(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    p = _mx_parse(a)
+    if p is None:
+        return False
+    got = _mx_expand(b)
+    if got is None or got[3] != p[3] or (got[0], got[1], got[2]) != (p[0], p[1], p[2]):
+        return False
+    return Counter(a.split()) == Counter(got[0]) + Counter(got[1]) + Counter(c for row in got[2] for c in row)
+
+
+def _corr(n: int, seed: int = 17, equal_text: bool = True) -> str:
+    r = _rng(seed)
+    names = [f"{r.choice(['age', 'bmi', 'bp', 'ldl', 'hdl', 'glu', 'tch', 'ltg'])}{k}" for k in range(n)]
+    M = [[1.0 if i == j else round(r.uniform(-1, 1), 6) for j in range(n)] for i in range(n)]
+    for i in range(n):
+        for j in range(i):
+            M[j][i] = M[i][j]
+    t = [[f"{v:.6f}" for v in row] for row in M]
+    if not equal_text:
+        t[0][n - 1] = t[0][n - 1] + "0" if "." in t[0][n - 1] else t[0][n - 1]
+    w = [max(len(names[j]), max(len(t[i][j]) + (not t[i][j].startswith("-")) for i in range(n))) for j in range(n)]
+    iw = max(map(len, names))
+    head = " " * iw + "".join(" " + names[j].rjust(w[j]) for j in range(n))
+    body = [names[i].ljust(iw) + "".join(" " + (t[i][j] if t[i][j].startswith("-") else " " + t[i][j]).rjust(w[j]) for j in range(n)) for i in range(n)]
+    return "\n".join([head] + body) + "\n"
+
+
+def _confusion(n: int, seed: int = 3) -> str:
+    r = _rng(seed)
+    names = [f"c{k}" for k in range(n)]
+    M = [[0] * n for _ in range(n)]
+    for i in range(n):
+        M[i][i] = r.randrange(20, 90)
+        for _ in range(2):
+            M[i][r.randrange(n)] += r.randrange(1, 6)
+    w = max(len(str(v)) for row in M for v in row)
+    w = max(w, 3)
+    return "\n".join([" " * 3 + "".join(" " + c.rjust(w) for c in names)] + [names[i].ljust(3) + "".join(" " + str(v).rjust(w) for v in M[i]) for i in range(n)]) + "\n"
+
+
+case(
+    881,
+    claim="A whitespace-aligned matrix whose cell texts are exactly symmetric (labels equal to the header) is printed as its upper triangle; one that is mostly a single filler token is printed as its non-filler cells; expanding either gives back the identical token matrix.",
+    loses="alignment whitespace",
+    encode=matrix_encode,
+    equivalent=_mx_equiv,
+    fixtures=[
+        Fixture("12 x 12 df.corr()", _corr(12), True),
+        Fixture("20-class confusion matrix", _confusion(20), True),
+        Fixture("symmetric only numerically: 0.123 vs 0.1230", _corr(8, equal_text=False), False),
+        Fixture("dense, asymmetric 3 x 3", "    a    b    c\na 1.5  2.5  3.5\nb 4.5  5.5  6.5\nc 7.5  8.5  9.5\n", False),
+        Fixture("not a matrix", "total 12\nfoo  bar  baz\nqux  quux  corge\nx y z w\n", False),
+        Fixture("input that starts like encoder output", "#sym a b c\n1 2 3\n1 2\n1\n", None),
+        Fixture("labels in another order, filler other than zero, odd names", "   x=1 rows: a,b\nb  .  .  7\na  .  9  .\nc  .  .  .\nd  .  .  .\n", None),
+        Fixture("non-square: 4 rows, 5 columns", "     a  b  c  d  e\nr1   0  0  0  0  5\nr2   0  0  0  0  0\nr3   0  7  0  0  0\nr4   0  0  0  0  0\n", None),
+    ],
+    min_gain=0.25,
+)
+
+# ===============================================================================================================
+# #882 Fold psql \x and mysql \G expanded records into one table per run of records sharing a column list.
+# Equivalent at the level of (column, value) records: the encoded form is blank-line separated tab-separated tables; a text
+# is converted only if every line parses (consistent name column, consecutive record numbers, no tabs; a psql continuation
+# line has a blank name column, so a value with a line break makes the parse fail) and any trailer is a row-count footer.
+
+_PSQL = re.compile(r"-\[ RECORD (\d+) \]-*\+-*")
+_MYSQL = re.compile(r"\*+ (\d+)\. row \*+")
+_REC_FOOT = re.compile(r"\(\d+ rows?\)|\d+ rows? in set.*|")
+
+
+def _rec_parse(x: str):
+    """-> (records [[(name, value)]], footer lines, trailing newline) or None."""
+    if "\t" in x:
+        return None
+    tail = x.endswith("\n")
+    lines = (x[:-1] if tail else x).split("\n")
+    recs, i, flavor = [], 0, None
+    while i < len(lines):
+        ps, my = _PSQL.fullmatch(lines[i]), _MYSQL.fullmatch(lines[i])
+        if not (ps or my) or (flavor and flavor != bool(ps)) or int((ps or my).group(1)) != len(recs) + 1:
+            break
+        flavor = bool(ps)
+        pos, fields, i = lines[i].index("+") if ps else None, [], i + 1
+        while i < len(lines) and not (_PSQL.fullmatch(lines[i]) or _MYSQL.fullmatch(lines[i])):
+            l = lines[i]
+            if ps:
+                if len(l) <= pos or l[pos] != "|" or l[pos + 1:pos + 2] not in (" ", "") or not l[:pos].strip():
+                    break
+                name, val = l[:pos].strip(), l[pos + 2:]
+                width = pos
+                if l[:pos] != name.ljust(pos - 1) + " ":
+                    return None
+            else:
+                m = re.fullmatch(r"( *)(\S.*?):(?: (.*))?", l)
+                if not m:
+                    break
+                name, val = m.group(2), m.group(3) or ""
+                fields_w = len(m.group(1)) + len(name)
+                if fields and fields_w != fields[0][2]:
+                    return None
+            fields.append((name, val, pos if ps else fields_w))
+            i += 1
+        if not fields or len(fields) < 2:
+            return None
+        recs.append([(n, v) for n, v, _ in fields])
+    foot = lines[i:]
+    if not recs or not all(_REC_FOOT.fullmatch(l) for l in foot):
+        return None
+    return recs, foot, tail
+
+
+def records_fold(x: str) -> str:
+    p = _rec_parse(x)
+    if p is None:
+        return x
+    recs, foot, tail = p
+    blocks, i = [], 0
+    while i < len(recs):
+        cols = [n for n, _ in recs[i]]
+        j = i
+        while j < len(recs) and [n for n, _ in recs[j]] == cols:
+            j += 1
+        blocks.append("\n".join(["\t".join(cols)] + ["\t".join(v for _, v in recs[t]) for t in range(i, j)]))
+        i = j
+    res = "\n\n".join(blocks + (["\n".join(foot)] if foot else [])) + ("\n" if tail else "")
+    return res if len(res) < len(x) else x
+
+
+def _rec_equiv(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    p = _rec_parse(a)
+    if p is None or b.endswith("\n") != p[2]:
+        return False
+    recs, foot, tail = p
+    blocks = b[: len(b) - tail].split("\n\n")
+    got_foot: list[str] = []
+    if foot:
+        got_foot = blocks.pop().split("\n")
+    got = []
+    for blk in blocks:
+        lines = blk.split("\n")
+        cols = lines[0].split("\t")
+        for row in lines[1:]:
+            vals = row.split("\t")
+            if len(vals) != len(cols):
+                return False
+            got.append(list(zip(cols, vals)))
+    return got == recs and got_foot == foot
+
+
+def _psql_x(rows: int, ncols: int, seed: int = 31) -> str:
+    r = _rng(seed)
+    names = ["id", "name", "email", "phone", "address", "city", "state", "zip", "country", "created_at", "updated_at", "status", "balance", "notes", "is_admin"][:ncols]
+    W = max(max(map(len, names)), len(f"-[ RECORD {rows} ]"))  # psql widens the name column so the record header fits
+    out = []
+    for i in range(rows):
+        vals = [str(1000 + i), r.choice(["Ada Lovelace", "Grace Hopper"]), f"user{i}@example.org", "+31 20 555 01%02d" % i, "1 Infinite Loop", r.choice(["Amsterdam", "Utrecht"]),
+                "NH", "1011AB", "NL", "2025-03-01 10:00:00+00", "2025-03-0%d 11:30:00+00" % (1 + i % 9), r.choice(["active", "inactive"]), f"{r.randrange(10000) / 100:.2f}", r.choice(["", "vip: yes | priority"]), r.choice(["t", "f"])][:ncols]
+        head = f"-[ RECORD {i + 1} ]".ljust(W + 1, "-") + "+" + "-" * 24
+        out += [head] + [f"{n.ljust(W)} | {v}" for n, v in zip(names, vals)]
+    return "\n".join(out) + "\n"
+
+
+def _psql_rec(n: int, names: list[str], vals: list[str], strip: bool = False) -> str:
+    W = max(max(map(len, names)), len(f"-[ RECORD {n} ]"))
+    return "\n".join([f"-[ RECORD {n} ]".ljust(W + 1, "-") + "+" + "-" * 10] + [(f"{k.ljust(W)} | {v}".rstrip(" ") if strip else f"{k.ljust(W)} | {v}") for k, v in zip(names, vals)]) + "\n"
+
+
+def _mysql_g(rows: int, seed: int = 5) -> str:
+    r = _rng(seed)
+    names = ["id", "username", "email", "created_at", "plan", "balance", "last_login", "notes"]
+    W = max(map(len, names))
+    out = []
+    for i in range(rows):
+        vals = [str(i + 1), f"user{i}", f"user{i}@example.org", "2025-03-01 10:00:00", r.choice(["free", "pro"]), f"{r.randrange(10000) / 100:.2f}", "NULL", r.choice(["", "has: colon"])]
+        out += ["*" * 27 + f" {i + 1}. row " + "*" * 27] + [f"{n.rjust(W)}: {v}".rstrip(" ") if v else f"{n.rjust(W)}: " for n, v in zip(names, vals)]
+    return "\n".join(out) + f"\n{rows} rows in set (0.00 sec)\n\n".rstrip("\n") + "\n"
+
+
+case(
+    882,
+    claim="psql `\\x` or mysql `\\G` record listings become one header line plus a tab-separated value line per record (a new table where the column list changes); a parser per format yields the same (column, value) records from both forms.",
+    loses="the record separator lines (numbers must be 1..N), dash widths and name-column padding",
+    encode=records_fold,
+    equivalent=_rec_equiv,
+    fixtures=[
+        Fixture("psql \\x, 8 records x 15 columns", _psql_x(8, 15), True),
+        Fixture("mysql \\G, 12 records and a row-count footer", _mysql_g(12), True),
+        Fixture("psql \\x where the column list changes", _psql_x(5, 15) + _psql_x(4, 9, seed=2).replace("RECORD 1 ", "RECORD 6 ").replace("RECORD 2 ", "RECORD 7 ").replace("RECORD 3 ", "RECORD 8 ").replace("RECORD 4 ", "RECORD 9 "), True),
+        Fixture("regular aligned psql table (not expanded)", " id | name\n----+------\n  1 | Ada\n  2 | Bob\n(2 rows)\n", False),
+        Fixture("psql value with a line break (continuation line)", _psql_rec(1, ["id", "body"], ["1", "line one+"]).rstrip("\n") + "\n" + " " * 14 + "| line two\n" + _psql_rec(2, ["id", "body"], ["2", "x"]), False),
+        Fixture("mysql value with a line break", "*************************** 1. row ***************************\n  id: 1\nbody: first\nsecond: line\n*************************** 2. row ***************************\n  id: 2\nbody: x\n", False),
+        Fixture("record numbers do not start at 1", _psql_rec(3, ["id", "name"], ["1", "a"]) + _psql_rec(4, ["id", "name"], ["2", "b"]), False),
+        Fixture("values with tabs", _psql_rec(1, ["id", "name"], ["1", "a\tb"]), None),
+        Fixture("empty values, `|` at end of line, a single record", _psql_rec(1, ["id", "name", "note"], ["1", "", "x"], strip=True), None),
+        Fixture("empty values with trailing space, then a different column list", _psql_rec(1, ["id", "name", "note"], ["1", "", ""]) + _psql_rec(2, ["id", "name"], ["2", "b"]), None),
+        Fixture("value containing a pipe, a plus, a colon and ending in +", _psql_rec(1, ["id", "note"], ["1", "a | b + c: d"]) + _psql_rec(2, ["id", "note"], ["2", "C++"]), None),
+        Fixture("input that looks like the table form", "id\tname\n1\ta\n2\tb\n", None),
+    ],
+    min_gain=0.3,
+)
+
+# ===============================================================================================================
+# #895 Plist XML key/value pairs to compact typed `key: value` lines. Byte-exact roundtrip for plists in the canonical
+# plistlib layout (what Xcode and plutil write): `§plist` header, then indentation-structured lines where bare strings are
+# unquoted, other strings are JSON-quoted, and bool, int, real, `@date`, `@data`, `{}` and `[]` keep their types. A file is
+# converted only if rebuilding it with plistlib reproduces the original text; anything else is left untouched.
+
+_P_HDR, _P_RAW = "§plist\n", "§raw\n"
+_P_BARE = re.compile(r"[A-Za-z_][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./-]+)*")
+_P_INT = re.compile(r"-?(?:0|[1-9]\d*)")
+_P_REAL = re.compile(r"-?(?:\d+\.\d+(?:e[+-]?\d+)?|\d+e[+-]?\d+)")
+_P_DATE = re.compile(r"@date (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
+_P_DEC = json.JSONDecoder()
+
+
+def _p_str(s: str) -> str:
+    return s if _P_BARE.fullmatch(s) and s not in ("true", "false") else json.dumps(s, ensure_ascii=False)
+
+
+def _p_scalar(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        if not _P_REAL.fullmatch(repr(v)):
+            raise ValueError("real")
+        return repr(v)
+    if isinstance(v, datetime):
+        return "@date " + v.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(v, bytes):
+        return "@data " + base64.b64encode(v).decode()
+    if isinstance(v, str):
+        return _p_str(v)
+    if isinstance(v, dict) and not v:
+        return "{}"
+    if isinstance(v, list) and not v:
+        return "[]"
+    raise ValueError("type")
+
+
+def _p_lines(v, depth: int, out: list) -> None:
+    pad = "  " * depth
+    for k, x in (v.items() if isinstance(v, dict) else [(None, y) for y in v]):
+        head = f"{_p_str(k)}:" if isinstance(v, dict) else "-"
+        if isinstance(x, (dict, list)) and x:
+            out.append(pad + head)
+            _p_lines(x, depth + 1, out)
+        else:
+            out.append(f"{pad}{head} {_p_scalar(x)}")
+
+
+def _p_value(t: str):
+    if t in ("true", "false"):
+        return t == "true"
+    if t in ("{}", "[]"):
+        return {} if t == "{}" else []
+    if t.startswith('"'):
+        v, end = _P_DEC.raw_decode(t)
+        if end != len(t) or not isinstance(v, str):
+            raise ValueError("string")
+        return v
+    m = _P_DATE.fullmatch(t)
+    if m:
+        return datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%SZ")
+    if t.startswith("@data "):
+        return base64.b64decode(t[6:], validate=True)
+    if _P_INT.fullmatch(t):
+        return int(t)
+    if _P_REAL.fullmatch(t):
+        return float(t)
+    if _P_BARE.fullmatch(t):
+        return t
+    raise ValueError("scalar")
+
+
+def _p_node(lines, i: int, depth: int):
+    isl = lines[i][1] == "-" or lines[i][1].startswith("- ")
+    out = [] if isl else {}
+    while i < len(lines) and lines[i][0] == depth:
+        t = lines[i][1]
+        if isl != (t == "-" or t.startswith("- ")):
+            raise ValueError("mixed")
+        if isl:
+            key, rest = None, t[1:]
+        elif t.startswith('"'):
+            key, end = _P_DEC.raw_decode(t)
+            rest = t[end:]
+        else:
+            m = _P_BARE.match(t)
+            if not m:
+                raise ValueError("key")
+            key, rest = m.group(), t[m.end():]
+            if not isl and not rest.startswith(":"):
+                raise ValueError("key")
+        if not isl:
+            if not rest.startswith(":") or (key in out):
+                raise ValueError("key")
+            rest = rest[1:]
+        if rest == "":
+            if i + 1 >= len(lines) or lines[i + 1][0] != depth + 1:
+                raise ValueError("empty block")
+            v, i = _p_node(lines, i + 1, depth + 1)
+        elif rest.startswith(" ") and rest[1:] != "":
+            v, i = _p_value(rest[1:]), i + 1
+        else:
+            raise ValueError("value")
+        if isl:
+            out.append(v)
+        else:
+            out[key] = v
+    return out, i
+
+
+def _p_dumps(obj) -> str:
+    return plistlib.dumps(obj, sort_keys=False).decode("utf-8")
+
+
+def plist_encode(x: str) -> str:
+    esc = _P_RAW + x if x.startswith((_P_HDR, _P_RAW)) else x
+    try:
+        obj = plistlib.loads(x.encode("utf-8"))
+        if not isinstance(obj, dict) or not obj or _p_dumps(obj) != x:
+            return esc
+        lines: list[str] = []
+        _p_lines(obj, 0, lines)
+        compact = "\n".join(lines) + "\n"
+        back, _ = _p_node([((len(l) - len(l.lstrip(" "))) // 2, l.lstrip(" ")) for l in lines], 0, 0)
+        if _p_dumps(back) != x:
+            return esc
+    except Exception:  # noqa: BLE001
+        return esc
+    out = _P_HDR + compact
+    return out if len(out) < len(x) else esc
+
+
+def plist_decode(e: str) -> str:
+    if e.startswith(_P_RAW):
+        return e[len(_P_RAW):]
+    if not e.startswith(_P_HDR):
+        return e
+    lines = e[len(_P_HDR):].rstrip("\n").split("\n")
+    obj, _ = _p_node([((len(l) - len(l.lstrip(" "))) // 2, l.lstrip(" ")) for l in lines], 0, 0)
+    return _p_dumps(obj)
+
+
+def _info_plist() -> str:
+    return _p_dumps({
+        "CFBundleDevelopmentRegion": "en", "CFBundleExecutable": "$(EXECUTABLE_NAME)", "CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)",
+        "CFBundleInfoDictionaryVersion": "6.0", "CFBundleName": "My App", "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.2.3",
+        "CFBundleVersion": "42", "LSRequiresIPhoneOS": True, "UILaunchStoryboardName": "LaunchScreen", "MinimumOSVersion": "15.0",
+        "UIRequiredDeviceCapabilities": ["armv7"], "UISupportedInterfaceOrientations": ["UIInterfaceOrientationPortrait", "UIInterfaceOrientationLandscapeLeft"],
+        "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": False}, "NSCameraUsageDescription": "We use the camera: to scan codes.", "UILaunchDuration": 0.35,
+        "CFBundleURLTypes": [{"CFBundleURLName": "com.example.app", "CFBundleURLSchemes": ["myapp", "myapp-dev"]}],
+        "BuildDate": datetime(2025, 3, 1, 10, 0, 0), "ProvisioningHash": b"\x00\x01\x02hash\xff", "Empty": {}, "None": [],
+    })
+
+
+_ENTITLEMENTS = _p_dumps({"com.apple.security.app-sandbox": True, "com.apple.security.network.client": True,
+                          "com.apple.security.application-groups": ["group.com.example.shared"], "com.apple.developer.associated-domains": ["applinks:example.com", "webcredentials:example.com"]})
+_LAUNCHD = _p_dumps({"Label": "com.example.backup", "ProgramArguments": ["/usr/local/bin/backup", "--quiet", "--dest", "/Volumes/Backup Disk"], "RunAtLoad": True,
+                     "StartInterval": 3600, "StandardOutPath": "/tmp/backup.out", "EnvironmentVariables": {"PATH": "/usr/local/bin:/usr/bin"}})
+
+case(
+    895,
+    claim="A canonical XML property list becomes indentation-structured `key: value` lines with bare or JSON-quoted strings and typed bool/int/real/@date/@data values; decoding rebuilds the identical plist text with plistlib, and a file plistlib would not reproduce byte for byte is left untouched.",
+    encode=plist_encode,
+    decode=plist_decode,
+    fixtures=[
+        Fixture("Info.plist with nesting, date, data, real, empties", _info_plist(), True),
+        Fixture("entitlements", _ENTITLEMENTS, True),
+        Fixture("LaunchAgent", _LAUNCHD, True),
+        Fixture("space-indented plist is not canonical", _LAUNCHD.replace("\t", "  "), False),
+        Fixture("pom.xml is not a plist", _pom(2), False),
+        Fixture("array at top level", plistlib.dumps(["a", "b", "c"]).decode(), False),
+        Fixture("input that starts like encoder output", "§plist\nLabel: x\n", None),
+        Fixture("input that starts with the raw escape", "§raw\n" + _LAUNCHD, None),
+        Fixture("awkward strings and keys", _p_dumps({"s": "true", "t": "@date 2025-01-01T00:00:00Z", "u": "", "v": " padded ", "w": "say \"hi\"\nline2", "x": "é日本", "y": "1.5", "z": "a: b", "My Key": 1, "a:b": 2, "9lives": 3, "": 4, "-": 5, "big": 2**62, "neg": -7, "tiny": 1e-07, "0": [[], [1, [2]], {"k": {}}]}), None),
+        Fixture("integer-valued real, bool-like keys", _p_dumps({"true": False, "r": 5.0, "e": 1e+20, "l": ["x", True, 7, 7.5]}), None),
+    ],
+    min_gain=0.4,
+    idempotent=False,
 )

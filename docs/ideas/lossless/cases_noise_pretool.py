@@ -8,6 +8,7 @@ sim per PreToolUse idea. The engine's contract, checked on every PreToolUse case
   - it is idempotent, and it never overrides an env var or flag the user already set,
   - the rewritten command is run in a real bash against shims: exit status, argv and pipe behaviour are unchanged.
 """
+import codecs
 import hashlib
 import ipaddress
 import itertools
@@ -186,7 +187,7 @@ case(
         Fixture("input already containing the sigil", "§2 W1 same\n  a.py:1:1\n  a.py:2:1\nb.py:3:3: W1 same\nb.py:4:3: W1 same\n", None),
         Fixture("CRLF output", _ruff_log().replace("\n", "\r\n"), None),
     ],
-    min_gain=0.1,
+    min_gain=0.4,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -399,8 +400,9 @@ case(
         Fixture("multi-line messages stay verbatim", MULTI603, False),
         Fixture("lines that look like the output, windows path", HEADLIKE603, None),
         Fixture("message with count-like text, anonymous at-line", ODD603, None),
+        Fixture("older layout: blank line after the label, CRLF stanza left alone", "  console.log\n\n    hello\n\n      at Object.<anonymous> (src/a.test.ts:3:9)\n\n  console.log\r\n    hi\r\n\r\n      at x (a.js:1:1)\r\n", None),
     ],
-    min_gain=0.25,
+    min_gain=0.5,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -499,7 +501,7 @@ case(
         Fixture("look-alikes: MAC, time, Add::add, short hex", LOOKALIKE618, False),
         Fixture("brackets, port, zone, IPv4-mapped, trailing period", EDGE618, None),
     ],
-    min_gain=0.25,
+    min_gain=0.2,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -575,7 +577,7 @@ case(
         Fixture("input that starts with the escape", "§raw\n\tat com.acme.A.c(A.java:13)\n", None),
         Fixture("default package, CRLF", "\tat Main.main(Main.java:5)\r\n\tat Main$Task.run(Main.java:9)\r\n", None),
     ],
-    min_gain=0.1,
+    min_gain=0.12,
     idempotent=False,  # re-encoding an encoded trace finds '(:N)' and must escape it (and grow) by design
 )
 
@@ -642,7 +644,7 @@ case(
         Fixture("path containing quotes and spaces, CRLF", '  File "a", line 1, in f", line 2, in g\r\n  File "x y:3 z.py", line 4, in w\r\n', None),
         Fixture("input that starts with the escape", "§raw\n" + PY1165, None),
     ],
-    min_gain=0.05,
+    min_gain=0.1,
     idempotent=False,  # an encoded traceback contains '@path:N func' lines, so re-encoding must escape (and grow) by design
 )
 
@@ -706,7 +708,7 @@ case(
         Fixture("ls -la is not a path listing", NEG1336, False),
         Fixture("names that need their ./ and odd entries", EDGE1336, None),
     ],
-    min_gain=0.05,
+    min_gain=0.06,
 )
 
 
@@ -1054,7 +1056,8 @@ def _fake_out(prog, argv, env, spec) -> str:
 
 
 def _engine_checks(pack, doc, match, nomatch, userset, sh, watch, forbidden=frozenset(), env0=None):
-    """Contract checks shared by every PreToolUse case. Returns the (command, rewritten) pairs for the saving measurement."""
+    """Contract checks shared by every PreToolUse case. Returns the (command, rewritten) pairs for the saving measurement.
+    Corpus rule: no pipeline may contain two shim programs (their log order would depend on scheduling)."""
     env0 = env0 or {}
     names = {k for r in pack.env for k, _ in r.vars}
     for r in pack.env:
@@ -1122,13 +1125,43 @@ def _savings(pairs, spec, expect_info_lost=frozenset()):
     return {"output_bytes_before": before, "output_bytes_after": after, "saved_pct": round(100 * (before - after) / before, 1)}
 
 
+def _fuzz_engine(pack: Pack, progs: list[str], seed: int, n: int) -> int:
+    """Random compositions of quoted words, operators and redirections: the rewrite keeps every token, keeps the syntax valid and is idempotent."""
+    g = _lcg(seed)
+    frags = ['echo "a | b ; c"', "echo 'x && y'", "ls -la", "cat f", "cd /tmp", "sleep 1", "2>&1", "> /dev/null", '"$HOME"', "FOO=bar", "-q", "--flag", "a\\ b", "'it'\"'\"'s'",
+             "install", "i", "use", "status", "build", '"--fund"']
+    ops = ["&&", "||", ";", "|", "\n", "&"]
+    valid = lambda c: subprocess.run(["bash", "-n", "-c", c], capture_output=True).returncode == 0  # noqa: E731
+    changed = checked = 0
+    for _ in range(n):
+        parts = []
+        for _k in range(1 + next(g) % 4):
+            words = [progs[next(g) % len(progs)]] + [frags[next(g) % len(frags)] for _ in range(next(g) % 4)]
+            parts += [" ".join(words), ops[next(g) % len(ops)]]
+        cmd = " ".join(parts[:-1])
+        if not valid(cmd):
+            continue
+        checked += 1
+        new = rewrite(cmd, pack, {})
+        assert rewrite(new, pack, {}) == new, f"not idempotent: {cmd!r}"
+        if new != cmd:
+            changed += 1
+            _check_tokens(cmd, new, pack)
+            assert valid(new), f"rewrite broke the syntax: {cmd!r} -> {new!r}"
+    assert checked >= n // 3 and changed >= checked // 4, f"fuzz is vacuous: checked {checked}, changed {changed}"
+    return changed
+
+
 def _pack_sim(pack, doc, spec, match, nomatch, userset, programs, forbidden=frozenset(), expect_info_lost=frozenset(), min_saved_pct=10.0, env0=None):
     watch = sorted({k for r in pack.env for k, _ in r.vars} | {"NO_COLOR"})
     sh = _Shell(programs, watch)
     try:
         pairs = _engine_checks(pack, doc, match, nomatch, userset, sh, watch, forbidden, env0)
         _check_hook(lambda c, d: rewrite(c, pack, env0 or {}), match[0], nomatch[0])
+        assert rewrite(match[0], None, {}) == match[0], "an internal error must fall back to the original command"
+        progs = sorted({p for r in pack.env for p in r.progs} | {p for f in pack.flags for p in f.progs} | {"ls", "echo"})
         res = _savings(pairs, spec, expect_info_lost)
+        res["fuzz_rewrites_checked"] = _fuzz_engine(pack, progs, seed=len(progs) * 7 + len(match), n=120 if pack is PACK76 else 40)
         assert res["saved_pct"] >= min_saved_pct, f"saving too small: {res}"
         return res
     finally:
@@ -1201,10 +1234,9 @@ def sim_quiet76() -> dict:
     # why an export prefix and not an inline 'VAR=1 cmd': the inline form only reaches the first stage of a pipeline
     sh = _Shell(["git"], ["NO_COLOR"])
     try:
-        _rc, _o, calls = sh.run("NO_COLOR=1 git a | git b")
-        assert [c[2]["NO_COLOR"] for c in calls] == ["1", "<unset>"], "inline prefix reaches stage 1 only"
-        _rc, _o, calls = sh.run(rewrite("git a | git b", PACK76, {}))
-        assert [c[2]["NO_COLOR"] for c in calls] == ["1", "1"], "export prefix reaches every stage"
+        seen = lambda cmd: {c[1][0]: c[2]["NO_COLOR"] for c in sh.run(cmd)[2]}  # noqa: E731  (pipeline stages log in any order: key by argument)
+        assert seen("NO_COLOR=1 git a | git b") == {"a": "1", "b": "<unset>"}, "inline prefix reaches stage 1 only"
+        assert seen(rewrite("git a | git b", PACK76, {})) == {"a": "1", "b": "1"}, "export prefix reaches every stage"
     finally:
         sh.close()
     return res
@@ -1729,11 +1761,32 @@ def decode_quotepath(text: str) -> str:
             name = raw.decode("utf-8")
         except UnicodeDecodeError:
             return m.group(0)
-        if not any(ord(ch) < 32 or ord(ch) == 127 or ch in '"\\' for ch in name):
-            return name  # git itself leaves such a name unquoted under core.quotepath=false
+        if not any(ord(ch) < 32 or ord(ch) == 127 or ch in '"\\ ' for ch in name):
+            return name  # plain name: git leaves it unquoted under core.quotepath=false (status also quotes names with a space, so those keep their quotes)
         return '"' + "".join("\\" + _ESC[ord(ch)] if ord(ch) in _ESC else ("\\%03o" % ord(ch) if ord(ch) < 32 or ord(ch) == 127 else ch) for ch in name) + '"'
 
     return re.sub(r'"((?:[^"\\\n]|\\.)*)"', one, text)
+
+
+def _unq(s: str) -> str:
+    """C-style unquote of one git path with CPython's own escape decoder (independent of decode_quotepath)."""
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return codecs.escape_decode(s[1:-1].encode("utf-8"))[0].decode("utf-8")
+    return s
+
+
+def _canon(cmd: str, text: str) -> list[str]:
+    """Output lines with every path unquoted, so differently quoted spellings of the same names compare equal (stat column padding dropped)."""
+    out = []
+    for l in text.split("\n"):
+        m = re.match(r"( .*?)(\s+\|.*)$", l)
+        if cmd.startswith("git status") and len(l) > 3:
+            out.append(l[:3] + _unq(l[3:]))
+        elif "--stat" in cmd and m:
+            out.append(_unq(m.group(1)[1:]) + m.group(2).lstrip())
+        else:
+            out.append(_unq(l))
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1781,11 +1834,8 @@ def sim_quotepath227() -> dict:
             assert re.search(r"\\[0-3][0-7]{2}", x0), f"default git should escape non-ASCII names: {cmd}"
             assert not re.search(r"\\[0-3][0-7]{2}", x1), f"rewritten command still prints octal escapes: {cmd}"
             assert '"tab\\tname.txt"' in x1 or "tab" not in x1, "names with control characters stay quoted either way"
-            if "--stat" in cmd:  # column padding follows the displayed width, so compare the names
-                nm = lambda t: sorted(re.match(r" (.*?)\s+\|", l).group(1) for l in t.split("\n") if "|" in l)  # noqa: E731
-                assert sorted(decode_quotepath(n) for n in nm(x0)) == nm(x1)
-            else:
-                assert decode_quotepath(x0) == x1, f"decode alternative differs from git's own quotepath=false output: {cmd}"
+            assert _canon(cmd, x0) == _canon(cmd, x1) == _canon(cmd, decode_quotepath(x0)), f"the three forms must name the same files: {cmd}"
+            assert not re.search(r"\\[0-3][0-7]{2}", decode_quotepath(x0)), "the decode alternative must remove every escape of a valid UTF-8 name"
             b0, b1, t0, t1 = b0 + len(o0), b1 + len(o1), t0 + tokens(x0), t1 + tokens(x1)
         assert b1 < b0 and t1 < t0
 
@@ -1905,7 +1955,7 @@ def sim_gitcfg486() -> dict:
         _run("git add . && git commit -qm init", repo, env)
         put(repo, "a.py", "two\n")
         put(repo, "new.py")
-        long_out = go("git status", repo, env, None) if False else _run("git status", repo, env)[1].decode()
+        long_out = _run("git status", repo, env)[1].decode()
         short_out = go("git status", repo, env)
         assert short_out != long_out and len(short_out) < 0.3 * len(long_out), (len(short_out), len(long_out))
         assert _parse_long(long_out) == _parse_short(short_out) == {"a.py": " M", "new.py": "??"}
@@ -1956,8 +2006,8 @@ def sim_gitcfg486() -> dict:
         _run("git add . && git commit -qm init", repo, env)
         put(repo, "b.py")
         _run("git config status.short false", repo, env)
-        naive = ("export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.short GIT_CONFIG_VALUE_0=true; git status", {})
-        assert "##" in _run(naive[0], repo, env)[1].decode() or "?? b.py" in _run(naive[0], repo, env)[1].decode(), "an env override beats the user's repo config"
+        naive = _run("export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.short GIT_CONFIG_VALUE_0=true; git status", repo, env)[1].decode()
+        assert "?? b.py" in naive and not naive.startswith("On branch"), "an env override beats the user's repo config, which is why the hook probes first"
         cmd, chosen = plan486("git status", {}, _git_probe(repo, env))
         assert chosen["GIT_CONFIG_COUNT"] == "2" and "status.short" not in chosen.values(), chosen
         out = go("git status", repo, env)

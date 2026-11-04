@@ -17,6 +17,7 @@ identity is compared as a list of lines. Stdlib only.
 """
 from __future__ import annotations
 
+import codecs
 import difflib
 import hashlib
 import json
@@ -332,6 +333,7 @@ def sim_reread() -> dict:
         hook.seen = None
         raw, seen = read()
         assert seen == raw, "ledger exception -> original output"
+        assert s.saved > 0.3 * s.raw_tok, (s.saved, s.raw_tok)
         return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
 
 
@@ -414,6 +416,7 @@ def sim_rerun() -> dict:
     assert is_stub(run("git status --short", status2))
     hook.last = None
     assert run("git status --short", status2) == status2, "fail open"
+    assert s.saved > 0.1 * s.raw_tok, (s.saved, s.raw_tok)
     return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
 
 
@@ -572,6 +575,7 @@ def sim_rerun_delta() -> dict:
     h.step("Bash", {"command": "x"}, ident)
     h.hook.prev["", "x"]["text"] = None
     assert h.step("Bash", {"command": "x"}, ident + "more\n") == ident + "more\n"
+    assert s.saved > 0.3 * s.raw_tok, (s.saved, s.raw_tok)
     return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved, "modes": ",".join(modes)}
 
 
@@ -802,6 +806,7 @@ def sim_overlap() -> dict:
         hook.shown = None
         raw, seen = read("src/a.py", 1, 30)
         assert seen == raw, "fail open"
+        assert s.saved > 0.15 * s.raw_tok, (s.saved, s.raw_tok)
         return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
 
 
@@ -844,12 +849,12 @@ def sim_narrowing() -> dict:
         raw, seen = grep(r"return total")
         assert seen == raw
         raw, seen = grep(r"return total - 1\d")
-        assert is_stub(seen) and "\n" not in seen.strip() and len(seen) < len(raw) * 0.75, "subset of earlier hits: keys only"
+        assert is_stub(seen) and "\n" not in seen.strip() and tokens(seen) < tokens(raw) * 0.75, "subset of earlier hits: keys only"
+        step_saving = tokens(raw) - tokens(seen)
         raw_b, seen_b = grep(r"return total$")
-        assert seen_b == raw_b or is_stub(seen_b)
+        assert is_stub(seen_b), "every 'return total' line was in the first result"
         raw, seen = grep(r"total")
-        assert not is_stub(seen) or "already shown" not in seen, "superset: new hits exist, so this idea does not apply"
-        assert seen == raw, "keys-only is all or nothing"
+        assert seen == raw, "superset: new hits exist, so keys-only does not apply (all or nothing)"
         raw, seen = grep(r"return total - 2\d")
         assert is_stub(seen), "subset of the union of earlier hits"
         # file edited between the searches: same path:line, different text -> the key would be ambiguous
@@ -869,7 +874,8 @@ def sim_narrowing() -> dict:
         led.seen = None
         raw, seen = grep(r"return total - 1[3-5]")
         assert seen == raw, "fail open"
-        return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
+        assert step_saving > 100 and s.saved >= step_saving, (step_saving, s.saved)
+        return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved, "first_subset_step_saving": step_saving}
 
 
 case(
@@ -1405,6 +1411,7 @@ def sim_content_stub() -> dict:
         call("Bash", {"command": "cat src/a.py"}, src, True)
         hook.seen = None
         call("Bash", {"command": "cat src/a.py"}, src, False)
+        assert s.saved > 0.3 * s.raw_tok, (s.saved, s.raw_tok)
         return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
 
 
@@ -2170,18 +2177,23 @@ def sim_line_keyed() -> dict:
         return f[:k] + new + f[k:]
 
     sub = lambda f, a, b: [l.replace(a, b) for l in f]  # noqa: E731
+    def block(tag: str, n: int) -> list[str]:
+        """n lines of plausible validation code for rule `tag`."""
+        out = []
+        for j in range(n):
+            out.append(f"    if not rules.{tag}_{j}(order, items):" if j % 2 == 0 else f"        raise OrderError(order.id, '{tag} rule {j} failed for ' + order.customer)")
+        return out
+
     steps = [  # each edit is applied to the cumulative file, as in an edit-diff-edit loop
-        lambda f: ins_before(f, "    total = 0", ["    if not order.items:", "        raise ValueError('empty order')", "    if order.currency not in SUPPORTED:",
-                                                  "        raise ValueError('unsupported currency: ' + order.currency)"]),
-        lambda f: ["import logging"] + ins_before(f, "    total = 0", ["    log.info('processing order %s with %d items', order.id, len(items))", "    started = time.monotonic()"]),
-        lambda f: sub(f, "raise ValueError('empty order')", "raise OrderError(order.id, 'empty order')"),
-        lambda f: ins_before(f, "    ledger.record(order.id, total)", ["    # totals are rounded to cents in the order currency", "    total = round(total, CURRENCY_DIGITS[order.currency])",
-                                                                      "    if total < 0:", "        raise OrderError(order.id, 'negative total')"]),
+        lambda f: ins_before(f, "    total = 0", block("stock", 8)),
+        lambda f: ["import logging"] + ins_before(f, "    total = 0", ["    log.info('processing order %s with %d items for %s', order.id, len(items), order.customer)", "    started = time.monotonic()"] + block("fraud", 4)),
+        lambda f: sub(f, "raise OrderError(order.id, 'stock rule 1 failed for ' + order.customer)", "raise OutOfStock(order.id, order.customer)"),
+        lambda f: ins_before(f, "    ledger.record(order.id, total)", ["    # totals are rounded to cents in the order currency", "    total = round(total, CURRENCY_DIGITS[order.currency])"] + block("limits", 6)),
         lambda f: [l for l in f if "log.info" not in l and "started =" not in l],
-        lambda f: ins_after(f, "    for item in items:", ["        if item.discontinued:", "            continue", "        if item.qty <= 0:", "            raise OrderError(order.id, 'bad quantity')"]),
+        lambda f: ins_after(f, "    for item in items:", ["        if item.discontinued:", "            continue", "        if item.qty <= 0:", "            raise OrderError(order.id, 'bad quantity')"] + block("item", 4)),
         lambda f: ins_after(sub(f, "total += item.price * item.qty", "total += item.price * item.qty * (1 - item.discount)"), "        total += item.price * item.qty * (1 - item.discount)",
-                            ["    tax = total * TAX_RATE[order.country]", "    total += tax"]),
-        lambda f: ins_after(f, "    ledger.record(order.id, total)", ["    metrics.incr('orders.processed')", "    metrics.observe('orders.total', total)", "    audit.log(order.id, total)"]),
+                            ["    tax = total * TAX_RATE[order.country]", "    total += tax"] + block("tax", 4)),
+        lambda f: ins_after(f, "    ledger.record(order.id, total)", ["    metrics.incr('orders.processed')", "    metrics.observe('orders.total', total)", "    audit.log(order.id, total)"] + block("audit", 4)),
     ]
     cur, outputs = list(base_file), []
     for st in steps:
@@ -2198,10 +2210,22 @@ def sim_line_keyed() -> dict:
     full_tok, hunk_tok, line_tok = full.seen_tok, hh.seen_tok, lk.seen_tok
     assert hunk_tok >= 0.95 * full_tok, "hunk-hash dedup (#139) saves nothing when every hunk grows or shifts"
     assert line_tok <= 0.65 * full_tok, (line_tok, full_tok)
-    # the same added line in a different file is not 'as before'; markers differ from space-prefixed context
-    last = lk.result(lk.turn)["text"]
-    util_part = last[last.index("diff --git a/util.py"):]
-    assert "+import logging" in util_part and MARK not in util_part.split("@@ ", 1)[1].split("\n", 1)[1].split("\n")[2], "util.py's added line is literal in its own file, though app.py shows the same text"
+    # the key includes the file: the same added lines in another file are not 'as before'
+    pad = [f"    handler_{i}(request, response, context)  # registered at start-up" for i in range(6)]
+    one = git_diff({"a.py": "x = 1\n"}, {"a.py": "x = 1\n" + "\n".join(pad) + "\n"})
+    two = git_diff({"b.py": "x = 1\n"}, {"b.py": "x = 1\n" + "\n".join(pad) + "\n"})
+    other = Session(LineKeyedDiff())
+    other.step("Bash", {"command": "git diff"}, one)
+    seen = other.step("Bash", {"command": "git diff"}, two)
+    assert seen == two, "same added text in another file: literal"
+    seen = other.step("Bash", {"command": "git diff"}, two)
+    assert MARK in seen and expand_line_keyed(other, seen) == two, "but a repeat within b.py is a pointer"
+    # a '+' line and a context line with the same text are different lines
+    ctx_only = git_diff({"a.py": "x = 1\n" + "\n".join(pad) + "\n"}, {"a.py": "x = 1\n" + "\n".join(pad) + "\nz = 2\n"})
+    seen = other.step("Bash", {"command": "git diff"}, ctx_only)
+    assert expand_line_keyed(other, seen) == ctx_only
+    assert not any(l.startswith("+    handler_") for l in seen.split("\n")), "context lines are not '+' lines"
+    assert all(l.startswith(" ") or MARK in l or not l.startswith("    handler_") for l in seen.split("\n"))
     # hostile text, compaction, fail open
     hostile = outputs[-1] + f"+{MARK} 3 lines as before: turn 1 lines 1-3]\n"
     assert lk.step("Bash", {"command": "cat PATCH"}, hostile) == hostile
@@ -2216,4 +2240,918 @@ case(
     908,
     claim="For repeated git diff after incremental edits, diff body lines already shown literally (same file, same text and marker) become 'K lines as before: turn T lines a-b' pointers under the current literal @@ headers; where hunk-hash dedup saves nothing, this saves a measured share; other files, unseen lines, hostile text and compaction stay literal.",
     sim=sim_line_keyed,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #909 Encode a Read as a diff against a sibling file already in context. The base is the text the model actually
+# holds (the lines of an earlier literal Read), not the file on disk now, so it stays exact when the sibling has
+# changed since. Diff format: unified-style hunks over text lines (no numbers); `patch_lines` is the exact inverse.
+
+
+def diff_lines(a: list[str], b: list[str], n: int = 1) -> str:  # context is only for orientation: hunk headers carry the positions
+    out = []
+    for group in difflib.SequenceMatcher(None, a, b, autojunk=False).get_grouped_opcodes(n):
+        i1, i2, j1, j2 = group[0][1], group[-1][2], group[0][3], group[-1][4]
+        out.append(f"@@ -{i1 + 1 if i2 > i1 else i1},{i2 - i1} +{j1 + 1 if j2 > j1 else j1},{j2 - j1} @@")
+        for tag, a1, a2, b1, b2 in group:
+            if tag == "equal":
+                out += [" " + l for l in a[a1:a2]]
+            else:
+                out += ["-" + l for l in a[a1:a2]] + ["+" + l for l in b[b1:b2]]
+    return "".join(l + "\n" for l in out)
+
+
+def patch_lines(a: list[str], diff: str) -> list[str]:
+    out, i = [], 0
+    lines = diff.split("\n")[:-1] if diff else []
+    k = 0
+    while k < len(lines):
+        m = re.fullmatch(r"@@ -(\d+),(\d+) \+(\d+),(\d+) @@", lines[k])
+        if not m:
+            raise ValueError(f"bad hunk header {lines[k]!r}")
+        start = int(m.group(1)) - 1 if int(m.group(2)) else int(m.group(1))
+        out += a[i:start]
+        i, k, old, new = start, k + 1, int(m.group(2)), int(m.group(4))
+        while old or new:
+            c, text = lines[k][:1], lines[k][1:]
+            if c == " " and a[i] == text:
+                out.append(text)
+                i, old, new = i + 1, old - 1, new - 1
+            elif c == "-" and a[i] == text:
+                i, old = i + 1, old - 1
+            elif c == "+":
+                out.append(text)
+                new -= 1
+            else:
+                raise ValueError(f"diff does not apply to this base at {lines[k]!r}")
+            k += 1
+    return out + a[i:]
+
+
+class SiblingDiff:
+    MIN_RATIO = 0.7
+
+    def __init__(self):
+        self.files: dict | None = {}  # path -> {"lines", "turn"} for literal full Reads only
+
+    def on_compact(self):
+        self.files = {}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        if tool != "Read" or MARK in raw or not raw or raw.startswith("Error") or "offset" in args or "limit" in args:
+            return raw
+        nums = parse_numbered(raw)
+        if list(nums) != list(range(1, len(nums) + 1)):
+            return raw
+        lines, path, best = list(nums.values()), args["path"], None
+        for p, e in self.files.items():
+            if p == path:
+                continue
+            sm = difflib.SequenceMatcher(None, e["lines"], lines, autojunk=False)
+            if sm.real_quick_ratio() < self.MIN_RATIO or sm.quick_ratio() < self.MIN_RATIO:
+                continue
+            r = sm.ratio()
+            if r >= self.MIN_RATIO and (best is None or r > best[0]):
+                best = (r, p, e)
+        if best:
+            cand = f"{MARK} same as {best[1]} (your Read at turn {best[2]['turn']}) with these changes; hunks over text lines, no line numbers]\n" + diff_lines(best[2]["lines"], lines)
+            if len(cand) < 0.8 * len(raw):
+                return cand
+        self.files[path] = {"lines": lines, "turn": turn}
+        return raw
+
+
+def rebuild_from_sibling(s: Session, text: str) -> list[str]:
+    m = re.match(r"\[ctxprune: same as (\S+) \(your Read at turn (\d+)\) with these changes; [^\n]*\]\n", text)
+    ev = s.result(int(m.group(2)))
+    assert ev["tool"] == "Read" and ev["args"]["path"] == m.group(1) and not is_stub(ev["text"]), "the base must be a literal Read still in context"
+    return patch_lines(list(parse_numbered(ev["text"]).values()), text[m.end():])
+
+
+def catalog(variant: dict[int, str], n: int = 60) -> str:
+    rows = [f'  "msg.key_{i}": "{variant.get(i, f"Welcome message number {i} for the dashboard")}",' for i in range(n)]
+    return "{\n" + "\n".join(rows) + "\n}\n"
+
+
+def terraform(env: str, size: str, region: str) -> str:
+    """Per-environment root module: only size and region differ between environments."""
+    head = f'terraform {{\n  backend "s3" {{ bucket = "tf-state" }}\n}}\n\nprovider "aws" {{\n  region = "{region}"\n}}\n\n'
+    return head + "".join(
+        f'resource "aws_instance" "node_{i}" {{\n  ami           = "ami-0abc{i:04d}"\n  instance_type = "{size if i % 4 == 0 else "t3.small"}"\n  tags = {{ Name = "node-{i}" }}\n}}\n\n' for i in range(8))
+
+
+def sim_sibling_diff() -> dict:
+    with tempfile.TemporaryDirectory() as d:
+        ws, hook = Workspace(d), SiblingDiff()
+        tools, s = Tools(ws), Session(hook)
+        en_us = catalog({})
+        files = {
+            "locales/en_US.json": en_us,
+            "locales/en_GB.json": catalog({i: f"Welcome message number {i} for the dashboard (UK)" for i in (5, 30, 51)}),
+            "locales/en_AU.json": catalog({i: f"G'day, message number {i} for the dashboard" for i in (12, 40)}),
+            "locales/de.json": catalog({i: f"Willkommensnachricht Nummer {i} fuer das Dashboard" for i in range(60)}),
+            "envs/dev/main.tf": terraform("dev", "t3.small", "eu-west-1"),
+            "envs/staging/main.tf": terraform("staging", "t3.medium", "eu-west-1"),
+            "envs/prod/main.tf": terraform("prod", "m5.large", "us-east-1"),
+        }
+        for p, t in files.items():
+            ws.put(p, t)
+
+        def read(path, **kw):
+            raw = tools.read(path, **kw)
+            seen = s.step("Read", {"path": path, **kw}, raw)
+            if is_stub(seen):
+                assert rebuild_from_sibling(s, seen) == list(parse_numbered(raw).values()), "reader view: base text + diff = exactly what the Read returned"
+            return raw, seen
+
+        raw, seen = read("locales/en_US.json")
+        assert seen == raw
+        raw, seen = read("locales/en_GB.json")
+        assert is_stub(seen) and "locales/en_US.json" in seen and len(seen) < len(raw) * 0.5, "similar sibling: diff only"
+        raw, seen = read("locales/de.json")
+        assert seen == raw, "ratio below 0.7: every value differs, the diff would be as long as the file"
+        raw, seen = read("locales/en_AU.json")
+        assert is_stub(seen) and "locales/en_US.json" in seen, "the best base is the sibling with the highest ratio (de.json is a worse base)"
+        raw, seen = read("envs/dev/main.tf")
+        assert seen == raw
+        raw, seen = read("envs/prod/main.tf")
+        assert is_stub(seen) and "envs/dev/main.tf" in seen
+        # the sibling changed on disk after the model read it: the base is what the model holds, so it stays exact
+        ws.put("locales/en_US.json", en_us.replace("number 5 ", "number 5 (edited) "))
+        ws.put("locales/en_CA.json", en_us.replace("number 11 ", "number 11 (eh) "))
+        raw, seen = read("locales/en_CA.json")
+        assert is_stub(seen) and "(edited)" not in seen, "diffed against the old text the model has, not the file on disk now"
+        # re-reading a path is never a diff against itself; ranged reads are not rewritten and are not bases
+        raw, seen = read("locales/en_US.json")
+        assert seen == raw
+        raw, seen = read("locales/en_GB.json", offset=5, limit=10)
+        assert seen == raw
+        # identical content: a diff with no hunks
+        ws.put("locales/en_copy.json", ws.get("locales/en_US.json"))
+        raw, seen = read("locales/en_copy.json")
+        assert is_stub(seen) and seen.count("\n") == 1, "identical sibling: header only"
+        # CRLF twin: every line differs by its \\r, so there is nothing to gain
+        ws.put("locales/en_win.json", en_us.replace("\n", "\r\n"))
+        raw, seen = read("locales/en_win.json")
+        assert seen == raw
+        saved_before, raw_before = s.saved, s.raw_tok
+        s.compact()
+        raw, seen = read("locales/en_GB.json")
+        assert seen == raw, "after compaction no base is in context"
+        hook.files["x"] = {"lines": None, "turn": 0}
+        raw, seen = read("locales/en_AU.json")
+        assert seen == raw, "fail open"
+        # exactness: random base/target pairs, including lines that look like diff syntax
+        rng = random.Random(909)
+        pool = ["", "@@ -1,1 +1,1 @@", "+x", "-x", " x", "\\ No newline at end of file", "a\r", "same", "é", "\t", "k: v", "#"]
+        for _ in range(500):
+            a = [rng.choice(pool) for _ in range(rng.randrange(0, 14))]
+            b = rng.choice([[rng.choice(pool) for _ in range(rng.randrange(0, 14))], a[: rng.randrange(len(a) + 1)] + [rng.choice(pool)] + a[rng.randrange(len(a) + 1):], list(a)])
+            assert patch_lines(a, diff_lines(a, b)) == b, (a, b)
+        try:
+            patch_lines(["x", "y"], diff_lines(["a", "b"], ["a", "c"]))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a diff must refuse to apply to the wrong base")
+        assert saved_before > 0.25 * raw_before, (saved_before, raw_before)
+        return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
+
+
+case(
+    909,
+    claim="A full Read whose lines have difflib ratio >= 0.7 with a file the model already read in full is shown as 'same as PATH' plus a diff over text lines against the text the model holds; applying the diff to that text returns exactly the Read's lines, and dissimilar files, a path's own re-read, ranged reads, CRLF twins and compaction stay literal.",
+    sim=sim_sibling_diff,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1265 Seed the read-shadow from Write and Bash heredoc/printf contents. The hook only trusts a seed it can verify:
+# at Read time the returned numbered lines must equal the seeded text exactly, so a wrong guess about what bash
+# really wrote (expansion, a later sed -i, a formatter) just means a full read.
+
+HEREDOC_RX = re.compile(
+    r"(?:cat\s*(?P<op1>>>?)\s*(?P<p1>[^\s<>|;&]+)|tee\s+(?P<a>-a\s+)?(?P<p2>[^\s<>|;&]+))\s*<<(?P<dash>-?)\s*(?P<q>['\"]?)(?P<tag>\w+)(?P=q)[ \t]*\n"
+    r"(?P<body>.*?)\n(?P<end>[ \t]*)(?P=tag)[ \t]*(?:\n|\Z)", re.S)
+PRINTF_RX = re.compile(r"printf\s+'(?P<fmt>[^'%\\]*(?:\\[nt\\][^'%\\]*)*)'\s*(?P<op>>>?)\s*(?P<p>[^\s<>|;&]+)")
+
+
+def safe_path(p: str) -> str | None:
+    if any(c in p for c in "$~*?`\"'{}") or p.startswith("-"):
+        return None
+    return os.path.normpath(p)
+
+
+def writes_in(cmd: str) -> list[tuple[str, bool, str]]:
+    """(path, append?, content) for each write the hook is willing to predict, in command order."""
+    found = []
+    for m in HEREDOC_RX.finditer(cmd):
+        dash, quoted, body = bool(m.group("dash")), bool(m.group("q")), m.group("body")
+        if (m.group("end") and not dash) or (not quoted and re.search(r"[$`\\]", body)):
+            continue  # unquoted heredocs expand $vars, `cmds` and backslashes: the text is not what bash writes
+        path = safe_path(m.group("p1") or m.group("p2"))
+        if path:
+            text = "\n".join(l.lstrip("\t") for l in body.split("\n")) if dash else body
+            found.append((m.start(), path, m.group("op1") == ">>" or bool(m.group("a")), text + "\n"))
+    for m in PRINTF_RX.finditer(cmd):
+        path = safe_path(m.group("p"))
+        if path:
+            fmt = m.group("fmt").replace("\\\\", "\0").replace("\\n", "\n").replace("\\t", "\t").replace("\0", "\\")
+            found.append((m.start(), path, m.group("op") == ">>", fmt))
+    return [(p, a, c) for _, p, a, c in sorted(found)]
+
+
+class WriteShadow:
+    def __init__(self):
+        self.sh: dict | None = {}
+
+    def on_compact(self):
+        self.sh = {}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        if tool == "Write" and raw.startswith("File created"):
+            self.sh[os.path.normpath(args["path"])] = dict(text=args["content"], turns=[turn])
+        elif tool == "Bash" and not raw.startswith("Exit code"):
+            for path, append, content in writes_in(args["command"]):
+                prev = self.sh.get(path)
+                if not append:
+                    self.sh[path] = dict(text=content, turns=[turn])
+                elif prev:
+                    prev["text"] += content
+                    prev["turns"].append(turn)
+                else:
+                    self.sh.pop(path, None)  # appended to a file whose base the model never saw
+        elif tool == "Edit":
+            self.sh.pop(os.path.normpath(args["path"]), None)
+        elif tool == "Read" and not raw.startswith("Error"):
+            e = self.sh.get(os.path.normpath(args["path"]))
+            if e:
+                off, lim = args.get("offset", 1), args.get("limit", 2000)
+                part = lines_of(e["text"])[off - 1: off - 1 + lim]
+                if part and raw == numbered(part, off):  # verified: the file is what the model wrote
+                    stub = f"{MARK} {args['path']} lines {off}-{off + len(part) - 1} unchanged since your write at turn {','.join(map(str, e['turns']))}: {len(part)} lines]"
+                    if len(stub) < len(raw):
+                        return stub
+        return raw
+
+
+def scan_writes(cmd: str) -> list[tuple[str, bool, str]]:
+    """Independent line-scanner (the reader's view of the same commands), used for both the shell emulation and the
+    reader. Applies bash semantics: unquoted heredocs expand $HOME, \\$ and are otherwise literal."""
+    lines, out, k = cmd.split("\n"), [], 0
+    hdr = re.compile(r"(?:cat\s*(>>?)\s*(\S+)|tee\s+(-a\s+)?(\S+))\s*<<(-?)\s*(['\"]?)(\w+)\6\s*$")
+    while k < len(lines):
+        m = hdr.search(lines[k])
+        if m:
+            path, append, dash, quoted, tag = m.group(2) or m.group(4), m.group(1) == ">>" or bool(m.group(3)), m.group(5) == "-", bool(m.group(6)), m.group(7)
+            body, k = [], k + 1
+            while k < len(lines) and (lines[k].lstrip("\t") if dash else lines[k]) != tag:
+                body.append(lines[k].lstrip("\t") if dash else lines[k])
+                k += 1
+            if k < len(lines):
+                text = "\n".join(body) + "\n"
+                if not quoted:
+                    text = text.replace("\\$", "\0").replace("$HOME", "/home/dev").replace("\0", "$")
+                out.append((os.path.normpath(path), append, text))
+        else:
+            for pm in PRINTF_RX.finditer(lines[k]):
+                out.append((os.path.normpath(pm.group("p")), pm.group("op") == ">>", codecs.decode(pm.group("fmt"), "unicode_escape")))
+        k += 1
+    return out
+
+
+def run_bash_writes(ws: Workspace, cmd: str) -> str:
+    """Emulate bash for the write forms above; a path in a missing directory fails like the real shell."""
+    for path, append, text in scan_writes(cmd):
+        if not os.path.isdir(os.path.dirname(ws.p(path))):
+            return f"Exit code 1\nbash: {path}: No such file or directory\n"
+        ws.put(path, (ws.get(path) if append and ws.stat(path) else "") + text)
+    return ""
+
+
+def rebuild_from_write(s: Session, stub: str) -> list[str]:
+    m = re.fullmatch(r"\[ctxprune: (\S+) lines (\d+)-(\d+) unchanged since your write at turn ([\d,]+): (\d+) lines\]", stub)
+    path, a, b, turns = os.path.normpath(m.group(1)), int(m.group(2)), int(m.group(3)), [int(t) for t in m.group(4).split(",")]
+    text = ""
+    for t in turns:
+        ev = s.use(t)
+        if ev["tool"] == "Write":
+            text = ev["args"]["content"]
+        else:
+            for p, append, content in scan_writes(ev["args"]["command"]):
+                if p == path:
+                    text = text + content if append else content
+    return lines_of(text)[a - 1:b]
+
+
+def sim_write_shadow() -> dict:
+    with tempfile.TemporaryDirectory() as d:
+        ws, hook = Workspace(d), WriteShadow()
+        tools, s = Tools(ws), Session(hook)
+        mod = py_module("gen", 12)
+
+        def bash(cmd):
+            raw = run_bash_writes(ws, cmd)
+            s.step("Bash", {"command": cmd}, raw)
+            return raw
+
+        def read(path, expect_stub, **kw):
+            raw = tools.read(path, **kw)
+            seen = s.step("Read", {"path": path, **kw}, raw)
+            if is_stub(seen):
+                assert rebuild_from_write(s, seen) == [l for l in parse_numbered(raw).values()], "reader view: the model's own tool input rebuilds the lines"
+            assert is_stub(seen) == expect_stub, (path, seen[:90])
+            return raw, seen
+
+        # Write tool -> verification Read (whole and ranged)
+        s.step("Write", {"path": "src/gen.py", "content": mod}, tools.write("src/gen.py", mod))
+        t_w = s.turn
+        raw, seen = read("src/gen.py", True)
+        assert f"turn {t_w}" in seen and len(seen) < len(raw) / 10
+        read("src/gen.py", True, offset=3, limit=4)
+        # quoted heredoc, <<- with tab-indented body, tee, printf with escapes
+        def blob(tag, n=10):
+            return [f"{tag} line {i}: some configuration value {i * 7} for the service" for i in range(n)]
+
+        ini = "[server]\nhost = 0.0.0.0\nport = 8080\n[log]\nlevel = debug\nfile = /var/log/app.log\n" + "\n".join(blob("ini", 4)) + "\n"
+        os.makedirs(ws.p("conf"), exist_ok=True)
+        bash(f"cat > conf/app.ini <<'EOF'\n{ini}EOF")
+        read("conf/app.ini", True)
+        tabbed = "cat > conf/tabs.txt <<-'EOF'\n" + "".join(f"\t{'\t' if i == 1 else ''}{l}\n" for i, l in enumerate(blob("tab"))) + "\tEOF"
+        bash(tabbed)
+        assert ws.get("conf/tabs.txt") == "\n".join(blob("tab")) + "\n", "<<- strips every leading tab"
+        read("conf/tabs.txt", True)
+        bash("tee conf/via_tee.txt <<'EOF'\n" + "\n".join(blob("tee")) + "\nEOF")
+        read("conf/via_tee.txt", True)
+        pf = "\\n".join(blob("pf", 8)) + "\\n"
+        bash(f"printf '{pf}' > conf/pf.txt")
+        assert ws.get("conf/pf.txt") == "\n".join(blob("pf", 8)) + "\n"
+        read("conf/pf.txt", True)
+        # multiple writes in one command, after another command on the same line
+        bash("mkdir -p conf && cat > conf/a.txt <<'EOF'\n" + "\n".join(blob("A")) + "\nEOF\ncat > conf/b.txt <<'EOF'\n" + "\n".join(blob("B")) + "\nEOF")
+        read("conf/a.txt", True)
+        read("conf/b.txt", True)
+        # append to a file whose content the model wrote: the shadow concatenates, the stub names both turns
+        bash("cat >> conf/app.ini <<'EOF'\n[extra]\nflag = on\nEOF")
+        raw, seen = read("conf/app.ini", True)
+        assert re.search(r"turn \d+,\d+:", seen), seen
+        # unquoted heredoc whose body expands $HOME: the hook must not guess (and the file really differs)
+        env_cmd = "cat > conf/env.txt <<EOF\nhome=$HOME\n" + "\n".join(blob("env")) + "\nEOF"
+        bash(env_cmd)
+        assert ws.get("conf/env.txt").startswith("home=/home/dev")
+        assert writes_in(env_cmd) == [], "expansion: no seed"
+        read("conf/env.txt", False)
+        # unquoted heredoc with nothing to expand is safe; printf with a % directive is not predicted
+        bash("cat > conf/plain.txt <<EOF\n" + "\n".join(blob("plain")) + "\nEOF")
+        read("conf/plain.txt", True)
+        assert writes_in("printf '%s\\n' hello > conf/pct.txt") == []
+        # append to a file never written by the model: unknown base, never a stub
+        ws.put("conf/foreign.txt", "\n".join(blob("foreign")) + "\n")
+        bash("cat >> conf/foreign.txt <<'EOF'\n" + "\n".join(blob("more")) + "\nEOF")
+        read("conf/foreign.txt", False)
+        # a failed command seeds nothing
+        fail_cmd = "cat > missing_dir/f.txt <<'EOF'\n" + "\n".join(blob("lost")) + "\nEOF"
+        raw = bash(fail_cmd)
+        assert raw.startswith("Exit code 1") and writes_in(fail_cmd), "the hook could predict it, but the exit status vetoes the seed"
+        read("missing_dir/f.txt", False)
+        # a foreign change (formatter, sed -i) after the write: the verification Read must show the file
+        ws.put("src/gen.py", mod.replace("gen_3", "gen_three"))
+        raw, seen = read("src/gen.py", False)
+        assert "gen_three" in raw
+        # the model's own Edit drops the shadow
+        s.step("Write", {"path": "src/two.py", "content": mod}, tools.write("src/two.py", mod))
+        s.step("Edit", {"path": "src/two.py", "old_string": "gen_4", "new_string": "gen_four"}, tools.edit("src/two.py", "gen_4", "gen_four", replace_all=True))
+        read("src/two.py", False)
+        # differential check of the two parsers (the hook's regex vs the reader's scanner) on every command so far
+        for e in s.ctx:
+            if e["kind"] == "use" and e["tool"] == "Bash":
+                mine = writes_in(e["args"]["command"])
+                theirs = [w for w in scan_writes(e["args"]["command"])]
+                assert all(w in theirs for w in mine), (mine, theirs)
+        s.compact()
+        read("conf/app.ini", False)
+        s.step("Write", {"path": "src/three.py", "content": mod}, tools.write("src/three.py", mod))
+        hook.sh["src/three.py"] = {"text": 5, "turns": [1]}  # corrupted shadow
+        read("src/three.py", False)
+        assert s.saved > 0.25 * s.raw_tok, (s.saved, s.raw_tok)
+        return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
+
+
+case(
+    1265,
+    claim="Content the model wrote with Write, a quoted or expansion-free heredoc, tee or printf is kept as a shadow; a later Read whose numbered lines equal it exactly becomes 'unchanged since your write at turn N'; expanding heredocs, printf directives, failed commands, appends to unknown files, foreign changes, an Edit and compaction give the full read.",
+    sim=sim_write_shadow,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1322 PreToolUse denial of a Read using a line-range ledger. Deny only when mtime, size, inode and content hash are
+# unchanged since the executed Reads that returned the ranges and the requested lines lie inside their union. A denied
+# Read never executes, so the read-first state of Edit/Write must not depend on it: checked by running every random
+# session twice (with and without the gate) and comparing every Edit outcome.
+
+
+def merge_ranges(rs):
+    out = []
+    for a, b in sorted(rs):
+        if out and a <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+class ReadGate:
+    """mode 'stat+hash' is the design; 'stat' and 'hash' are ablations that must be caught by the checks below."""
+
+    def __init__(self, ws: Workspace, mode: str = "stat+hash"):
+        self.ws, self.mode, self.led = ws, mode, {}
+
+    def on_compact(self):
+        self.led = {}
+
+    def pre(self, path, offset, limit):
+        try:
+            st, e = self.ws.stat(path), self.led.get(path)
+            if st is None or e is None:
+                return None
+            if "stat" in self.mode and st != e["stat"]:
+                return None
+            if "hash" in self.mode and sha(self.ws.get(path)) != e["sha"]:
+                return None
+            a, b = offset, min(offset + limit - 1, e["n"])
+            if a < 1 or a > e["n"] or not any(x <= a and b <= y for x, y in e["ranges"]):
+                return None
+            return f"Denied: lines {a}-{b} of {path} are already in your context (unchanged file, read at turn {e['turn']})."
+        except Exception:  # noqa: BLE001  fail open: let the Read run
+            return None
+
+    def post(self, turn, path, raw):
+        try:
+            nums = list(parse_numbered(raw)) if raw and not raw.startswith("Error") else []
+            if not nums:
+                return
+            st, text = self.ws.stat(path), self.ws.get(path)
+            e = self.led.get(path)
+            if e is None or e["stat"] != st or e["sha"] != sha(text):
+                e = self.led[path] = dict(stat=st, sha=sha(text), n=len(lines_of(text)), ranges=[], turn=turn)
+            e["ranges"] = merge_ranges(e["ranges"] + [(nums[0], nums[-1])])
+        except Exception:  # noqa: BLE001
+            self.led.pop(path, None)
+
+
+class ReadAgent:
+    def __init__(self, root: str, mode: str | None, notify_compaction: bool = True, count_tokens: bool = True):
+        self.count = tokens if count_tokens else (lambda _t: 0)
+        self.ws = Workspace(root)
+        self.tools = Tools(self.ws)
+        self.gate = ReadGate(self.ws, mode) if mode else None
+        self.notify, self.ctx, self.turn, self.denied, self.bad_denials = notify_compaction, [], 0, 0, 0
+        self.raw_tok = self.seen_tok = 0
+        self.outcomes: list[str] = []
+
+    def visible(self, path, a, b) -> bool:
+        """Reader view: are lines a..b in context, and equal to the file as it is now?"""
+        cur, have = lines_of(self.ws.get(path)), set()
+        for e in self.ctx:
+            if e["path"] == path and e["text"] and not e["text"].startswith("Error"):
+                have |= {n for n, t in parse_numbered(e["text"]).items() if n <= len(cur) and cur[n - 1] == t}
+        return all(n in have for n in range(a, b + 1))
+
+    def read(self, path, offset=1, limit=2000):
+        self.turn += 1
+        reason = self.gate.pre(path, offset, limit) if self.gate else None
+        if reason:
+            self.denied += 1
+            cur = lines_of(self.ws.get(path))
+            self.raw_tok += self.count(numbered(cur[offset - 1: offset - 1 + limit], offset))
+            self.seen_tok += self.count(reason)
+            if not self.visible(path, offset, min(offset + limit - 1, len(cur))):
+                self.bad_denials += 1
+            return "denied"
+        raw = self.tools.read(path, offset, limit)
+        self.ctx.append(dict(path=path, text=raw, turn=self.turn))
+        if self.gate:
+            self.gate.post(self.turn, path, raw)
+        self.raw_tok += self.count(raw)
+        self.seen_tok += self.count(raw)
+        return "read"
+
+    def edit(self, path, k):
+        self.turn += 1
+        r = self.tools.edit(path, f"L{k:03d}: ", f"L{k:03d}: *")
+        self.outcomes.append(r.split(".")[0][:40] if r.startswith("Error") else "ok")
+        return r
+
+    def compact(self):
+        self.ctx = []
+        if self.gate and self.notify:
+            self.gate.on_compact()
+
+
+def gen_read_script(rng: random.Random, n: int = 28) -> list[tuple]:
+    ops = []
+    for _ in range(n):
+        r = rng.random()
+        if r < 0.40:
+            ops.append(("read", rng.randint(1, 50), rng.choice([1, 5, 20, 100, 2000])))
+        elif r < 0.52:
+            ops.append(("read", 1, 2000))
+        elif r < 0.68:
+            ops.append(("edit", rng.randrange(45)))
+        elif r < 0.90:
+            ops.append(("ext", rng.choice(["content", "samesize", "samesize_samemtime", "touch"]), rng.randrange(45), rng.randrange(2, 9)))
+        else:
+            ops.append(("compact",))
+    return ops
+
+
+def run_read_script(script, mode, notify_compaction=True) -> ReadAgent:
+    with tempfile.TemporaryDirectory() as d:
+        ag = ReadAgent(d, mode, notify_compaction, count_tokens=False)
+        P = "pkg/mod.py"
+        ag.ws.put(P, "".join(f"L{k:03d}: payload text {k:02d} for the module\n" for k in range(45)))
+        for op in script:
+            if op[0] == "read":
+                ag.read(P, op[1], op[2])
+            elif op[0] == "edit":
+                ag.edit(P, op[1])
+            elif op[0] == "compact":
+                ag.compact()
+            else:
+                _, kind, k, digit = op
+                text, mt = ag.ws.get(P), ag.ws.stat(P)[0]
+                old = text.split("\n")[k]  # a whole line (model edits only prepend a '*', so it stays unique)
+                if kind == "touch":
+                    ag.ws.touch(P)
+                elif kind == "content":
+                    ag.ws.put(P, text.replace(old, old + " (changed upstream)", 1))
+                else:  # same length, different bytes
+                    ag.ws.put(P, text.replace(old, old[:-1] + str(digit), 1), mtime_ns=mt if kind == "samesize_samemtime" else None)
+        return ag
+
+
+def sim_read_gate() -> dict:
+    # --- a readable scripted session first
+    with tempfile.TemporaryDirectory() as d:
+        ag = ReadAgent(d, "stat+hash")
+        P = "pkg/big.py"
+        ag.ws.put(P, py_module("big", 50))  # 400 lines
+        assert ag.read(P) == "read"
+        assert ag.read(P, 10, 40) == "denied" and ag.read(P) == "denied", "unchanged file, lines inside the returned range: denied"
+        assert ag.read(P, 380, 100) == "denied", "limit past EOF is clamped to the file's last line"
+        assert ag.read(P, 500, 10) == "read", "start beyond EOF: let the tool answer"
+        ag.ws.put(P, ag.ws.get(P))  # no-op rewrite changes mtime only
+        assert ag.read(P, 1, 20) == "read", "mtime moved: executed"
+        assert ag.read(P, 1, 20) == "denied"
+        assert ag.read(P, 15, 30) == "read", "partly outside the returned range: executed"
+        assert ag.read(P, 5, 40) == "denied", "inside the union of two returned ranges"
+        assert "updated" in ag.tools.edit(P, "def big_3(a, b=0):", "def big_three(a, b=0):"), "Edit's read-first check passes after denied Reads"
+        assert ag.read(P, 5, 40) == "read", "the model's own Edit changed the file"
+        before = ag.ws.stat(P)
+        ag.ws.put(P, ag.ws.get(P).replace("big_4", "big_9"), mtime_ns=before[0])
+        assert ag.ws.stat(P)[:2] == before[:2]
+        assert ag.read(P, 5, 40) == "read", "same size and mtime but different bytes: the hash catches it"
+        assert ag.read(P, 5, 40) == "denied"
+        ag.compact()
+        assert ag.read(P, 5, 40) == "read", "after compaction the lines are not in context any more"
+        assert ag.bad_denials == 0
+        scripted = (ag.denied, ag.raw_tok - ag.seen_tok)
+        assert scripted[1] > 600, scripted
+    # --- the property, on random sessions: same Edit outcomes with and without the gate, every denial is justified
+    rng = random.Random(1322)
+    scripts = [gen_read_script(rng) for _ in range(120)]
+    denied, kinds, baselines = 0, Counter(), []
+    for sc in scripts:
+        base, gated = run_read_script(sc, None), run_read_script(sc, "stat+hash")
+        baselines.append(base.outcomes)
+        assert gated.outcomes == base.outcomes, f"the gate changed an Edit outcome: {sc}"
+        assert gated.bad_denials == 0, f"a denial left the model without the lines: {sc}"
+        denied += gated.denied
+        kinds.update(base.outcomes)
+    edits = sum(kinds.values())
+    assert denied > 300 and kinds["ok"] > 50 and edits - kinds["ok"] > 10, (denied, kinds)
+    # --- ablations: each shortcut must be caught, or the checks above prove nothing
+    assert any(run_read_script(sc, "stat").bad_denials for sc in scripts), "without the hash, a same-size same-mtime rewrite leaves stale content in context"
+    assert any(run_read_script(sc, "hash").outcomes != b for sc, b in zip(scripts, baselines)), "without mtime in the key, a denied Read after `touch` makes a later Edit fail"
+    assert any(run_read_script(sc, "stat+hash", notify_compaction=False).bad_denials for sc in scripts), "a ledger that ignores compaction denies Reads whose text is gone"
+    # --- fail open: a corrupted ledger lets the Read run
+    with tempfile.TemporaryDirectory() as d:
+        ag = ReadAgent(d, "stat+hash")
+        ag.ws.put("f.py", py_module("f", 5))
+        ag.read("f.py")
+        ag.gate.led["f.py"]["ranges"] = None
+        assert ag.read("f.py") == "read"
+    return {"scripted_denials": scripted[0], "scripted_tokens_saved": scripted[1], "random_sessions": len(scripts), "random_denials": denied, "edits_compared": edits}
+
+
+case(
+    1322,
+    claim="A PreToolUse gate denies a Read only when mtime, size, inode and content hash are unchanged since the executed Reads that returned the requested lines (clamped to EOF); across 120 random sessions every Edit outcome equals the run without the gate, every denied range is still in context, and ablations without hash, without mtime, or ignoring compaction are caught.",
+    sim=sim_read_gate,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #380 Strip chunk-overlap duplicates across retrieved neighbouring chunks (transform). Input: a JSON list of hits
+# {"source", "start_index", "score", "text"}. Touching and overlapping hits of one source whose texts agree on the
+# overlap become one hit covering the union; each character span is emitted once. Hits that conflict on the overlap
+# (a re-indexed document) are never merged.
+
+
+def _no_const(c):
+    raise ValueError(c)
+
+
+def _no_dups(pairs):
+    d = dict(pairs)
+    if len(d) != len(pairs):
+        raise ValueError("duplicate key")
+    return d
+
+
+def _finite(v) -> bool:
+    if isinstance(v, float):
+        return v == v and v not in (float("inf"), float("-inf"))
+    if isinstance(v, dict):
+        return all(_finite(x) for x in v.values())
+    if isinstance(v, list):
+        return all(_finite(x) for x in v)
+    return True
+
+
+def load_strict(text: str):
+    """json.loads that rejects duplicate keys, NaN/Infinity and overflowing floats (None on any problem)."""
+    try:
+        v = json.loads(text, object_pairs_hook=_no_dups, parse_constant=_no_const)
+    except (ValueError, RecursionError):
+        return None
+    return v if _finite(v) else None
+
+
+def _span(e):
+    ok = isinstance(e, dict) and isinstance(e.get("source"), str) and isinstance(e.get("text"), str) and type(e.get("start_index")) is int and e["start_index"] >= 0
+    return (e["source"], e["start_index"], e["text"]) if ok else None
+
+
+def merge_chunks(text: str) -> str:
+    data = load_strict(text)
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        return text
+    groups: list[dict] = []  # {rank, entry, start, end, text, scores, merged}
+    by_source: dict[str, list[tuple[int, dict]]] = {}
+    for rank, e in enumerate(data):
+        sp = _span(e)
+        if sp:
+            by_source.setdefault(sp[0], []).append((rank, e))
+        else:
+            groups.append(dict(rank=rank, entry=e, merged=1, scores=[]))
+    for src, hits in by_source.items():
+        cur = None
+        for rank, e in sorted(hits, key=lambda h: (h[1]["start_index"], h[0])):
+            s0, t = e["start_index"], e["text"]
+            if cur is not None and s0 <= cur["end"]:
+                off = s0 - cur["start"]
+                ov = min(cur["end"], s0 + len(t)) - s0
+                if cur["text"][off:off + ov] == t[:ov]:  # texts agree on the shared span
+                    if s0 + len(t) > cur["end"]:
+                        cur["text"], cur["end"] = cur["text"] + t[ov:], s0 + len(t)
+                    cur["merged"] += 1
+                    cur["scores"].append(e.get("score"))
+                    if rank < cur["rank"]:
+                        cur["rank"], cur["entry"] = rank, e
+                    continue
+            if cur is not None:
+                groups.append(cur)
+            cur = dict(rank=rank, entry=e, start=s0, end=s0 + len(t), text=t, merged=1, scores=[e.get("score")])
+        if cur is not None:
+            groups.append(cur)
+    if all(g["merged"] == 1 for g in groups):
+        return text
+    out = []
+    for g in sorted(groups, key=lambda g: g["rank"]):
+        e = dict(g["entry"])
+        if g["merged"] > 1:
+            e["start_index"], e["text"] = g["start"], g["text"]
+            nums = [x for x in g["scores"] if isinstance(x, (int, float)) and not isinstance(x, bool)]
+            if nums and "score" in e:
+                e["score"] = max(nums)
+        out.append(e)
+    res = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+    return res if len(res) < len(text) else text
+
+
+def span_view(data) -> tuple[Counter, Counter]:
+    """Independent oracle view: Counter of (source, absolute offset, char) over span hits, Counter of other entries."""
+    chars, opaque = Counter(), Counter()
+    for e in data:
+        if isinstance(e, dict) and isinstance(e.get("source"), str) and isinstance(e.get("text"), str) and type(e.get("start_index")) is int and e["start_index"] >= 0:
+            for k, ch in enumerate(e["text"]):
+                chars[(e["source"], e["start_index"] + k, ch)] += 1
+        else:
+            opaque[json.dumps(e, sort_keys=True, ensure_ascii=True)] += 1
+    return chars, opaque
+
+
+def chunks_equivalent(x: str, e: str) -> bool:
+    if e == x:
+        return True
+    dx, de = load_strict(x), load_strict(e)
+    if not isinstance(dx, list) or not isinstance(de, list):
+        return False
+    cx, ox = span_view(dx)
+    ce, oe = span_view(de)
+    if set(cx) != set(ce) or ox != oe:
+        return False  # a character span was lost or invented, or an entry without a span changed
+    per: dict = {}
+    for (src, off, c) in cx:
+        per.setdefault((src, off), set()).add(c)
+    conflicted = {src for (src, _o), cs in per.items() if len(cs) > 1}
+    if any(src not in conflicted and n != 1 for (src, _off, _c), n in ce.items()):
+        return False  # a span of a consistent source is emitted more than once
+    return best_scores(dx) == best_scores(de)
+
+
+def best_scores(data) -> dict:
+    out: dict = {}
+    for h in data:
+        sc = h.get("score") if isinstance(h, dict) else None
+        if isinstance(sc, (int, float)) and not isinstance(sc, bool):
+            out[h.get("source")] = max(out.get(h.get("source"), sc), sc)
+    return out
+
+
+_WORDS = ("cache shard replica quorum latency index timeout retry budget queue stream batch commit rollback lease token "
+          "scheduler worker backlog gateway tenant quota region failover snapshot manifest ledger audit policy limit").split()
+
+
+def prose(n: int, seed: int) -> str:
+    rng, out, size = random.Random(seed), [], 0
+    while size < n:
+        w = rng.choice(_WORDS)
+        out.append(w)
+        size += len(w) + 1
+    return " ".join(out)
+
+
+def split_overlap(text: str, size: int, overlap: int) -> list[tuple[int, str]]:
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        if end < len(text) and text.rfind(" ", start, end) > start:
+            end = text.rfind(" ", start, end)
+        chunks.append((start, text[start:end]))
+        if end >= len(text):
+            break
+        nxt = text.find(" ", max(end - overlap, start + 1))
+        start = (nxt + 1) if nxt != -1 else end
+    return chunks
+
+
+def hits_json(source: str, chunks, picks, base_score=0.9) -> list[dict]:
+    return [{"source": source, "start_index": chunks[i][0], "score": round(base_score - 0.03 * r, 2), "text": chunks[i][1]} for r, i in enumerate(picks)]
+
+
+def compact(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def chunk_fixtures() -> list[Fixture]:
+    doc_a, doc_b = prose(6000, 1), prose(5000, 2)
+    ca = split_overlap(doc_a, 500, 100)
+    touching = [(i * 400, doc_b[i * 400:(i + 1) * 400]) for i in range(12)]
+    overlap_hits = hits_json("docs/guide.md", ca, [4, 5, 12, 3, 13, 9])
+    mixed = hits_json("docs/guide.md", ca, [2, 3]) + hits_json("docs/ops.md", touching, [2, 3, 7], 0.8) + hits_json("docs/guide.md", ca, [8])
+    shifted = hits_json("docs/guide.md", ca, [6, 1]) + hits_json("docs/other.md", ca, [6, 1], 0.7)  # same offsets, different sources
+    conflict = hits_json("docs/guide.md", ca, [4, 5])
+    conflict[1] = dict(conflict[1], text=conflict[1]["text"].replace("cache", "CACHE", 3))  # same span re-indexed with other text
+    inner = hits_json("docs/guide.md", ca, [4, 4, 5])  # a hit returned twice
+    odd = [{"source": "d.md", "start_index": True, "text": "ab"}, {"source": "d.md", "start_index": 1.0, "text": "bc"}, {"source": "d.md", "start_index": "2", "text": "cd"},
+           {"source": "d.md", "start_index": 0, "text": "héllo 👍 wörld ʹ́"}, {"source": "d.md", "start_index": 3, "text": "lo 👍 w"}, {"title": "no span"}, {"source": "d.md", "start_index": 0, "text": ""}]
+    return [
+        Fixture("neighbours with 100 chars of overlap", compact(overlap_hits), True),
+        Fixture("two sources, touching and overlapping hits", compact(mixed), True),
+        Fixture("pretty-printed input", json.dumps(overlap_hits, indent=2), True),
+        Fixture("a hit returned twice plus its neighbour", compact(inner), True),
+        Fixture("no overlap between hits", compact(hits_json("docs/guide.md", ca, [1, 6, 12])), False),
+        Fixture("same offsets, different sources", compact(shifted), False),
+        Fixture("not a list of hits", compact({"results": overlap_hits}), False),
+        Fixture("conflicting overlap (re-indexed)", compact(conflict), None),
+        Fixture("odd span fields, unicode, empty text", compact(odd), None),
+        Fixture("duplicate key and NaN are not merged", '[{"source":"a","start_index":0,"text":"abc","text":"x"},{"source":"a","start_index":1,"text":"bcd","score":NaN}]', None),
+        Fixture("empty list", "[]", False),
+    ]
+
+
+case(
+    380,
+    claim="Touching or overlapping hits of one source whose texts agree on the shared span are merged into one hit covering the union, so each (source, character offset) is emitted once; hits that disagree on the overlap, other sources, hits without an integer start_index and malformed JSON are left as they are.",
+    loses="the individual hits' ranks, scores and other metadata (a merged hit keeps the best-ranked member's fields at its position), empty hits contained in a neighbour, and the input's JSON formatting",
+    encode=merge_chunks,
+    equivalent=chunks_equivalent,
+    fixtures=chunk_fixtures,
+    min_gain=0.05,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #483 Drop the text block that duplicates structuredContent (transform). Only when the host forwards structuredContent
+# to the model: the claim and the oracle assume the model sees both forms, which is what the idea's own test must verify.
+
+
+def strict_eq(a, b) -> bool:
+    """JSON equality that keeps true != 1 != 1.0 and -0.0 != 0.0 (Python's == does not)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(strict_eq(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(strict_eq(x, y) for x, y in zip(a, b))
+    if isinstance(a, float):
+        return a == b and str(a) == str(b)
+    return a == b
+
+
+def canon(v) -> str:
+    return json.dumps(v, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+
+
+def drop_duplicate_text(raw: str) -> str:
+    res = load_strict(raw)
+    if not isinstance(res, dict) or res.get("isError") is True or not isinstance(res.get("structuredContent"), dict) or not isinstance(res.get("content"), list):
+        return raw
+    target, keep = canon(res["structuredContent"]), []
+    for b in res["content"]:
+        dup = False
+        if isinstance(b, dict) and set(b) == {"type", "text"} and b["type"] == "text" and isinstance(b["text"], str):
+            v = load_strict(b["text"])
+            dup = v is not None and canon(v) == target
+        if not dup:
+            keep.append(b)
+    if len(keep) == len(res["content"]):
+        return raw
+    out = json.dumps({**res, "content": keep}, ensure_ascii=False, separators=(",", ":"))
+    return out if len(out) < len(raw) else raw
+
+
+def model_view(raw: str):
+    """What the model can see when the host forwards both forms: structured value, every content block that is not a
+    byte-for-byte-by-value copy of it, and every other field. Written with strict_eq, not canon()."""
+    res = load_strict(raw)
+    if not isinstance(res, dict):
+        return ("opaque", raw)
+    sc = res.get("structuredContent")
+    others = []
+    for b in res.get("content", []) if isinstance(res.get("content"), list) else []:
+        dup = False
+        if isinstance(sc, dict) and res.get("isError") is not True and isinstance(b, dict) and list(sorted(b)) == ["text", "type"] and b["type"] == "text" and isinstance(b["text"], str):
+            v = load_strict(b["text"])
+            dup = v is not None and strict_eq(v, sc)
+        if not dup:
+            others.append(json.dumps(b, sort_keys=True))
+    rest = {k: v for k, v in res.items() if k not in ("content", "structuredContent")}
+    return (json.dumps(sc, sort_keys=True), sorted(others), json.dumps(rest, sort_keys=True), "content" in res)
+
+
+def mcp_equivalent(x: str, e: str) -> bool:
+    return e == x or (load_strict(x) is not None and load_strict(e) is not None and model_view(x) == model_view(e))
+
+
+def mcp_fixtures() -> list[Fixture]:
+    issues = [{"id": 100 + i, "title": f"Crash in worker {i} when queue is empty", "state": "open" if i % 3 else "closed", "labels": ["bug", f"p{i % 4}"],
+               "assignee": ["mira", "joost", None][i % 3], "comments": i * 2, "updated": f"2026-10-{i + 1:02d}T09:{i:02d}:00Z"} for i in range(12)]
+    sc = {"issues": issues, "total": 12, "next_cursor": None}
+
+    def result(structured, texts, **extra):
+        return compact({"content": [t if isinstance(t, dict) else {"type": "text", "text": t} for t in texts], "structuredContent": structured, **extra})
+
+    pretty = json.dumps(sc, indent=2)
+    reordered = json.dumps({"total": 12, "next_cursor": None, "issues": issues}, separators=(",", ":"))
+    changed = json.loads(json.dumps(sc))
+    changed["issues"][3]["comments"] = 99
+    return [
+        Fixture("FastMCP-style: pretty text duplicates structured", result(sc, [pretty]), True),
+        Fixture("compact text, other key order", result(sc, [reordered]), True),
+        Fixture("duplicate plus an unrelated text block and an image", result(sc, [pretty, "Showing 12 of 12 issues", {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}]), True),
+        Fixture("no structuredContent (older server)", compact({"content": [{"type": "text", "text": pretty}]}), False),
+        Fixture("text differs in one value", result(sc, [json.dumps(changed)]), False),
+        Fixture("true vs 1 (equal in Python, different in JSON)", result({"ok": True, "n": 1, "pad": "x" * 200}, ['{"ok":1,"n":1,"pad":"' + "x" * 200 + '"}']), False),
+        Fixture("1.0 vs 1", result({"n": 1, "pad": "y" * 200}, ['{"n":1.0,"pad":"' + "y" * 200 + '"}']), False),
+        Fixture("text block carries annotations", result(sc, [{"type": "text", "text": pretty, "annotations": {"audience": ["user"]}}]), False),
+        Fixture("isError result", result(sc, [pretty], isError=True), False),
+        Fixture("text with a prefix is not JSON", result(sc, ["Result: " + pretty]), False),
+        Fixture("duplicate keys in the text block", result({"a": 1, "pad": "z" * 200}, ['{"a":1,"a":1,"pad":"' + "z" * 200 + '"}']), None),
+        Fixture("1E5 vs 100000.0 vs 100000 and big ints", result({"a": 1e5, "b": 12345678901234567890, "c": -0.0, "pad": "q" * 100}, ['{"a":100000.0,"b":12345678901234567890,"c":0.0,"pad":"' + "q" * 100 + '"}', '{"a":1E5,"b":12345678901234567890,"c":-0.0,"pad":"' + "q" * 100 + '"}']), None),
+        Fixture("unicode escapes vs literal characters", result({"name": "Zoë 👍", "pad": "w" * 100}, ['{"name":"Zo\\u00eb \\ud83d\\udc4d","pad":"' + "w" * 100 + '"}']), None),
+        Fixture("overflowing float and NaN", result({"a": 1, "pad": "v" * 100}, ['{"a":1e999,"pad":"' + "v" * 100 + '"}']), None),
+        Fixture("not a tool result", '{"jsonrpc":"2.0","id":1}', False),
+    ]
+
+
+case(
+    483,
+    claim="When a tool result's structuredContent is an object and a plain text block parses (strictly: no duplicate keys, true/1/1.0 kept distinct) to the same value, that block is dropped; any differing value, annotated block, other block, error result or non-JSON text stays. Valid only if the host forwards structuredContent to the model.",
+    loses="formatting and key order of the dropped text block; the model must receive structuredContent for nothing to be lost, which the idea's own test has to confirm for each host",
+    encode=drop_duplicate_text,
+    equivalent=mcp_equivalent,
+    fixtures=mcp_fixtures,
+    min_gain=0.15,
 )

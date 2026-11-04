@@ -10,11 +10,9 @@ Conventions used below:
     algorithm (json.loads, xml canonicalisation, html.parser, tokenize, a YAML subset parser, a CommonMark subset
     renderer, exact rational arithmetic) and a `loses=` that names exactly what is not preserved.
 """
-import csv  # noqa: F401  (kept for fixtures that build CSV text)
 import datetime
 import functools
 import io
-import itertools  # noqa: F401
 import json
 import re
 import tokenize
@@ -499,11 +497,12 @@ case(
     fixtures=lambda: [
         Fixture("API Gateway CORS paths (25)", _dumps(_openapi()), True),
         Fixture("k8s items list", _dumps(_K8S_ITEMS), True),
-        Fixture("siblings with different structure", _dumps({"users": {"a": {"id": 1}, "b": {"id": 2, "x": 1}, "c": {"name": "z"}}}), False),
+        Fixture("siblings with different structure", _dumps({"users": {"a": {"id": 1}, "b": {"id": 2, "x": 1}, "c": {"id": 3}}}), False),
         Fixture("pretty JSON with nothing foldable", _PRETTY_NOFOLD, False),
         Fixture("two siblings only", _dumps({"paths": {"/a": {"get": {"x": 1}}, "/b": {"get": {"x": 2}}}}), False),
         Fixture("not JSON", "paths:\n  /a:\n    get: 1\n", False),
-        Fixture("number and bool types differ across siblings", _dumps({"m": {k: {"unit": "ms", "retries": 3, "mode": "fast", "v": v, "w": w} for k, (v, w) in zip("abcdef", [(1, True), (1.0, 1), (-0.0, False), (1, True), (0.0, 0), (True, 1.0)])}}), None),
+        Fixture("number and bool types differ across siblings", _dumps({"m": {k: {"unit": "ms", "retries": 3, "mode": "fast", "v": v, "w": w} for k, (v, w) in zip("abcdef", [(1, 0), (1.0, False), (True, 0.0), (1, 0), (1.0, False), (True, -0.0)])}}), None),
+        Fixture("one sibling in the middle has an extra key", _dumps({"m": {k: ({"unit": "ms", "retries": 3, "mode": "fast", "id": i} | ({"debug": True} if k == "c" else {})) for i, k in enumerate("abcdefg")}}), None),
         Fixture("duplicate keys", '{"a":{"x":1},"a":{"x":2},"b":{"x":3},"c":{"x":4}}', None),
         Fixture("sigil in a value", _dumps({"m": {"a": {"v": "§1"}, "b": {"v": "x"}, "c": {"v": "y"}}}), None),
         Fixture("looks like a folded document", '{"§fold0":{"s":{"v":"§0"},"v":[[1],[2],[3]],"k":["a","b","c"]}}', None),
@@ -1050,12 +1049,12 @@ _CONVERTED = (
     "\\*not bold\\* and \\_not italic\\_ and \\_\\_init\\_\\_ and \\# no heading\n"
     "1\\. not a list\n"
     "\\- not a bullet\n\n"
-    "A \\[link text\\](http://x.test/y) is not a link, and neither is !\\[an image\\](http://x.test/i.png).\n\n"
+    "A \\[link text\\](http://x.test/y) is not a link, and neither is !\\[an image\\](http://x.test/i.png). Nor is \\![an image](http://x.test/j.png) an image: the bang is escaped.\n\n"
     "```\nthe\\_code\\_block keeps \\_ and \\. as typed\n```\n\n"
     "    indented\\_code stays too\n")
 _ESCAPES_ONLY_MEANINGFUL = (
     "# Title\n\n\\*not bold\\* and \\_not italic\\_ and \\_\\_init\\_\\_\n1\\. not a list\n\\- not a bullet\n\\# not a heading\n\n"
-    "A \\[link text\\](http://x.test/y) and !\\[img\\](u) and \\[a\\]\\[b\\] and `code\\_here`.\n\n"
+    "A \\[link text\\](http://x.test/y) and !\\[img\\](u) and \\![img](u) and \\[a\\]\\[b\\] and `code\\_here`.\n\n"
     "- 1\\. nested ordered marker\n- 2\\) another\n\n```\nfenced\\_code \\. \\_\n```\n")
 case(
     985,
@@ -1425,6 +1424,13 @@ def encode_html(text):
     return "".join(out)
 
 
+# the oracle's own copy of the HTML facts (WHATWG): it must not share the encoder's tables
+_O_BOOL = frozenset("allowfullscreen async autofocus autoplay checked controls default defer disabled formnovalidate hidden inert ismap "
+                    "itemscope loop multiple muted nomodule novalidate open playsinline readonly required reversed selected".split())
+_O_DEFAULTS = {("script", "type"): "text/javascript", ("style", "type"): "text/css", ("form", "method"): "get"}
+_O_VOID = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+
+
 class _Events(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -1439,11 +1445,11 @@ class _Events(HTMLParser):
     def _norm(tag, attrs):
         out = []
         for k, v in attrs:
-            if k in _BOOL and (v is None or v == "" or v.lower() == k):
-                v = None
+            if k in _O_BOOL and (v is None or v == "" or v.lower() == k):
+                v = None  # present is present, however it is spelled
             if k in ("class", "style") and v == "":
                 continue
-            if (tag, k) in _DEFAULTS and v is not None and v.lower() in _DEFAULTS[(tag, k)]:
+            if v is not None and _O_DEFAULTS.get((tag, k)) == v.lower():
                 continue
             out.append((k, v))
         return tuple(out)
@@ -1454,7 +1460,7 @@ class _Events(HTMLParser):
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
-        if tag not in _VOID:
+        if tag not in _O_VOID:
             self.ev.append(("end", tag))
 
     def handle_endtag(self, tag):
@@ -1603,7 +1609,7 @@ case(
     fixtures=lambda: [
         Fixture("journalctl -o json with coloured MESSAGE arrays", _JOURNAL, True),
         Fixture("Node Buffer.toJSON", _BUFFER_RESULT, True),
-        Fixture("ASCII-valid arrays under other keys", '{"values":[72,101,108,108,111,32,119,111,114,108,100],"MESSAGES":[72,101,108,108,111,32,119,111,114,108,100]}\n', False),
+        Fixture("ASCII-valid arrays under other keys", '{"values":[72,101,108,108,111,32,119,111,114,108,100],"MESSAGES":[72,101,108,108,111,32,119,111,114,108,100]}\n{"type":"Blob","data":[72,101,108,108,111,32,119,111,114,108,100]}\n{"data":[72,101,108,108,111,32,119,111,114,108,100]}\n', False),
         Fixture("invalid UTF-8 and binary MESSAGE", '{"MESSAGE":[255,254,0,1,2,3,4,5,6,7]}\n{"MESSAGE":[0,1,2,3,4,5,6,7,8,9,10,11]}\n', False),
         Fixture("pretty-printed or non-canonical arrays", '{"MESSAGE": [72, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]}\n{"MESSAGE":[072,101,108,108,111,32,119,111,114,108,100]}\n', False),
         Fixture("short array", '{"MESSAGE":[72,101,108,108,111]}\n', False),
@@ -1736,21 +1742,27 @@ def _scalar(v):
 
 
 def _item_fields(lines):
-    """Parse the lines of one list item ('- k: v' then 'k: v' at a deeper indent, nested lines kept) into
-    {key: (value, nested_lines)} or None when the item is not plain key/value text."""
+    """Parse one list item ('      - k: v', then '        k: v'; deeper lines belong to the previous key) into
+    {key: [value, nested_lines]}; None when the item is not plain key/value text."""
     fields, key = {}, None
     for n, ln in enumerate(lines):
-        body = ln[8:] if n else ln[8:]  # both '      - k: v' and '        k: v' keep the key from column 8
-        if n == 0 and not ln.startswith("      - "):
-            return None
-        m = re.fullmatch(r"([a-z_]+):(?: (.*))?", body) if not ln[8:9].isspace() and (n == 0 or ln.startswith("        ") and not ln.startswith("         ")) else None
-        if m:
-            key = m.group(1)
-            if key in fields:
+        if n == 0:
+            if not ln.startswith("      - "):
                 return None
+            body, nested = ln[8:], False
+        else:
+            ind = len(ln) - len(ln.lstrip(" "))
+            if ind < 8:
+                return None
+            body, nested = ln.strip(), ind > 8
+        if not nested:
+            m = re.fullmatch(r"([a-z_]+):(?: (.*))?", body)
+            if not m or m.group(1) in fields:
+                return None
+            key = m.group(1)
             fields[key] = [m.group(2) or "", []]
-        elif key is not None and n and ln.startswith("          "):
-            fields[key][1].append(ln.strip())
+        elif key is not None and fields[key][0] == "":
+            fields[key][1].append(body)  # only a key with an empty value ('bind:') may own nested lines
         else:
             return None
     return fields
@@ -1809,9 +1821,42 @@ def _items(block):
     return items
 
 
+def _clean_yaml(lines):
+    """Compose config prints strictly nested 2-space YAML: no tabs, CRs, blanks or comments, and an indent only ever
+    grows by 2 after a line that opens a block ('key:' or a '- ' item), and dedents land on an open level."""
+    levels, prev = [0], None
+    for ln in lines:
+        if not ln.strip() or "\t" in ln or "\r" in ln or ln.lstrip().startswith("#"):
+            return False
+        ind, body = len(ln) - len(ln.lstrip(" ")), ln.strip()
+        if prev is not None:
+            if ind > levels[-1]:
+                if ind != levels[-1] + 2 or not re.fullmatch(r"(?:- )?[^\s:][^:]*:", prev):
+                    return False
+                levels.append(ind)
+            else:
+                while levels and ind < levels[-1]:
+                    levels.pop()
+                if not levels or ind != levels[-1]:
+                    return False
+        elif ind:
+            return False
+        if body.startswith("- ") and re.match(r"- [\w.-]+:(?: |$)", body):
+            levels.append(ind + 2)  # keys of a '- k: v' item continue two columns in
+        prev = body
+    return True
+
+
 @_total
 def encode_compose(text):
     lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+        tail = "\n"
+    else:
+        tail = ""
+    if not _clean_yaml(lines):
+        return text
     out, i, top = [], 0, ""
     while i < len(lines):
         ln = lines[i]
@@ -1850,7 +1895,7 @@ def encode_compose(text):
                     short = conv(f) if f else None
                     out += [f"      - {short}"] if short else item
         i = j
-    return "\n".join(out)
+    return "\n".join(out) + tail
 
 
 # ---- oracle: tiny YAML subset parser + model normaliser ---------------------------------------------------------
@@ -2102,7 +2147,8 @@ case(
         Fixture("only non-default long forms", "services:\n  a:\n    ports:\n      - mode: host\n        target: 80\n        published: \"80\"\n        protocol: tcp\n    depends_on:\n      b:\n        condition: service_healthy\n        required: true\n", False),
         Fixture("not compose", "ports:\n  - 80\nvolumes: 3\n", False),
         Fixture("CRLF compose", _COMPOSE.replace("\n", "\r\n"), None),
-        Fixture("tabs and odd quoting", _COMPOSE.replace('published: "8080"', "published: '8080'").replace("  db:\n    image", "  db:\n\timage"), None),
+        Fixture("single-quoted and bare published values", _COMPOSE.replace('published: "8080"', "published: '8080'").replace('published: "9090"', "published: 9090"), None),
+        Fixture("tab-indented line", _COMPOSE.replace("  db:\n    image", "  db:\n\timage"), None),
     ],
     min_gain=0.1,
     mutations=30,
@@ -2180,6 +2226,7 @@ case(
     fixtures=lambda: [
         Fixture("SOAP-style response, 10 orders with redeclared default xmlns", _soap(), True),
         Fixture("scope changes: rebinding, undeclaring, siblings", _XML_SCOPES, None),
+        Fixture("declaration after a closed sibling that rebound the namespace", '<a xmlns="u"><b xmlns="v"><x/></b><c xmlns="v"><d xmlns="v"/></c><e xmlns="u"/></a>', None),
         Fixture("every declaration is needed", '<a xmlns="u"><b xmlns="v"><c xmlns="u"/></b></a>', False),
         Fixture("not XML", "xmlns=\"u\" is just text here\n", False),
         Fixture("comments and CDATA that mention xmlns", '<a xmlns="u"><!-- <b xmlns="u"/> --><![CDATA[<c xmlns="u"/>]]><d xmlns="v"/></a>', False),
@@ -2286,7 +2333,7 @@ def decode_frame(text):
 
 
 def _frame_json(rows=40, trailing=""):
-    cols = {"price": lambda i: f"{i * 1.25:.2f}".rstrip("0") if i % 3 else str(float(i)), "name": lambda i: json.dumps(f"item \"{i}\" caf\u00e9/\t" if i % 7 == 0 else f"item-{i}", ensure_ascii=False),
+    cols = {"price": lambda i: json.dumps(i * 1.25 if i % 3 else float(i)), "name": lambda i: json.dumps(f"item \"{i}\" caf\u00e9/\t" if i % 7 == 0 else f"item-{i}", ensure_ascii=False),
             "stock": lambda i: "null" if i % 11 == 0 else str(i * 3)}
     body = ",".join(f'"{c}":{{' + ",".join(f'"{i}":{f(i) if c == "name" else f(i)}' for i in range(rows)) + "}" for c, f in cols.items())
     return "{" + body + "}" + trailing
@@ -2316,4 +2363,493 @@ case(
     ],
     min_gain=0.3,
     idempotent=False,
+)
+
+
+# ===============================================================================================================
+# #1249 Group consecutive dotted-key lines by shared prefix. Roundtrip: 'prefix: leaf=v leaf=v' lines for runs of 2+
+# key=value lines whose values are simple; every other line is verbatim; invert the grouping to get the flat keys.
+
+_KV = re.compile(r"([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\.([A-Za-z0-9_-]+)=(\S*)")
+
+
+def _fold_dotted(text):
+    lines = text.split("\n")
+    out, i, grouped = [], 0, False
+    while i < len(lines):
+        m = _KV.fullmatch(lines[i])
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and (m2 := _KV.fullmatch(lines[j])) and m2.group(1) == m.group(1):
+            j += 1
+        if j - i >= 2:
+            members = [_KV.fullmatch(ln) for ln in lines[i:j]]
+            new = f"§{m.group(1)}: " + " ".join(f"{mm.group(2)}={mm.group(3)}" for mm in members)
+            if len(new) < len("\n".join(lines[i:j])):
+                out.append(new)
+                grouped = True
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out) if grouped else None
+
+
+def _unfold_dotted(body):
+    out = []
+    for ln in body.split("\n"):
+        if ln.startswith("§"):
+            prefix, _, rest = ln[1:].partition(": ")
+            out += [f"{prefix}.{kv}" for kv in rest.split(" ")]
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+@_failopen
+def encode_dotted(text):
+    return _esc_encode(text, "§g\n", _fold_dotted, strict_inner=True)
+
+
+def decode_dotted(text):
+    return _esc_decode(text, "§g\n", _unfold_dotted)
+
+
+_GIT_CONFIG = (
+    "core.repositoryformatversion=0\ncore.filemode=true\ncore.bare=false\ncore.logallrefupdates=true\ncore.editor=vim -c 'set paste'\n"
+    "user.name=Ada Lovelace\nuser.email=ada@example.com\nuser.signingkey=ABCD1234\n"
+    "remote.origin.url=git@github.com:acme/widgets.git\nremote.origin.fetch=+refs/heads/*:refs/remotes/origin/*\n"
+    "branch.main.remote=origin\nbranch.main.merge=refs/heads/main\nbranch.dev.remote=origin\nbranch.dev.merge=refs/heads/dev\n"
+    "alias.co=checkout\nalias.st=status -sb\nalias.lg=log --oneline --graph\ncommit.gpgsign=true\npull.rebase=true\n")
+_SPRING = "".join(f"spring.datasource.{k}={v}\n" for k, v in [("url", "jdbc:postgresql://db:5432/app"), ("username", "app"), ("password", ""), ("driver-class-name", "org.postgresql.Driver"),
+                                                              ("hikari.maximum-pool-size", "10"), ("hikari.minimum-idle", "2"), ("hikari.connection-timeout", "30000")]) \
+    + "# comment line\nserver.port=8080\nserver.servlet.context-path=/api\nserver.compression.enabled=true\nlogging.level.root=INFO\nlogging.level.org.hibernate=WARN\n"
+case(
+    1249,
+    claim="Runs of 2+ consecutive 'a.b.c=value' lines with the same prefix and whitespace-free values become one '§a.b: c=value d=value' line; lines with spaces in the value, comments and everything else stay verbatim in place, and decode re-expands to the exact original lines.",
+    encode=encode_dotted,
+    decode=decode_dotted,
+    fixtures=lambda: [
+        Fixture("git config --list", _GIT_CONFIG, True),
+        Fixture("Spring application.properties / env", _SPRING, True),
+        Fixture("every prefix appears once", "a.x=1\nb.y=2\nc.z=3\n", False),
+        Fixture("values with spaces only", "alias.st=status -sb\nalias.lg=log --graph\n", False),
+        Fixture("CRLF properties", _SPRING.replace("\n", "\r\n"), False),
+        Fixture("not key=value", "plain text\n\nkey: value\nx = y\n", False),
+        Fixture("empty values, = inside values, duplicate keys", "a.b=\na.c==x=\na.b=1\na.d=http://x/?q=1&r=2\n", None),
+        Fixture("sigil inside a value", _GIT_CONFIG + "user.note=5§\n", None),
+        Fixture("text that starts like encoder output", "§g\n§user: name=a email=b\nuser.x=1\n", None),
+    ],
+    min_gain=0.06,
+    idempotent=False,
+)
+
+
+# ===============================================================================================================
+# #1250 Canonicalise ISO-8601 timestamps. Equivalent under exact instant arithmetic; the zero fraction and the
+# spelling of UTC are lost; offsets that are not +00:00 / +0000 / +00 are never touched.
+
+_STAMP = re.compile(
+    r"(?<![\w/\\.:-])(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|\+00(?::?00)?|[+-]\d{2}(?::?\d{2})?)?(?![\w/\\:-]|\.\w)")
+
+
+def _valid_stamp(head):
+    try:
+        datetime.datetime.strptime(head.replace(" ", "T"), "%Y-%m-%dT%H:%M:%S")
+        return True
+    except ValueError:
+        return False
+
+
+def _canon_stamp(m):
+    head, frac, zone = m.group(1), m.group(2), m.group(3)
+    if not _valid_stamp(head):
+        return m.group(0)
+    if frac is not None and frac.strip("0") == "":
+        frac = None
+    new = head + (f".{frac}" if frac else "") + ("Z" if zone in ("+00:00", "+0000", "+00") else (zone or ""))
+    return new if len(new) < len(m.group(0)) else m.group(0)
+
+
+@_total
+def encode_stamps(text):
+    return _STAMP.sub(_canon_stamp, text)
+
+
+_ANY_STAMP = re.compile(r"(?<![\w/\\.:-])(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:[.,](\d+))?(Z|[+-]\d{2}(?::?\d{2})?)?(?![\w/\\:-]|\.\w)")
+
+
+def _instant(m):
+    """(exact seconds since the epoch as a Fraction, or the naive wall-clock value; kind) for one stamp match."""
+    y, mo, d, h, mi, s, frac, zone = m.groups()
+    days = datetime.date(int(y), int(mo), int(d)).toordinal()
+    sec = Fraction(days * 86400 + int(h) * 3600 + int(mi) * 60 + int(s)) + (Fraction(int(frac), 10 ** len(frac)) if frac else 0)
+    if zone is None:
+        return ("naive", sec)
+    if zone == "Z":
+        return ("aware", sec)
+    sign = -1 if zone[0] == "-" else 1
+    digits = zone[1:].replace(":", "")
+    offset = sign * (int(digits[:2]) * 3600 + int(digits[2:] or 0) * 60)
+    return ("aware", sec - offset)
+
+
+def _equiv_stamps(a, b):
+    ma, mb = list(_ANY_STAMP.finditer(a)), list(_ANY_STAMP.finditer(b))
+    if _ANY_STAMP.sub("\x00", a) != _ANY_STAMP.sub("\x00", b) or len(ma) != len(mb):
+        return False  # text around the stamps, or the number of stamps, changed
+    for x, y in zip(ma, mb):
+        if x.group(0) == y.group(0):
+            continue
+        try:
+            if _instant(x) != _instant(y):
+                return False
+        except ValueError:
+            return False
+        if (x.group(8) or "").startswith("-") and x.group(8) != y.group(8):
+            return False  # -00:00 means 'offset unknown' and a real offset must not be rewritten at all
+    return True
+
+
+_JIRA = "".join(
+    json.dumps({"id": 10000 + i, "created": f"2024-03-{i % 28 + 1:02d}T09:{i % 60:02d}:17.000+0000", "updated": f"2024-04-{i % 28 + 1:02d}T11:{i % 60:02d}:05.000+0000",
+                "resolved": None if i % 3 else f"2024-04-{i % 28 + 1:02d}T12:00:00.000+0100"}) + "\n" for i in range(8))
+_JS_ISO = "[" + ",".join(f'"2024-05-{i % 28 + 1:02d}T{i % 24:02d}:30:00.000Z"' for i in range(12)) + "]\n"
+_PY_ISO = "".join(f"event {i} at 2024-06-0{i % 9 + 1}T08:15:30.000000+00:00 until 2024-06-0{i % 9 + 1} 09:15:30.500000+00:00\n" for i in range(6))
+_STAMP_KEEP = ("created 2024-03-05T12:34:56.123Z\nlocal 2024-03-05T12:34:56+02:00 and 2024-03-05T12:34:56-08:00 and 2024-03-05T12:34:56+0530\n"
+               "unknown offset 2024-03-05T12:34:56-00:00 and -0000\nfile logs/2024-03-05T12:34:56.000Z/app.log and app-2024-03-05T12:34:56.000Z-1.txt\n"
+               "bad 2024-13-45T25:61:61.000Z and 2024-02-30T10:00:00.000Z\n")
+case(
+    1250,
+    claim="ISO-8601 timestamps with seconds lose an all-zero fraction (.000, .000000) and have +00:00, +0000 or +00 spelled Z; non-zero fractions are kept digit for digit, offsets other than UTC (+02:00, -08:00, +0530, -00:00) are never touched, and the exact instant of every timestamp is unchanged.",
+    loses="the printed fractional-second precision when it is all zeros, and the +00:00 / +0000 spelling of UTC",
+    encode=encode_stamps,
+    equivalent=_equiv_stamps,
+    fixtures=lambda: [
+        Fixture("Jira JSON with +0000 and one +0100 stamp", _JIRA, True),
+        Fixture("JS toISOString list", _JS_ISO, True),
+        Fixture("Python isoformat with +00:00 and a space separator", _PY_ISO, True),
+        Fixture("stamps that must stay", _STAMP_KEEP, False),
+        Fixture("already canonical", "2024-03-05T12:34:56Z and 2024-03-05T12:34:56.5Z and 2024-03-05\n", False),
+        Fixture("non-zero fractions with UTC offsets", "t=2024-03-05T12:34:56.120+00:00 u=2024-03-05T12:34:56.123456789+0000 v=2024-03-05T12:34:56.000+05:30\n", None),
+        Fixture("naive local stamps and leap second", "2024-03-05T12:34:56.000000 2024-06-30T23:59:60.000Z\n", None),
+    ],
+    min_gain=0.1,
+)
+
+
+# ===============================================================================================================
+# #1255 Minify JSON leaves but keep one record per line. Equivalent: the parsed value (types and key order) is the same.
+
+def _lines_json(v):
+    """Depth 1 and 2 containers put each child on its own line; everything below is compact."""
+    if not isinstance(v, (dict, list)) or not v:
+        return _dumps(v)
+    op, cl = ("[", "]") if isinstance(v, list) else ("{", "}")
+    if isinstance(v, list):
+        kids = [_dumps(x) for x in v]
+    else:
+        kids = []
+        for k, x in v.items():
+            if isinstance(x, (dict, list)) and x:
+                a, b = ("[", "]") if isinstance(x, list) else ("{", "}")
+                inner = [_dumps(y) for y in x] if isinstance(x, list) else [f"{_dumps(kk)}:{_dumps(y)}" for kk, y in x.items()]
+                kids.append(f"{_dumps(k)}:{a}\n" + ",\n".join(inner) + f"\n{b}")
+            else:
+                kids.append(f"{_dumps(k)}:{_dumps(x)}")
+    return op + "\n" + ",\n".join(kids) + "\n" + cl
+
+
+@_total
+def encode_fill(text):
+    return _lines_json(_load_strict(text))
+
+
+def _equiv_fill(a, b):
+    if a == b:
+        return True
+    try:
+        before = _canon(_load_strict(a))
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return before == _canon(json.loads(b))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _records(n=15):
+    return [{"id": i, "login": f"user{i}", "profile": {"name": f"User {i}", "tags": ["a", "b"], "score": i * 1.5}, "active": i % 2 == 0, "note": None} for i in range(n)]
+
+
+case(
+    1255,
+    claim="A pretty-printed (or loosely spaced) JSON document is re-emitted with each child of the top-level container, and each child of a container-valued top-level member, on its own line and everything deeper compact; the parsed value, key order and number types are identical, and text that is not JSON, or for which the result would not be shorter (already compact, empty), is returned unchanged.",
+    loses="JSON whitespace, number spelling (1e2 vs 100.0) and string escape form; inputs with duplicate keys or NaN/Infinity are left untouched",
+    encode=encode_fill,
+    equivalent=_equiv_fill,
+    fixtures=lambda: [
+        Fixture("indent=2 array of 15 records", json.dumps(_records(), indent=2), True),
+        Fixture("indent=4 object with items array and meta", json.dumps({"total": 15, "items": _records(8), "meta": {"page": 1, "tags": ["x"]}}, indent=4), True),
+        Fixture("one-line compact JSON", _dumps(_records(4)), False),
+        Fixture("not JSON", "a: 1\nb: [2, 3]\n", False),
+        Fixture("empty container and scalar", "[]", False),
+        Fixture("a string scalar", '"just a string"', False),
+        Fixture("numbers and escapes", '{\n "a": 1e2,\n "b": 1.0,\n "c": "\\u00e9\\/",\n "d": [true, 1, 1.0, -0.0, 10000000000000000000000]\n}', None),
+        Fixture("duplicate keys and NaN", '{"a": 1, "a": 2}\n[NaN, 1]\n', None),
+        Fixture("deeply nested", "[" * 150 + "1" + "]" * 150, None),
+    ],
+    min_gain=0.1,
+)
+
+
+# ===============================================================================================================
+# #1326 Unicode box tables (DuckDB duckbox, polars, Rich/Keras/Lightning) to TSV with dtypes folded into header cells.
+# Equivalent: a regex-based re-parse of the box gives the same grid as the TSV.
+
+_TOPS, _BOTS, _VERTS, _SEPS = set("┌┏╭╔"), set("└┗╰╚"), set("│┃┆║"), set("├╞┡╠╟")
+_VERT_SPLIT = re.compile("[│┃┆║]")
+
+
+def _parse_box(block):
+    """Block lines (top border .. bottom border) -> (header cells, body rows) or None."""
+    ncols, header, body, seen_sep = None, [], [], False
+    for ln in block[1:-1]:
+        if ln[:1] in _SEPS:
+            seen_sep = True
+            continue
+        if len(ln) < 2 or ln[0] not in _VERTS or ln[-1] not in _VERTS:
+            return None
+        cells = [c.strip() for c in _VERT_SPLIT.split(ln[1:-1])]
+        if "\t" in ln or (ncols is not None and len(cells) != ncols):
+            return None
+        ncols = len(cells)
+        (body if seen_sep else header).append(cells)
+    if not seen_sep or not header or ncols is None:
+        return None
+    if len(header) == 1:
+        names = header[0]
+    elif len(header) == 2:
+        names = [f"{n}:{t}" for n, t in zip(*header)]
+    elif len(header) == 3 and all(c == "---" for c in header[1]):
+        names = [f"{n}:{t}" for n, t in zip(header[0], header[2])]
+    else:
+        return None
+    return names, body
+
+
+@_total
+def encode_boxes(text):
+    lines = text.split("\n")
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        if lines[i][:1] in _TOPS:
+            j = i + 1
+            while j < n and lines[j][:1] and lines[j][:1] not in _BOTS and (lines[j][:1] in _VERTS or lines[j][:1] in _SEPS):
+                j += 1
+            if j < n and lines[j][:1] in _BOTS:
+                parsed = _parse_box(lines[i:j + 1])
+                if parsed:
+                    names, body = parsed
+                    out += ["\t".join(names)] + ["\t".join(r) for r in body]
+                    i = j + 1
+                    continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+_BOX_RE = re.compile(r"^[┌┏╭╔][^\n]*(?:\n[│┃┆║├╞┡╠╟][^\n]*)*\n[└┗╰╚][^\n]*$", re.M)
+
+
+def _equiv_boxes(a, b):
+    if a == b:
+        return True
+    pos, bpos = 0, 0
+    for m in _BOX_RE.finditer(a):
+        between = a[pos:m.start()]
+        if b[bpos:bpos + len(between)] != between:
+            return False
+        bpos += len(between)
+        pos = m.end()
+        rows = [ln for ln in m.group(0).split("\n")[1:-1] if ln[0] not in "├╞┡╠╟"]
+        seps = [k for k, ln in enumerate(m.group(0).split("\n")[1:-1]) if ln[0] in "├╞┡╠╟"]
+        grid = None
+        if seps and all(len(r) >= 2 and r[0] in "│┃┆║" and r[-1] in "│┃┆║" and "\t" not in r for r in rows):
+            cells = [[c.strip() for c in re.split("[│┃┆║]", r[1:-1])] for r in rows]
+            nh = len([k for k in range(len(m.group(0).split("\n")[1:-1])) if k < seps[0]])
+            if len({len(c) for c in cells}) == 1 and 1 <= nh <= 3 and nh <= len(cells):
+                head, body = cells[:nh], cells[nh:]
+                if nh == 1:
+                    names = head[0]
+                elif nh == 2:
+                    names = [f"{x}:{y}" for x, y in zip(*head)]
+                else:
+                    names = [f"{x}:{y}" for x, y in zip(head[0], head[2])] if set(head[1]) == {"---"} else None
+                if names is not None:
+                    grid = "\n".join("\t".join(r) for r in [names] + body)
+        for candidate in ([grid] if grid is not None else []) + [m.group(0)]:
+            if b.startswith(candidate, bpos):
+                bpos += len(candidate)
+                break
+        else:
+            return False
+    return b[bpos:] == a[pos:]
+
+
+_DUCKDB = (
+    "┌───────┬─────────┬──────────┬────────────┐\n│  id   │  name   │  amount  │    day     │\n│ int32 │ varchar │  double  │    date    │\n"
+    "├───────┼─────────┼──────────┼────────────┤\n" + "".join(
+        f"│ {i:5d} │ {('user_' + str(i)):<7} │ {(i * 12.5):8.1f} │ 2024-05-{i % 28 + 1:02d} │\n" if i % 4 else f"│ {i:5d} │ {'NULL':<7} │ {'NULL':>8} │ 2024-05-{i % 28 + 1:02d} │\n"
+        for i in range(1, 21)).replace("user_", "user_").rstrip("\n") + "\n└───────┴─────────┴──────────┴────────────┘\n20 rows    4 columns\n")
+_POLARS = ("shape: (4, 3)\n┌─────┬───────┬───────┐\n│ id  ┆ name  ┆ score │\n│ --- ┆ ---   ┆ ---   │\n│ i64 ┆ str   ┆ f64   │\n"
+           "╞═════╪═══════╪═══════╡\n│ 1   ┆ alice ┆ 9.5   │\n│ 2   ┆ bob   ┆ null  │\n│ 3   ┆ carol ┆ 7.25  │\n│ 4   ┆ dave  ┆ 8.0   │\n└─────┴───────┴───────┘\n")
+_KERAS = ("Model: \"sequential\"\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓\n┃ Layer (type)                    ┃ Output Shape           ┃       Param # ┃\n"
+          "┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩\n│ dense (Dense)                   │ (None, 64)             │         1,088 │\n"
+          "├─────────────────────────────────┼────────────────────────┼───────────────┤\n│ dense_1 (Dense)                 │ (None, 10)             │           650 │\n"
+          "└─────────────────────────────────┴────────────────────────┴───────────────┘\n Total params: 1,738 (6.79 KB)\n")
+_ASCII_GRID = "+----+-------+\n| id | name  |\n+----+-------+\n| 1  | alice |\n+----+-------+\n"
+case(
+    1326,
+    claim="A Unicode box table (top border, header rows, a header separator, body rows, bottom border) becomes TSV with one header line (name, or name:dtype when a dtype row follows; polars' --- row dropped) and one line per body row, cells trimmed; ragged, separator-less or tab-containing tables and text around the table are left verbatim.",
+    loses="cell padding and alignment (cells are trimmed, so a cell with intentional leading/trailing spaces changes), border characters, extra row separators, and column width",
+    encode=encode_boxes,
+    equivalent=_equiv_boxes,
+    fixtures=lambda: [
+        Fixture("DuckDB duckbox, 20 rows with NULLs", _DUCKDB, True),
+        Fixture("polars frame with shape line", _POLARS, True),
+        Fixture("Keras model summary (heavy header, row separator)", _KERAS, True),
+        Fixture("ASCII grid is a different idea (#412)", _ASCII_GRID, False),
+        Fixture("box without a header separator", "┌──┬──┐\n│ a│ b│\n└──┴──┘\n", False),
+        Fixture("ragged box and CRLF box", "┌──┬──┐\n│ a│ b│\n├──┼──┤\n│ 1│\n└──┴──┘\n" + _POLARS.replace("\n", "\r\n"), False),
+        Fixture("box characters used as decoration", "┌ note ┐\nthis is prose\n└ end ┘\n│ not a table │\n", False),
+        Fixture("two tables and prose between", _POLARS + "between\n" + _DUCKDB, None),
+        Fixture("table with a tab in a cell and an empty row", "┌──┬──┐\n│ a│ b│\n├──┼──┤\n│ x\ty│ 1│\n└──┴──┘\n┌──┬──┐\n│ a│ b│\n├──┼──┤\n│  │  │\n└──┴──┘\n", None),
+    ],
+    min_gain=0.3,
+)
+
+
+# ===============================================================================================================
+# #1365 Round-trip-verified synthesised encoders: the acceptance gate, as a sim.
+#
+# A coding model writes encode/decode for one tool from ~10 captures. The gate accepts the pair only if on every
+# held-out capture decode(encode(x)) == x byte for byte, nothing raises, the output is deterministic and the tokens
+# drop. The decoder is only a proof: at read time the model sees encode(x). A deployed encoder also re-verifies each
+# live output (fail open), because the held-out set can miss a rare input.
+
+def accept_pair(encode, decode, heldout, min_captures=5, min_token_drop=0.10):
+    """Return (accepted, reason, stats). Fails closed: any exception or doubt rejects the pair."""
+    if len(heldout) < min_captures:
+        return False, f"only {len(heldout)} held-out captures (< {min_captures})", {}
+    tok_before = tok_after = 0
+    for k, x in enumerate(heldout):
+        try:
+            e = encode(x)
+            if not isinstance(e, str) or e != encode(x):
+                return False, f"capture {k}: encode is not a deterministic str", {}
+            d = decode(e)
+        except Exception as ex:  # noqa: BLE001
+            return False, f"capture {k}: {type(ex).__name__}", {}
+        if d != x:
+            return False, f"capture {k}: round trip differs", {}
+        tok_before += tokens(x)
+        tok_after += tokens(e)
+    drop = 1 - tok_after / tok_before
+    if drop < min_token_drop:
+        return False, f"tokens drop only {drop:.1%}", {"token_drop": drop}
+    return True, "ok", {"token_drop": drop, "tokens_before": tok_before, "tokens_after": tok_after}
+
+
+def deployed(encode, decode):
+    """What runs per live tool call once a pair is accepted: use the encoding only if it verifies on this very input."""
+
+    def run(x):
+        try:
+            e = encode(x)
+            return e if len(e) < len(x) and decode(e) == x else x
+        except Exception:  # noqa: BLE001
+            return x
+
+    return run
+
+
+# a 'synthesised' pair for a hypothetical tool that returns compact JSON rows with a fixed key order
+def _rows_encode(text):
+    m = re.fullmatch(r'\[(\{.*\})\]\n?', text)
+    if not m or not text.endswith("\n"):
+        return text
+    rows = m.group(1).split("},{")
+    keys = re.findall(r'"([a-z_]+)":', rows[0].lstrip("{"))
+    cells = []
+    for r in rows:
+        r = r.strip("{}")
+        parts = re.split(r',"[a-z_]+":', "," + r)[1:]
+        if len(parts) != len(keys):
+            return text
+        cells.append("\t".join(parts))
+    out = "§rows " + ",".join(keys) + "\n" + "\n".join(cells) + "\n"
+    return out if len(out) < len(text) else text
+
+
+def _rows_decode(text):
+    if not text.startswith("§rows "):
+        return text
+    head, _, body = text.partition("\n")
+    keys = head[6:].split(",")
+    rows = ["{" + ",".join(f'"{k}":{v}' for k, v in zip(keys, ln.split("\t"))) + "}" for ln in body.rstrip("\n").split("\n")]
+    return "[" + ",".join(rows) + "]\n"
+
+
+def _rows_encode_buggy(text):
+    # looks right on typical captures but 'normalises' floats like 2.0 to 2, which mangles a rare value
+    return _rows_encode(re.sub(r'(\d)\.0(?=[,}])', r"\1", text))
+
+
+def _capture(seed, extra=None):
+    rows = [{"id": 100 + seed * 10 + i, "name": f"svc-{seed}-{i}", "state": ["up", "down", "warn"][(seed + i) % 3], "load": round(0.05 + 0.1 * (i + seed), 2)}
+            for i in range(16)]
+    if extra:
+        rows[3]["load"] = extra
+    return json.dumps(rows, separators=(",", ":")) + "\n"
+
+
+def sim_synthesised_gate():
+    held = [_capture(s) for s in range(6)]
+    ok, why, stats = accept_pair(_rows_encode, _rows_decode, held)
+    assert ok, f"a correct pair must be accepted: {why}"
+    assert stats["token_drop"] > 0.12, "accepted pair must really save tokens"
+    saved = stats["tokens_before"] - stats["tokens_after"]
+
+    # (c) subtly wrong pair: identical on every capture except one that contains a float spelled 2.0
+    rare = held[:5] + [_capture(7, extra=2.0)]
+    assert '"load":2.0' in rare[-1]
+    ok_bad, why_bad, _ = accept_pair(_rows_encode_buggy, _rows_decode, rare)
+    assert not ok_bad and "round trip" in why_bad, "the wrong pair must be rejected when held-out data contains the rare input"
+    ok_plain, _, _ = accept_pair(_rows_encode_buggy, _rows_decode, held)
+    assert ok_plain, "(documented limit) a held-out set without the rare input cannot tell the pairs apart"
+
+    # (d) the per-call guard still protects live traffic when the gate was fooled
+    live = deployed(_rows_encode_buggy, _rows_decode)
+    x = _capture(9, extra=2.0)
+    assert live(x) == x, "a mangled live output must fall back to the raw capture"
+    assert live(held[0]) != held[0] and _rows_decode(live(held[0])) == held[0], "normal captures are still compressed"
+
+    # other rejections: identity (no savings), raising decoder, nondeterminism, too few captures, non-str
+    assert not accept_pair(lambda t: t, lambda t: t, held)[0]
+    assert not accept_pair(_rows_encode, lambda t: 1 / 0, held)[0]
+    flip = iter(range(10 ** 6))
+    assert not accept_pair(lambda t: _rows_encode(t) + " " * (next(flip) % 2), lambda t: _rows_decode(t).rstrip(" "), held)[0]
+    assert not accept_pair(_rows_encode, _rows_decode, held[:3])[0]
+    assert not accept_pair(lambda t: None, _rows_decode, held)[0]
+    return {"tokens_saved_on_heldout": saved, "token_drop": round(stats["token_drop"], 3), "wrong_pair_rejected_with_rare_input": True}
+
+
+case(
+    1365,
+    claim="The acceptance gate takes an encode/decode pair and held-out captures and accepts it only if decode(encode(x)) equals x byte for byte on every capture (deterministic, no exceptions, enough captures) and tokens drop by at least 10%: it accepts a correct pair and rejects one that mangles a rare input (a float spelled 2.0) when that input is in the held-out set; a per-call round-trip check protects live traffic when the held-out set missed it.",
+    sim=sim_synthesised_gate,
 )

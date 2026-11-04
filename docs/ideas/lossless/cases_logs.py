@@ -129,7 +129,7 @@ case(
         Fixture("blank-line run and no trailing newline", _BLANKS + "tail", None),
         Fixture("huge count lookalike", "a [x99999999999999999999]\n" + "b\n" * 30, None),
     ],
-    min_gain=0.3,
+    min_gain=0.5,
     idempotent=False,  # re-encoding encoded text must escape its own ' [xN]' lines, so it grows by design
 )
 
@@ -220,7 +220,7 @@ case(
         Fixture("CRLF is part of the line", "same long line\r\nsame long line\r\nsame long line\n", None),
         Fixture("no trailing newline", "repeated warning text\nx\nrepeated warning text", None),
     ],
-    min_gain=0.25,
+    min_gain=0.35,
     idempotent=False,  # the annotated lines look like marker lines, so a second pass escapes them with ' [x1 total]'
 )
 
@@ -301,7 +301,7 @@ case(
         Fixture("marker lookalikes", "[the 2 lines above: x3 total]\n\\[the 2 lines above: x3 total]\nk\nk2\nk\nk2\n[the 4 lines above: x2 total]\n", None),
         Fixture("stanza containing blank lines", ("first line of stanza\n\nthird line of stanza\n" * 4), True),
     ],
-    min_gain=0.3,
+    min_gain=0.4,
     idempotent=False,  # the marker lines themselves look like markers, so a second pass escapes them
 )
 
@@ -387,8 +387,8 @@ case(
         Fixture("input that looks like the header", "§ts date=2026-11-04 sep=T (x)\n" + _app_log(3, 10), None),
     ]
     + sigil_fixtures(TS_MAGIC, _app_log(11, 8)),
-    min_gain=0.08,
-    idempotent=False,
+    min_gain=0.09,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -467,8 +467,8 @@ case(
         Fixture("brackets without the space are not a column", _prefixed_log() + "[INFO]one\n[INFO]two\n[INFO]three\n[INFO]four\n", None),
     ]
     + sigil_fixtures(COLS_MAGIC, _prefixed_log()),
-    min_gain=0.12,
-    idempotent=False,
+    min_gain=0.25,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -557,8 +557,8 @@ case(
         Fixture("no trailing newline", _find_listing().rstrip("\n"), None),
     ]
     + sigil_fixtures(TREE_MAGIC, _find_listing(3)),
-    min_gain=0.25,
-    idempotent=False,
+    min_gain=0.28,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -644,7 +644,7 @@ case(
     ]
     + sigil_fixtures(GREP_MAGIC, _rg_hits()),
     min_gain=0.2,
-    idempotent=False,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -694,9 +694,10 @@ def git_strip(text: str) -> str:
 _DIRS = {"LF will be replaced by CRLF the next time Git touches it": "LF>CRLF", "CRLF will be replaced by LF the next time Git touches it": "CRLF>LF"}
 
 
-def _git_events(text: str) -> list[tuple]:
+def _git_events(text: str) -> tuple[list[tuple], bool | None]:
     """Oracle view, written with string methods instead of the encoder's regexes: the lines that matter, in order, with each
-    CRLF warning (alone or inside a fold line) turned into a ('W', direction, file) event."""
+    CRLF warning (alone or inside a fold line) turned into a ('W', direction, file) event; plus whether the text ends in a
+    newline (only meaningful while some line is left: a dropped last line takes its newline with it)."""
     lines = text.split("\n")
     failing = any(l.startswith(("error:", "fatal:", "CONFLICT")) or "[rejected]" in l or "[remote rejected]" in l for l in lines)
     ev: list[tuple] = []
@@ -721,7 +722,10 @@ def _git_events(text: str) -> list[tuple]:
                 ev += [("W", _DIRS[d], n) for n in names[1:-2].split("' '")]
                 continue
         ev.append(("L", l))
-    return ev
+    nl = bool(ev) and ev[-1] == ("L", "")  # a final empty line is just the trailing newline
+    if nl:
+        ev.pop()
+    return ev, (nl if ev else None)  # nothing left: no newline question
 
 
 def git_equivalent(x: str, e: str) -> bool:
@@ -796,7 +800,7 @@ case(
         Fixture("fold line already present", "warning: LF will be replaced by CRLF the next time Git touches it (working copy of: 'a' 'b')\nx\n", None),
         Fixture("CRLF line endings", _STATUS.replace("\n", "\r\n"), None),
     ],
-    min_gain=0.1,
+    min_gain=0.3,
 )
 
 # ===============================================================================================================
@@ -884,8 +888,8 @@ case(
         Fixture("padding that git would not print (all lines)", "abcd1234 (Jane Doe 2025-01-02 03:04:05 +0000 1) a\nabcd1234 (Jane Doe 2025-01-02 03:04:05 +0000   2) b\nabcd1234 (Jane Doe 2025-01-02 03:04:05 +0000 3) c\n", None),
     ]
     + sigil_fixtures(BLAME_MAGIC, _blame(6, 40)),
-    min_gain=0.3,
-    idempotent=False,
+    min_gain=0.35,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -1014,8 +1018,8 @@ case(
         Fixture("no trailing newline", _logfmt().rstrip("\n"), None),
     ]
     + sigil_fixtures(KV_MAGIC, _hf_trainer(3, 12)),
-    min_gain=0.25,
-    idempotent=False,
+    min_gain=0.28,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -1097,8 +1101,8 @@ case(
         Fixture("no trailing newline", _folded().rstrip("\n"), None),
     ]
     + sigil_fixtures(FOLD_MAGIC, _folded(7, 20)),
-    min_gain=0.35,
-    idempotent=False,
+    min_gain=0.5,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -1126,7 +1130,8 @@ def sysctl_fold(text: str) -> str:
         parts = kv[0].split(".")
         cands[idx] = []
         for j in range(1, len(parts) - 1):
-            if parts[j] and "," not in parts[j]:
+            # prefix and suffix must be non-empty text, or '.{..}.' could not be read back
+            if parts[j] and "," not in parts[j] and ".".join(parts[:j]) and ".".join(parts[j + 1 :]):
                 sig = (tuple(parts[:j]), tuple(parts[j + 1 :]), kv[1])
                 cands[idx].append(sig)
                 groups[sig].append(idx)
@@ -1209,9 +1214,10 @@ case(
         Fixture("braces already in a key (refused)", _sysctl() + "net.{a,b}.x = 1\n", None),
         Fixture("comma in an instance name, ' = ' inside a value", _sysctl() + "net.x.a,b.k = 1\nnet.x.c.k = 1\nnet.x.d.k = 1\nnet.x.e.k = 1\nnet.z.m.n = a = b\nnet.z.o.n = a = b\nnet.z.p.n = a = b\n", None),
         Fixture("duplicate lines and diagnostics", _sysctl() + "sysctl: permission denied on key 'fs.protected_hardlinks'\n" + "net.ipv4.conf.eth0.tag = 0\n" * 2, None),
+        Fixture("leading, doubled and trailing dots in keys", _sysctl() + "".join(f"{k}.{i}.y = 1\n" for k in ["", "a.", ".b"] for i in "pqr") + "x.p. = 2\nx.q. = 2\nx.r. = 2\n.p.z = 3\n.q.z = 3\n.r.z = 3\n", None),
         Fixture("no trailing newline", _sysctl().rstrip("\n"), None),
     ],
-    min_gain=0.3,
+    min_gain=0.45,
 )
 
 # ===============================================================================================================
@@ -1320,8 +1326,8 @@ case(
         Fixture("no trailing newline", _state_dict().rstrip("\n"), None),
     ]
     + sigil_fixtures(LAYERS_MAGIC, _state_dict(6)),
-    min_gain=0.4,
-    idempotent=False,
+    min_gain=0.5,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -1411,8 +1417,8 @@ case(
         Fixture("one varying key, empty value in one stanza", _one_vary(), None),
     ]
     + sigil_fixtures(CPU_MAGIC, _cpuinfo(3)),
-    min_gain=0.3,
-    idempotent=False,
+    min_gain=0.25,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
 )
 
 # ===============================================================================================================
@@ -1613,4 +1619,518 @@ case(
         Fixture("no trailing newline", _cri_log().rstrip("\n"), None),
     ],
     min_gain=0.15,
+)
+
+# ===============================================================================================================
+# The diff family (#30 #782 #1078 #1079). Shared oracle: parse_diff reads git diff text (plain, or one of the four compact
+# forms named by `mode`) into events, so two texts agree iff a reader sees the same files, hunks and added/removed/context
+# lines. It is a line state machine keyed on diff/hunk state, not on the encoders' regexes, and is total on any text.
+
+DITTO = '"'
+NF_MARK = "[all lines added]"
+_HUNK_RE = re.compile(r"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@(?: (.*))?")
+
+
+def _simple_header(h: list[str]):
+    """Path of a plain modification header block (diff --git / index / --- / +++, mode 100644, a/ b/ same path), else None."""
+    if len(h) != 4 or not h[2].startswith("--- a/"):
+        return None
+    p = h[2][6:]
+    if not p or any(c.isspace() or c in '"\\' for c in p):
+        return None
+    if h[0] != f"diff --git a/{p} b/{p}" or h[3] != f"+++ b/{p}":
+        return None
+    parts = h[1].split(" ")
+    if len(parts) != 3 or parts[0] != "index" or parts[2] != "100644":
+        return None
+    ids = parts[1].split("..")
+    if len(ids) != 2 or not all(4 <= len(i) <= 40 and all(c in "0123456789abcdef" for c in i) for i in ids):
+        return None
+    return p
+
+
+def _wd_split(s: str) -> tuple[str, str]:
+    """(old, new) of a word-diff string by scanning for [-..-] and {+..+}; markers never nest."""
+    old, new, i, n = [], [], 0, len(s)
+    while i < n:
+        if s.startswith("[-", i):
+            j = s.find("-]", i + 2)
+            if j >= 0:
+                old.append(s[i + 2 : j])
+                i = j + 2
+                continue
+        if s.startswith("{+", i):
+            j = s.find("+}", i + 2)
+            if j >= 0:
+                new.append(s[i + 2 : j])
+                i = j + 2
+                continue
+        old.append(s[i])
+        new.append(s[i])
+        i += 1
+    return "".join(old), "".join(new)
+
+
+def parse_diff(text: str, mode: str = "") -> list[tuple]:
+    """Events: ('pre', line) text outside hunks | ('file', path) plain-modification header | ('hdr', line) any other header line |
+    ('hunk', old_start, old_len, new_start, new_len, ctx) | (' '|'+'|'-'|'\\\\', text) body lines | ('end', ends_with_newline).
+    mode: '' plain git | 'compact' '== path' headers | 'word' '~' pair lines | 'ditto' '\"' function context | 'newfile' marker."""
+    lines = text.split("\n")
+    nl = text.endswith("\n")
+    if nl:
+        lines.pop()
+    ev: list[tuple] = []
+    i, n, in_hunk, prev = 0, len(lines), False, None
+    while i < n:
+        l = lines[i]
+        if mode == "compact" and l.startswith("== "):
+            ev.append(("file", l[3:]))
+            in_hunk, prev, i = False, None, i + 1
+        elif l.startswith("diff --git "):
+            j, stops = i + 1, ("@@", "diff --git ", "== ") if mode == "compact" else ("@@", "diff --git ")
+            while j < n and not lines[j].startswith(stops):
+                j += 1
+            p = _simple_header(lines[i:j])
+            ev += [("file", p)] if p is not None else [("hdr", h) for h in lines[i:j]]
+            in_hunk, prev, i = False, None, j
+        elif l.startswith("@@"):
+            m = _HUNK_RE.fullmatch(l)
+            in_hunk, i = True, i + 1
+            if not m:
+                ev.append(("badhunk", l))
+                continue
+            ctx = m.group(5)
+            if mode == "ditto" and ctx == DITTO:
+                ctx = prev
+            ev.append(("hunk", m.group(1), m.group(2), m.group(3), m.group(4), ctx))
+            prev = ctx
+            if mode == "newfile" and i < n and lines[i] == NF_MARK and (m.group(1), m.group(2), m.group(3), m.group(5)) == ("0", "0", "1", None):
+                cnt = int(m.group(4) or 1)
+                ev += [("+", b) for b in lines[i + 1 : i + 1 + cnt]]
+                i += 1 + cnt
+        elif mode == "word" and l.startswith("~"):
+            o, nw = _wd_split(l[1:])
+            ev += [("-", o), ("+", nw)]
+            i += 1
+        else:
+            if in_hunk and l[:1] in (" ", "+", "-", "\\"):
+                ev.append((l[0], l[1:]))
+            else:
+                in_hunk = False
+                ev.append(("pre", l))
+            i += 1
+    ev.append(("end", nl))
+    return ev
+
+
+def diff_oracle(mode: str, magic: str = ""):
+    """equivalent= for a diff encoder: the reader's view of the original equals the reader's view of the encoding."""
+
+    def ok(x: str, e: str) -> bool:
+        if e.startswith(RAW):
+            return parse_diff(x) == parse_diff(e[len(RAW):])
+        if magic:
+            return parse_diff(x) == (parse_diff(e[len(magic):], mode) if e.startswith(magic) else parse_diff(e))
+        return parse_diff(x) == parse_diff(e, mode)
+
+    return ok
+
+
+# --- builders for realistic diffs -----------------------------------------------------------------------------------
+
+def _bid(s: str) -> str:
+    return hashlib.sha1(s.encode()).hexdigest()[:7]
+
+
+def _hunk(old_start: int, new_start: int, body: list[str], ctx: str | None = None) -> list[str]:
+    ol = sum(1 for l in body if l[:1] in (" ", "-"))
+    nl_ = sum(1 for l in body if l[:1] in (" ", "+"))
+    r = lambda s, k: f"{s},{k}" if k != 1 else f"{s}"  # noqa: E731
+    return [f"@@ -{r(old_start, ol)} +{r(new_start, nl_)} @@" + (f" {ctx}" if ctx else "")] + body
+
+
+def _modfile(path: str, hunks: list[list[str]]) -> list[str]:
+    return [f"diff --git a/{path} b/{path}", f"index {_bid(path)}..{_bid(path + '~')} 100644", f"--- a/{path}", f"+++ b/{path}"] + [l for h in hunks for l in h]
+
+
+_CTXL = ["    rows = self._load(batch)", "    if not rows:", "        return []", "    self._flush(out)", "    return out", "", "    try:", "        conn = self._connect(dsn)", "    finally:", "        conn.close()"]
+
+
+def _py_hunks(path: str, ctxs: list[str | None], seed: int, rows: int = 1) -> list[list[str]]:
+    """One hunk per entry of ctxs: 3 context lines, `rows` replaced lines (+1 added), 3 context lines."""
+    rng = random.Random(seed)
+    out, old, new = [], 10, 10
+    for i, ctx in enumerate(ctxs):
+        body = [" " + rng.choice(_CTXL) for _ in range(3)]
+        body += [f"-    out = self._transform(rows, strict, {i + j})" for j in range(rows)]
+        body += [f"+    out = self._transform(rows, strict=strict, retries={i + j})" for j in range(rows)]
+        body += [f"+    self.metrics.observe('{path.rsplit('/', 1)[-1]}', len(out))"]
+        body += [" " + rng.choice(_CTXL) for _ in range(3)]
+        out.append(_hunk(old, new, body, ctx))
+        old += 30 + 3 * i
+        new += 31 + 3 * i
+    return out
+
+
+_RENAME = ["diff --git a/old/name.py b/new/name.py", "similarity index 91%", "rename from old/name.py", "rename to new/name.py", "index 3f2a1b4..9c0d7e2 100644", "--- a/old/name.py", "+++ b/new/name.py"] + _hunk(1, 1, [" import os", "-import sys", "+import sys, re", " "])
+_MODE = ["diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755"]
+_BINARY = ["diff --git a/logo.png b/logo.png", "index 1234567..89abcde 100644", "Binary files a/logo.png and b/logo.png differ"]
+_NEWFILE2 = ["diff --git a/new.txt b/new.txt", "new file mode 100644", "index 0000000..b77b4eb", "--- /dev/null", "+++ b/new.txt"] + _hunk(0, 1, ["+x", "+y"])
+_DELFILE = ["diff --git a/old.txt b/old.txt", "deleted file mode 100644", "index b77b4eb..0000000", "--- a/old.txt", "+++ /dev/null"] + _hunk(1, 0, ["-x", "-y"])
+_EXEC = ["diff --git a/bin/tool b/bin/tool", "index 3f2a1b4..9c0d7e2 100755", "--- a/bin/tool", "+++ b/bin/tool"] + _hunk(1, 1, ["-old", "+new"])
+
+
+def _join(*blocks: list[str]) -> str:
+    return "\n".join(l for b in blocks for l in b) + "\n"
+
+
+# ===============================================================================================================
+# #30 Collapse redundant diff headers on display-only diffs. Equivalent: 'diff --git a/P b/P / index X..Y 100644 / --- a/P /
+# +++ b/P' (a plain modification) becomes '== P'; blob ids, the constant mode and the a/ b/ prefixes go. Renames, mode changes,
+# binary, new/deleted files and paths with spaces keep their full headers. Do not use on a diff that will be applied.
+
+DIFFC_MAGIC = "§diff (== path replaces a plain-modification header block; blob ids dropped)\n"
+_GH = re.compile(r'diff --git a/([^\s"\\]+) b/([^\s"\\]+)')
+_IDX = re.compile(r"index [0-9a-f]{4,40}\.\.[0-9a-f]{4,40} 100644")
+
+
+def compact_core(text: str):
+    lines = text.split("\n")
+    if any(l.startswith("== ") for l in lines):
+        return None
+    out, i = [], 0
+    while i < len(lines):
+        m = _GH.fullmatch(lines[i])
+        if m and m.group(1) == m.group(2) and i + 4 < len(lines) and lines[i + 4].startswith("@@") and _IDX.fullmatch(lines[i + 1]) and lines[i + 2] == "--- a/" + m.group(1) and lines[i + 3] == "+++ b/" + m.group(1):
+            out.append("== " + m.group(1))
+            i += 4
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+compact_encode, _ = framed(DIFFC_MAGIC, compact_core)
+
+
+def _six_files(seed: int = 30) -> str:
+    paths = ["src/ctxprune/hook.py", "src/ctxprune/cli.py", "src/ctxprune/server.py", "tests/unit/test_hook.py", "docs/usage/hooks.md", "pyproject.toml"]
+    blocks = [_modfile(p, _py_hunks(p, [None, "def run(self):"], seed + i)) for i, p in enumerate(paths)]
+    return _join(*blocks[:3], _RENAME, _MODE, *blocks[3:], _BINARY)
+
+
+_TRICKY_BODY = _hunk(1, 1, [" select 1;", "--- a/x.py", "+++ b/x.py", "-index abc1234..def5678 100644", " diff --git a/x.py b/x.py", "-== not a header", "\\ No newline at end of file"])
+_DIFF_U = "--- a/x.py\t2025-01-01 10:00:00\n+++ b/x.py\t2025-01-02 10:00:00\n@@ -1,2 +1,2 @@\n-a\n+b\n c\n" * 3
+
+case(
+    30,
+    claim="Each plain-modification header block (diff --git / index / --- / +++ for an unchanged 100644 file) becomes '== path'; every hunk, every body line and every other kind of header block is unchanged, as an independent diff parser confirms.",
+    loses="the abbreviated blob ids on the index line, the constant mode 100644 and the a/ b/ prefixes of plain-modification headers: the result cannot be used with git apply or git am",
+    encode=compact_encode,
+    equivalent=diff_oracle("compact", DIFFC_MAGIC),
+    fixtures=[
+        Fixture("six modified files plus rename, mode change and binary", _six_files(), True),
+        Fixture("two-file diff", _join(_modfile("a/b.py", _py_hunks("a/b.py", [None], 1)), _modfile("c.py", _py_hunks("c.py", [None], 2))) * 4, True),
+        Fixture("only rename, mode, binary, new and deleted files", _join(_RENAME, _MODE, _BINARY, _NEWFILE2, _DELFILE, _EXEC), False),
+        Fixture("plain diff -u without git headers", _DIFF_U, False),
+        Fixture("not a diff", "== Heading ==\nSome prose about a diff.\n", False),
+        Fixture("header-like lines inside hunk bodies", _six_files() + _join(_modfile("t.sql", [_TRICKY_BODY])), None),
+        Fixture("git log -p with commit headers and a path with a space", "commit 3f2a1b4c\nAuthor: Jane <j@x.y>\n\n    msg\n\n" + _join(_modfile("src/a.py", _py_hunks("src/a.py", [None], 3)), _modfile("my file.py", _py_hunks("my file.py", [None], 4))) * 3, None),
+        Fixture("line starting with '== ' (refused)", _six_files() + "== not ours\n", None),
+        Fixture("CRLF diff", _six_files().replace("\n", "\r\n"), None),
+        Fixture("truncated mid-header", _six_files()[:700], None),
+    ]
+    + sigil_fixtures(DIFFC_MAGIC, _six_files(31)),
+    min_gain=0.1,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
+)
+
+# ===============================================================================================================
+# #782 Word-diff form for long-line -/+ pairs. Roundtrip. Inside a hunk, exactly one '-' line directly followed by exactly one
+# '+' line, sharing most words (tokens: words, space runs, single punctuation), becomes '~' + git --word-diff=plain notation
+# [-old-]{+new+}. Pairs whose text already contains a marker, and inputs with any line starting '~', are left alone. Blocks of
+# several -/+ lines are not paired (decode would not know where one pair ends).
+
+WD_MAGIC = "§wdiff (a ~ line is a -/+ pair: [-old-]{+new+})\n"
+_TOK = re.compile(r"\w+|\s+|[^\w\s]")
+_WD = re.compile(r"\[-(.*?)-\]|\{\+(.*?)\+\}", re.S)
+_WD_MARKERS = ("[-", "-]", "{+", "+}")
+
+
+def word_diff(old: str, new: str) -> str:
+    a, b = _TOK.findall(old), _TOK.findall(new)
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            out.append("".join(a[i1:i2]))
+        else:
+            if i2 > i1:
+                out.append("[-" + "".join(a[i1:i2]) + "-]")
+            if j2 > j1:
+                out.append("{+" + "".join(b[j1:j2]) + "+}")
+    return "".join(out)
+
+
+def unword(s: str) -> tuple[str, str]:
+    old, new, pos = [], [], 0
+    for m in _WD.finditer(s):
+        common = s[pos : m.start()]
+        old.append(common)
+        new.append(common)
+        (old if m.group(1) is not None else new).append(m.group(1) if m.group(1) is not None else m.group(2))
+        pos = m.end()
+    old.append(s[pos:])
+    new.append(s[pos:])
+    return "".join(old), "".join(new)
+
+
+def wdiff_core(text: str):
+    lines = text.split("\n")
+    if any(l.startswith("~") for l in lines):
+        return None
+    out, i, n, in_hunk = [], 0, len(lines), False
+    while i < n:
+        l = lines[i]
+        if l.startswith("diff --git "):
+            in_hunk = False
+        elif l.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and l[:1] not in (" ", "+", "-", "\\"):
+            in_hunk = False
+        if in_hunk and l.startswith("-") and i + 1 < n and lines[i + 1].startswith("+") and not (i + 2 < n and lines[i + 2].startswith("+")) and not (i > 0 and lines[i - 1].startswith("-")):
+            old, new = l[1:], lines[i + 1][1:]
+            if len(old) + len(new) <= 4000 and not any(mk in old or mk in new for mk in _WD_MARKERS):
+                merged = word_diff(old, new)
+                if unword(merged) == (old, new) and len(old) + len(new) + 4 - (len(merged) + 2) >= 24:
+                    out.append("~" + merged)
+                    i += 2
+                    continue
+        out.append(l)
+        i += 1
+    return "\n".join(out)
+
+
+def wdiff_decode(body: str) -> str:
+    out = []
+    for l in body.split("\n"):
+        if l.startswith("~"):
+            old, new = unword(l[1:])
+            out += ["-" + old, "+" + new]
+        else:
+            out.append(l)
+    return "\n".join(out)
+
+
+wdiff_encode, wdiff_unencode = framed(WD_MAGIC, wdiff_core, wdiff_decode)
+
+_MD_OLD = "The installer downloads the model on first use and caches it under the user cache directory, which can be overridden with the XDG_CACHE_HOME variable for sandboxed CI environments, see the configuration page for details."
+_MD_NEW = _MD_OLD.replace("XDG_CACHE_HOME", "CTXPRUNE_CACHE").replace("sandboxed CI", "sandboxed and CI")
+_LOCK_OLD = '      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.20.tgz",'
+_LOCK_NEW = _LOCK_OLD.replace("4.17.20", "4.17.21")
+_INT_OLD = '      "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==",'
+_INT_NEW = '      "integrity": "sha512-Q8mHcOnRHXEnvj7tIsgdL6N4Ymk3zkF2kqfs0iQTQLFEzhP8l4bx3G7wCjZ1Uo2h9p0aNXY5v1TTB4o8WJQ+bw==",'
+_SQL_OLD = "SELECT id, name, email, created_at, updated_at FROM users WHERE status = 'active' AND created_at > '2024-01-01' ORDER BY created_at DESC LIMIT 100;"
+_SQL_NEW = _SQL_OLD.replace("2024-01-01", "2025-06-01").replace("LIMIT 100", "LIMIT 500")
+_JSON_OLD = '{"name":"app","version":"1.2.3","scripts":{"build":"tsc -p .","test":"jest --ci"},"dependencies":{"left-pad":"^1.3.0","lodash":"^4.17.20","react":"^18.2.0"}}'
+_JSON_NEW = _JSON_OLD.replace("1.2.3", "1.2.4").replace("^4.17.20", "^4.17.21")
+
+
+def _wd_fixture() -> str:
+    return _join(
+        _modfile("docs/install.md", [_hunk(10, 10, [" ## Cache", " ", "-" + _MD_OLD, "+" + _MD_NEW, " ", " ## Models"], "## Installation")]),
+        _modfile("package-lock.json", [_hunk(30, 30, ["       " + '"version": "4.17.20",', "-" + _LOCK_OLD, "+" + _LOCK_NEW, "-" + _INT_OLD, "+" + _INT_NEW, '       "dev": true'])]),
+        _modfile("db/report.sql", [_hunk(1, 1, ["-" + _SQL_OLD, "+" + _SQL_NEW, " -- end"])]),
+        _modfile("package.min.json", [_hunk(1, 1, ["-" + _JSON_OLD, "+" + _JSON_NEW])]),
+    )
+
+
+_SHORT_CODE = _join(_modfile("a.py", [_hunk(1, 1, [" def f():", "-    x = 1", "+    x = 2", "-    y = old_value + 1", "+    y = new_value + 1", " return x"])]))
+_MULTI = _join(_modfile("m.md", [_hunk(1, 1, ["-" + _MD_OLD, "-" + _MD_OLD, "+" + _MD_NEW, "+" + _MD_NEW, "+" + _MD_NEW])]))
+_REWRITE = _join(_modfile("r.md", [_hunk(1, 1, ["-" + "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron", "+" + "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"])]))
+_MARKERS = _join(_modfile("w.md", [_hunk(1, 1, ["-" + _MD_OLD + " see [-draft-] and {+notes+}", "+" + _MD_NEW + " see [-draft-] and {+notes+}", "-- a/not.py" + " x" * 40, "+++ b/not.py" + " y" * 40, "-" + _MD_OLD + " ends with a dash -", "+" + _MD_NEW + " ends with a dash -", "\\ No newline at end of file"])]))
+
+case(
+    782,
+    claim="Inside a hunk, a lone '-' line followed by a lone '+' line that share most tokens becomes one '~' line in [-old-]{+new+} notation; decode restores both lines byte for byte, and an independent diff parser agrees on every hunk's lines.",
+    encode=wdiff_encode,
+    decode=wdiff_unencode,
+    equivalent=diff_oracle("word", WD_MAGIC),
+    fixtures=[
+        Fixture("markdown, lockfile, SQL and minified JSON edits", _wd_fixture(), True),
+        Fixture("short code lines are not worth it", _SHORT_CODE * 3, False),
+        Fixture("multi-line -/+ blocks are not paired", _MULTI, False),
+        Fixture("completely rewritten line", _REWRITE, False),
+        Fixture("not a diff", "".join(f"- item {i} of the list\n+ item {i} of the new list\n" for i in range(5)), False),
+        Fixture("marker text, header-lookalike lines, dash endings", _wd_fixture() + _MARKERS, None),
+        Fixture("CRLF diff", _wd_fixture().replace("\n", "\r\n"), None),
+        Fixture("line starting with ~ (refused)", _wd_fixture() + "~tilde\n", None),
+        Fixture("no trailing newline", _wd_fixture().rstrip("\n"), None),
+        Fixture("whitespace-only change and unicode", _join(_modfile("u.md", [_hunk(1, 1, ["-" + "café  crème brûlée " * 6 + "end", "+" + "café crème brûlée " * 6 + "end"])])) + _wd_fixture(), None),
+    ]
+    + sigil_fixtures(WD_MAGIC, _wd_fixture()),
+    min_gain=0.15,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
+)
+
+# ===============================================================================================================
+# #1078 Ditto repeated function context in hunk headers. Roundtrip. A hunk header whose text after '@@ ' equals the previous
+# header's (same file) becomes '@@ -a,b +c,d @@ "'. Context resets at each 'diff --git' line. An input with a header whose own
+# context is a lone '"' is left alone. Line counts stay (the idea's separate R variant would derive them).
+
+DITTO_MAGIC = '§ditto (" after a hunk header\'s @@ repeats the previous hunk\'s function context)\n'
+_HUNK_H = re.compile(r"(@@ -[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)? @@)(?: (.*))?")
+
+
+def ditto_core(text: str):
+    out, prev = [], None
+    for l in text.split("\n"):
+        if l.startswith("diff --git "):
+            prev = None
+        m = _HUNK_H.fullmatch(l)
+        if m:
+            ctx = m.group(2)
+            if ctx == DITTO:
+                return None
+            out.append(m.group(1) + " " + DITTO if ctx is not None and len(ctx) > 1 and ctx == prev else l)
+            prev = ctx
+        else:
+            out.append(l)
+    return "\n".join(out)
+
+
+def ditto_decode(body: str) -> str:
+    out, prev = [], None
+    for l in body.split("\n"):
+        if l.startswith("diff --git "):
+            prev = None
+        m = _HUNK_H.fullmatch(l)
+        if m:
+            ctx = prev if m.group(2) == DITTO else m.group(2)
+            out.append(m.group(1) + " " + ctx if m.group(2) == DITTO else l)
+            prev = ctx
+        else:
+            out.append(l)
+    return "\n".join(out)
+
+
+ditto_encode, ditto_unencode = framed(DITTO_MAGIC, ditto_core, ditto_decode)
+
+_BIG_FN = "def process_batch(self, items, *, strict=False, retries=3):"
+
+
+def _ditto_fixture(seed: int = 1078) -> str:
+    return _join(
+        _modfile("src/engine/batch.py", _py_hunks("src/engine/batch.py", [_BIG_FN] * 9, seed)),
+        _modfile("src/engine/queue.py", _py_hunks("src/engine/queue.py", [_BIG_FN, _BIG_FN, "def drain(self):", "def drain(self):", None, None], seed + 1)),
+    )
+
+
+case(
+    1078,
+    claim="A hunk header whose function context equals the previous header's (same file; reset at each 'diff --git') ends in a lone '\"' instead; decode restores the exact bytes, and a diff parser agrees on which function each hunk sits in.",
+    encode=ditto_encode,
+    decode=ditto_unencode,
+    equivalent=diff_oracle("ditto", DITTO_MAGIC),
+    fixtures=[
+        Fixture("two files, hunks inside one big function", _ditto_fixture(), True),
+        Fixture("every hunk in a different function", _join(_modfile("a.py", _py_hunks("a.py", [f"def f{i}(self):" for i in range(8)], 5))), False),
+        Fixture("no function context at all", _join(_modfile("notes.md", _py_hunks("notes.md", [None] * 8, 6))), False),
+        Fixture("single hunk per file, same context", _join(*[_modfile(f"f{i}.py", _py_hunks("x.py", [_BIG_FN], i)) for i in range(6)]), False),
+        Fixture("context reset across files, short and empty contexts", _ditto_fixture() + _join(_modfile("z.py", _py_hunks("z.py", [_BIG_FN, "x", "x", "", ""], 9))), None),
+        Fixture("a context that is itself a lone quote (refused)", _ditto_fixture() + _join(_modfile("q.py", _py_hunks("q.py", [DITTO, DITTO], 8))), None),
+        Fixture("hunk-looking line with no diff state", _ditto_fixture() + "@@ -1 +1 @@ " + _BIG_FN + "\n@@ -3 +3 @@ " + _BIG_FN + "\n", None),
+        Fixture("no trailing newline", _ditto_fixture().rstrip("\n"), None),
+        Fixture("CRLF diff", _ditto_fixture().replace("\n", "\r\n"), None),
+    ]
+    + sigil_fixtures(DITTO_MAGIC, _ditto_fixture(2)),
+    min_gain=0.06,
+    idempotent=False,  # the legend line starts with the sigil, so a second pass escapes it with RAW
+)
+
+# ===============================================================================================================
+# #1079 Drop the per-line '+' inside new-file diffs. Roundtrip, headerless. After '--- /dev/null', '+++ b/..' and
+# '@@ -0,0 +1,N @@' the marker line '[all lines added]' precedes N lines printed without their '+'. Decode is count-based, so file
+# content that looks like diff syntax is safe. A block is converted only when it saves characters (N > 18); the idea's 8-line
+# example is a token saving and does not shrink in characters. Ambiguity (a hunk header followed by the marker in the input)
+# is escaped with RAW. Deleted files are #329's.
+
+_NEWH = re.compile(r"@@ -0,0 \+1(?:,([0-9]+))? @@")
+
+
+def newfile_encode(text: str) -> str:
+    if text.startswith(RAW):
+        return RAW + text
+    lines = text.split("\n")
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        out.append(l)
+        i += 1
+        m = _NEWH.fullmatch(l)
+        if not m:
+            continue
+        cnt = 1 if m.group(1) is None else int(m.group(1))
+        body = lines[i : i + cnt]
+        # not when the block would end the text on a bare '+': stripped, that last empty line would read as a trailing newline
+        if cnt > len(NF_MARK) + 1 and len(out) >= 3 and out[-3] == "--- /dev/null" and out[-2].startswith("+++ b/") and len(body) == cnt and all(b.startswith("+") for b in body) and not (i + cnt == n and body[-1] == "+"):
+            out.append(NF_MARK)
+            out += [b[1:] for b in body]
+            i += cnt
+        elif i < n and lines[i] == NF_MARK:
+            return RAW + text  # decode would take this marker for ours
+    enc = "\n".join(out)
+    return enc if len(enc) < len(text) else text
+
+
+def newfile_decode(t: str) -> str:
+    if t.startswith(RAW):
+        return t[len(RAW):]
+    lines = t.split("\n")
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        out.append(l)
+        i += 1
+        m = _NEWH.fullmatch(l)
+        if m and i < n and lines[i] == NF_MARK:
+            cnt = 1 if m.group(1) is None else int(m.group(1))
+            out += ["+" + b for b in lines[i + 1 : i + 1 + cnt]]
+            i += 1 + cnt
+    return "\n".join(out)
+
+
+def _newfile(path: str, body: list[str], mode: str = "100644") -> list[str]:
+    return [f"diff --git a/{path} b/{path}", f"new file mode {mode}", f"index 0000000..{_bid(path)}", "--- /dev/null", f"+++ b/{path}"] + _hunk(0, 1, ["+" + b for b in body])
+
+
+def _newfile_fixture() -> str:
+    rng = random.Random(1079)
+    reqs = [f"{rng.choice(['numpy', 'scipy', 'pandas', 'torch', 'click', 'rich', 'pytest', 'attrs'])}{rng.choice(['==', '>=', '~='])}{rng.randint(0, 3)}.{rng.randint(0, 20)}" for _ in range(80)]
+    words = ["".join(rng.choice("abcdefghij") for _ in range(rng.randint(3, 9))) for _ in range(200)]
+    code = [l for i in range(7) for l in (f"def f{i}(x):", f"    return x + {i}", "")]
+    return _join(_newfile("requirements.txt", reqs), _newfile("data/words.txt", words), _newfile("src/small.py", code[:8]), _modfile("README.md", [_hunk(3, 3, ["-old line", "+new line"])]))
+
+
+case(
+    1079,
+    claim="In a new-file diff (--- /dev/null, @@ -0,0 +1,N @@ with N > 18) the N added lines are printed without their '+' after one '[all lines added]' marker; decode is count-based and restores the exact bytes, and an independent diff parser sees the same added lines.",
+    encode=newfile_encode,
+    decode=newfile_decode,
+    equivalent=diff_oracle("newfile"),
+    fixtures=[
+        Fixture("new short-lined files plus a modified file", _newfile_fixture(), True),
+        Fixture("8-line new file does not save characters", _join(_newfile("src/small.py", ["def f(x):", "    return x + 1", "", "def g(y):", "    return y * 2", "", "x = f(1)", "y = g(2)"])), False),
+        Fixture("deleted file keeps its minus signs", _join(_DELFILE[:5] + _hunk(1, 0, ["-" + f"line {i}" for i in range(60)])), False),
+        Fixture("modified file", _join(_modfile("a.py", _py_hunks("a.py", [None] * 6, 3))), False),
+        Fixture("a patch file added as a new file", _join(_newfile("fix.patch", ["diff --git a/x b/x", "--- /dev/null", "+++ b/x", "@@ -0,0 +1,3 @@", "[all lines added]", "+q", "+r", "+s"] + ["x"] * 30)), None),
+        Fixture("body ends early (truncated) and trailing marker", _newfile_fixture()[:1500], None),
+        Fixture("hunk header followed by the marker in the input (escaped)", _newfile_fixture() + "@@ -0,0 +1,2 @@\n[all lines added]\n+a\n+b\n", None),
+        Fixture("new file without final newline", _join(_newfile("a.txt", ["w" + str(i) for i in range(40)]))[:-1] + "\n\\ No newline at end of file\n", None),
+        Fixture("CRLF content", _newfile_fixture().replace("\n", "\r\n"), None),
+        Fixture("no trailing newline", _newfile_fixture().rstrip("\n"), None),
+        Fixture("block ending the text on an empty added line", _join(_newfile("e.txt", ["w" + str(i) for i in range(40)] + [""])).rstrip("\n"), None),
+        Fixture("input starts with the escape line", RAW + _newfile_fixture(), None),
+    ],
+    min_gain=0.05,
+    idempotent=False,  # a second pass meets the marker right after a hunk header and must escape it with RAW
 )

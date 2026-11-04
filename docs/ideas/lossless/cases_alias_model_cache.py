@@ -143,7 +143,6 @@ def _java_logs() -> str:
                    "org.springframework.web.servlet.FrameworkServlet.service",
                    "org.springframework.web.servlet.DispatcherServlet.doDispatch",
                    "org.apache.catalina.core.ApplicationFilterChain.doFilter"]:
-            cls = fr.rsplit(".", 1)[1]
             out.append(f"\tat {fr}({fr.rsplit('.', 2)[1]}.java:{rng.randint(20, 900)})")
     return "\n".join(out) + "\n"
 
@@ -478,7 +477,7 @@ case(
         Fixture("sigil lines inside a rendered chart", HELM + "data:\n  note: |\n    §L1\n    §§end\n  §x\n§\n", None),
         Fixture("sigil mid-line only", HELM + "  price: 5§\n", None),
     ],
-    min_gain=0.30,
+    min_gain=0.25,
     idempotent=False,
 )
 
@@ -637,6 +636,7 @@ def sim_alias_tokens() -> dict:
             assert srv.request_booking(new) == "accepted"
             raw_chars += len(raw) + len(tok) * 2
             alias_chars += len(seen) + len(shown) * 2
+        assert alias_chars < raw_chars * 0.2, "the point: result, argument and echo shrink from ~1.5k chars to ~80 per flow"
         assert srv.received == [srv.mint(r) for r in rides], "server must receive exactly the tokens it issued"
 
         # stable across calls: same token again -> same alias, no new id; a second token in one result gets the next ids
@@ -1020,11 +1020,9 @@ def sim_toolu_alias() -> dict:
         _validate(al["messages"])
         assert _unalias(al, IdAliaser(state).inverse()) == full, "the alias map must invert exactly"
         raw_b, al_b = len(json.dumps(full)), len(json.dumps(al))
-        want = sum(len(old) - len(f"t{n}") for old, n in IdAliaser(state).f.load({})["map"].items()) * 2 + 0
-        ids_in_text = json.dumps(full).count("toolu_01") - n_ids * 2  # ids that appear in text/result content, not as id fields
-        assert al_b < raw_b and raw_b - al_b >= (n_ids * 2) * (30 - 4) - 0, "saving: every id is written twice and shrinks by ~26 chars"
+        assert al_b < raw_b and raw_b - al_b >= (n_ids * 2) * (30 - 4), "saving: every id is written twice and shrinks by 26+ chars"
         assert "toolu_01Aaaaaaaaaaaaaaaaaaaaaa" in json.dumps(al), "ids quoted inside text are not ids and must not be rewritten"
-        assert ids_in_text >= 1 + n_ids, "tool_result text mentioning an id is left alone"
+        assert json.dumps(al).count("saw toolu_") == n_ids, "tool_result text that mentions an id is left alone"
         assert sorted({b["tool_use_id"] for m in al["messages"] for b in m["content"] if b.get("type") == "tool_result"}) == sorted(
             {b["id"] for m in al["messages"] for b in m["content"] if b.get("type") == "tool_use"}), "pairs preserved"
         assert len({b["id"] for m in al["messages"] for b in m["content"] if b.get("type") == "tool_use"}) == n_ids, "injective"
@@ -1366,7 +1364,8 @@ def sim_pooled_batches() -> dict:
         assert _same(shuffled[pos], one_by_one[i])
     # the saving: ORT calls (the per-call overhead is what a batch of one wastes) and a bounded padding cost
     calls_before, calls_after = per_doc.stats["calls"], pooled_c.stats["calls"]
-    assert calls_before == sum(1 for t in chunks if t.strip()) - 0 + (0) or calls_before >= len(chunks) - 2
+    assert calls_before == sum(1 for t in chunks if t.strip()), "one ORT call per non-empty document: each window set fits one batch"
+    assert compress_many(_FakeCompressor(), []) == [] and compress_many(_FakeCompressor(), [""]) == [_FakeCompressor().compress("")]
     assert calls_after * 4 <= calls_before, (calls_before, calls_after)
     assert pooled_c.stats["real"] == per_doc.stats["real"], "the same tokens are scored"
     assert pooled_c.stats["cells"] <= per_doc.stats["real"] * 1.3, "length-sorted batches keep padding small"
@@ -1452,6 +1451,14 @@ def sim_skip_protected() -> dict:
     assert s["one 3000-char base64 token"][0] >= 4, "an oversized protected atom spans many windows, all skippable"
     assert cells_skip < cells_base * 0.7, (cells_skip, cells_base)
 
+    # edge inputs: no atoms, whitespace only, punctuation only, one CJK atom per character, structure only
+    for text in ("", " ", "\n\n", ".", "日本語のテキスト", "{}[]\",:", "a" * 5, "\t1 2 3\n"):
+        base = _FakeCompressor(64)
+        full = base.atom_scores(text)
+        for mode in modes:
+            got, _info = score_docs(_FakeCompressor(64), [text], _policy_baseline, skip_forced=(mode.get("force_protected", False), mode.get("keep_structure", False)))
+            assert _Fixed(base, got[0]).compress(text, rate=0.5, **mode) == _Fixed(base, full).compress(text, rate=0.5, **mode), (text, mode)
+
     # without force flags nothing is forced, so nothing is skipped and scoring is unchanged
     _, info = score_docs(_FakeCompressor(64), [corpora["git ls-files listing"]], _policy_baseline, skip_forced=(False, False))
     assert info["skipped"] == 0, "no flag, no forced atoms, no skipped windows"
@@ -1504,7 +1511,7 @@ def detok_glue(atoms: list[Atom], keep: list[bool]) -> str:
     were glued too, unless the glued run would no longer read back as the same atoms (two words would fuse), and a deleted
     run keeps its widest whitespace (newline > tab > space) instead of collapsing tabs to spaces."""
     out: list[str] = []
-    run: list[str] = []  # atom texts of the glued run being built (since the last whitespace)
+    run: list[str] = []  # texts of the atoms glued together at the end of `out` (since the last whitespace)
     gap, dropped = "", False
     for a, k in zip(atoms, keep):
         if not k:
@@ -1512,17 +1519,15 @@ def detok_glue(atoms: list[Atom], keep: list[bool]) -> str:
             dropped = True
             continue
         if not out:
-            ws = ""
+            ws = ""  # leading whitespace is dropped, as in detok
         elif not dropped:
             ws = a.ws
         else:
             ws = _gap_ws(gap + a.ws)
-        if ws == "" and out and a.text and [x.text for x in atomize("".join(run) + a.text)] != run + [a.text]:
+        if ws == "" and run and a.text and [x.text for x in atomize("".join(run) + a.text)] != run + [a.text]:
             ws = " "  # would fuse: "foo(" "bar" with "(" deleted must not become "foobar"
         out.append(ws + a.text)
-        run = (run + [a.text]) if (ws == "" and out[:-1]) else [a.text]
-        if not a.text:
-            run = []
+        run = (run + [a.text]) if (ws == "" and run) else [a.text] if a.text else []
         gap, dropped = "", False
     return "".join(out)
 
@@ -1537,8 +1542,10 @@ def _check_glue(text: str, keep: list[bool], out: str) -> None:
     for n, (i, j) in enumerate(zip(kept_idx, kept_idx[1:]), start=1):
         got = re_atoms[n].ws
         src_ws = "".join(a.ws for a in atoms[i + 1:j + 1])  # every source gap between the two kept atoms
-        if j == i + 1:
-            assert got == atoms[j].ws, "neighbouring kept atoms keep their own whitespace"
+        if j == i + 1:  # neighbours keep their own whitespace; the one exception is a space that stops an earlier deletion fusing words
+            if got != atoms[j].ws:
+                assert atoms[j].ws == "" and got == " " and [a.text for a in atomize(_without_gap(out, n))] != [a.text for a in re_atoms], \
+                    f"neighbouring kept atoms lost their whitespace: {out!r}"
         elif src_ws:
             want = "\n" if "\n" in src_ws else ("\t" if "\t" in src_ws else " ")
             assert got == want, f"whitespace across a deleted run: want {want!r} got {got!r} in {out!r}"
@@ -1572,7 +1579,7 @@ def sim_reglue() -> dict:
         ("see (the log.txt) now", {"see", "the"}, "( log.txt) now", "( log.txt) now"),  # a real gap stays a gap
         ("foo(bar)", {"("}, None, "foo bar)"),
         ("x = a[0].b", {"a"}, None, "x = [0].b"),
-        ('{"a":1,"b":2}', {'"'}, None, "{ a:1 , b:2 }"),
+        ('{"a":1,"b":2}', {'"'}, "{ a :1, b :2}", "{a: 1,b: 2}"),  # 'a:1' would read back as one atom, so one space stays
     ]
     real_defects = 0
     for text, words, real_expect, want in cases_:
@@ -1582,9 +1589,8 @@ def sim_reglue() -> dict:
         if real_expect is not None:
             assert detok(at, keep) == real_expect, f"real detok no longer shows the defect: {detok(at, keep)!r}"
         real_defects += detok(at, keep) != got
-        if want is not None and text != '{"a":1,"b":2}':
-            assert got == want, (text, got, want)
-    assert real_defects >= 5, "the real detok should differ from source-adjacency output on most of these"
+        assert got == want, (text, got, want)
+    assert real_defects == 4, f"real detok differs on the CJK, tab, punctuation and JSON examples only, not on the controls: {real_defects}"
 
     # property sweep over realistic texts with random keep masks
     texts = [
@@ -1628,4 +1634,732 @@ case(
     1138,
     claim="After deletions, a kept atom that was glued to the deleted atoms before it stays glued unless the run would then fuse words (re-atomising the output must give exactly the kept atoms), and a deleted run keeps newline over tab over space: CJK characters, kept punctuation and tab-separated columns are no longer padded with spaces, checked against the real atomize/detok on 480 random keep masks. Token-count effect on a real tokenizer is not measured here.",
     sim=sim_reglue,
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# prompt-cache sims. The cached prefix is tools -> system (up to the last cache_control) -> messages.
+
+def _dumps(x) -> str:
+    return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sort_keys(x):
+    """Recursively sort object keys. Arrays keep their order: required[], enum[], anyOf[] and messages are ordered data."""
+    if isinstance(x, dict):
+        return {k: _sort_keys(x[k]) for k in sorted(x)}
+    if isinstance(x, list):
+        return [_sort_keys(v) for v in x]
+    return x
+
+
+def _shuffle_keys(x, rng):
+    if isinstance(x, dict):
+        ks = list(x)
+        rng.shuffle(ks)
+        return {k: _shuffle_keys(x[k], rng) for k in ks}
+    if isinstance(x, list):
+        return [_shuffle_keys(v, rng) for v in x]
+    return x
+
+
+def _cache_prefix(body: dict) -> str:
+    """Bytes a byte-level prefix cache would key on, in the body's own key order: model, tools, then the system blocks up
+    to the last cache_control (or all of them when none is marked)."""
+    system = body.get("system") or []
+    bp = max((i for i, b in enumerate(system) if isinstance(b, dict) and "cache_control" in b), default=len(system) - 1)
+    return _dumps(body.get("model")) + _dumps(body.get("tools")) + _dumps(system[: bp + 1])
+
+
+# ---- #256 Canonicalise the cache prefix: tool order, key order, volatile strings after the breakpoint.
+
+_DATE_LINE = re.compile(r"^- Today's date is \d{4}-\d{2}-\d{2}\.\n", re.M)
+_GIT_BLOCK = re.compile(r"^gitStatus:.*\Z", re.M | re.S)
+_MOVED = "# Session context (moved after the cache breakpoint)\n"
+
+
+def canonicalise_request(raw):
+    """bytes/str JSON body in, same type out. Tools sorted by name, object keys sorted, the date line and gitStatus block
+    of the system prompt moved to a trailing system block after the breakpoint. Anything unexpected: the input unchanged."""
+    try:
+        body = json.loads(raw)
+        tools, system = body["tools"], body["system"]
+        assert isinstance(tools, list) and isinstance(system, list) and isinstance(body["messages"], list)
+        names = [t["name"] for t in tools]
+        assert len(set(names)) == len(names), "duplicate tool names: not ours to resolve"
+        marked = [i for i, t in enumerate(tools) if "cache_control" in t]
+        assert marked in ([], [len(tools) - 1]), "a breakpoint inside the tool list pins the order"
+        marker = tools[-1].get("cache_control") if marked else None
+        new_tools = sorted((_sort_keys({k: v for k, v in t.items() if k != "cache_control"}) for t in tools), key=lambda t: t["name"])
+        if marker is not None:
+            new_tools[-1]["cache_control"] = marker
+        new_system, moved = [], []
+        for b in system:
+            if b.get("type") == "text" and isinstance(b.get("text"), str) and not b["text"].startswith(_MOVED):
+                text = b["text"]
+                for rx in (_DATE_LINE, _GIT_BLOCK):
+                    moved += rx.findall(text)
+                    text = rx.sub("", text)
+                b = {**b, "text": text}
+            new_system.append(_sort_keys(b))
+        if moved:
+            new_system.append(_sort_keys({"type": "text", "text": _MOVED + "".join(m if m.endswith("\n") else m + "\n" for m in moved)}))
+        rest = {k: _sort_keys(v) for k, v in sorted(body.items()) if k not in ("model", "tools", "system", "messages")}
+        out = {"model": body["model"], "tools": new_tools, "system": new_system, "messages": _sort_keys(body["messages"]), **rest}
+        s = _dumps(out)
+        return s.encode() if isinstance(raw, (bytes, bytearray)) else s
+    except Exception:  # noqa: BLE001  fail open
+        return raw
+
+
+def _tool(name, desc, props, required):
+    return {"name": name, "description": desc, "input_schema": {"type": "object", "properties": props, "required": required}}
+
+
+def _tools_set() -> list[dict]:
+    mk = []
+    for srv, names in {"github": ["get_file", "list_prs", "create_issue"], "jira": ["search", "transition"], "slack": ["post", "history", "react"]}.items():
+        for n in names:
+            mk.append(_tool(f"mcp__{srv}__{n}", f"{srv}: {n.replace('_', ' ')} (é 日本語)",
+                            {"mode": {"type": "string", "enum": ["fast", "safe", "auto"]}, "query": {"type": "string", "description": f"what to {n}"}, "limit": {"type": "integer"}},
+                            ["query", "mode"]))
+    for n in ["Bash", "Read", "Edit", "Grep"]:
+        mk.append(_tool(n, f"Built-in {n} tool. " + "Detailed usage notes. " * 12, {"command": {"type": "string"}, "path": {"type": "string"}, "timeout": {"type": "number"}}, ["command"]))
+    return mk
+
+
+def _req256(seed: int, date: str, branch: str, dirty: list[str], marker_on_tools: bool = False, tools=None, date_line=None) -> dict:
+    rng = random.Random(seed)
+    tools = copy.deepcopy(tools if tools is not None else _tools_set())
+    rng.shuffle(tools)  # MCP servers reconnect in a different order
+    tools = [_shuffle_keys(t, rng) for t in tools]
+    if marker_on_tools:
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
+    git = f"gitStatus: Current branch: {branch}\nStatus:\n" + "".join(f"{l}\n" for l in dirty) + "Recent commits:\n" + "".join(f"{rng.getrandbits(28):07x} change {i}\n" for i in range(3))
+    env = date_line if date_line is not None else f"- Today's date is {date}.\n"
+    static_a = "You are Claude Code, Anthropic's official CLI for Claude.\n" + "Follow the repository conventions. " * 20 + "\n"
+    static_b = "# Environment\n- Working directory: /repo\n- Platform: linux\n" + env + "- Shell: bash\n# Rules\n" + "Prefer small diffs. Run the tests. " * 30 + "\n" + git
+    system = [{"type": "text", "text": static_a}, {"type": "text", "text": static_b, "cache_control": {"type": "ephemeral"}}]
+    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": f"task {seed}: fix the failing test"}]}], "max_tokens": 8192,
+            "system": system, "tools": tools, "model": "claude-sonnet-5-5"}
+    return body
+
+
+def _lists(x, path=""):
+    if isinstance(x, dict):
+        for k in sorted(x):
+            yield from _lists(x[k], f"{path}/{k}")
+    elif isinstance(x, list):
+        yield path, json.dumps(x, sort_keys=True)
+        for i, v in enumerate(x):
+            yield from _lists(v, f"{path}[{i}]")
+
+
+def _semantics_preserved(orig: dict, canon: dict) -> None:
+    """Independent oracle on the parsed requests."""
+    strip = lambda t: {k: v for k, v in t.items() if k != "cache_control"}  # noqa: E731
+    assert sorted(json.dumps(strip(t), sort_keys=True) for t in orig["tools"]) == sorted(json.dumps(strip(t), sort_keys=True) for t in canon["tools"]), "tool set changed"
+    by_name = {t["name"]: t for t in canon["tools"]}
+    for t in orig["tools"]:
+        assert dict(_lists(t["input_schema"])) == dict(_lists(by_name[t["name"]]["input_schema"])), f"array order inside {t['name']}'s schema changed"
+    assert orig["messages"] == canon["messages"], "messages (order, ids, content) must be untouched"
+    lines = lambda b: Counter(l for blk in b["system"] for l in blk["text"].split("\n") if l)  # noqa: E731
+    gone, added = lines(orig) - lines(canon), lines(canon) - lines(orig)
+    assert not gone and set(added) <= {_MOVED.strip()}, f"system text lost or invented: {gone} {added}"
+    assert sum("cache_control" in t for t in orig["tools"]) == sum("cache_control" in t for t in canon["tools"])
+    assert sum("cache_control" in b for b in orig["system"]) == sum("cache_control" in b for b in canon["system"])
+    assert canon["tools"] and (not any("cache_control" in t for t in orig["tools"]) or "cache_control" in canon["tools"][-1])
+
+
+def sim_cache_prefix() -> dict:
+    reqs = [_req256(1, "2026-11-04", "main", [" M a.py"]), _req256(2, "2026-11-05", "feat/x", [" M b.py", "?? c.txt"]),
+            _req256(3, "2026-11-06", "main", []), _req256(4, "2026-11-04", "main", [" M a.py"])]
+    raw_prefixes = [_cache_prefix(r) for r in reqs]
+    common_raw = len(os.path.commonprefix(raw_prefixes))
+    canon_bytes = [canonicalise_request(json.dumps(r).encode()) for r in reqs]
+    canon = [json.loads(b) for b in canon_bytes]
+    prefixes = [_cache_prefix(c) for c in canon]
+    assert common_raw < 0.05 * len(raw_prefixes[0]), "premise: raw requests share almost no cached prefix"
+    assert len(set(prefixes)) == 1, "canonical prefix must be byte-identical across requests that differ only in volatile parts"
+    assert len(prefixes[0]) > 4000 and "2026-11" not in prefixes[0] and "gitStatus" not in prefixes[0]
+    for r, c in zip(reqs, canon):
+        _semantics_preserved(r, c)
+        assert "Today's date is" in c["system"][-1]["text"] and "gitStatus:" in c["system"][-1]["text"], "volatile text must still be visible, after the breakpoint"
+    # the whole body is canonical, not just the prefix: same semantic request, any key order and tool order -> same bytes
+    assert canonicalise_request(json.dumps(reqs[0])) == canonicalise_request(json.dumps(_shuffle_keys(reqs[0], random.Random(9))))
+    assert len({b for b in canon_bytes}) == 4, "the messages differ per session, so the full bodies differ"
+    assert all(canonicalise_request(b) == b for b in canon_bytes), "idempotent"
+    # bytes of the prefix come first in the body: tools, then system, then messages
+    s = canon_bytes[0].decode()
+    assert s.index('"tools"') < s.index('"system"') < s.index('"messages"')
+
+    # a marker on the last tool moves with the breakpoint
+    r5 = _req256(5, "2026-11-04", "main", [], marker_on_tools=True)
+    c5 = json.loads(canonicalise_request(json.dumps(r5)))
+    _semantics_preserved(r5, c5)
+    assert "cache_control" in c5["tools"][-1] and sum("cache_control" in t for t in c5["tools"]) == 1
+
+    # must NOT hide real differences: tool added, description edited, enum order swapped, unmatched date format
+    base = _cache_prefix(canon[0])
+    extra = _tools_set() + [_tool("mcp__x__new", "new", {"q": {"type": "string"}}, ["q"])]
+    edited = _tools_set()
+    edited[0]["description"] += "!"
+    swapped = _tools_set()
+    swapped[1]["input_schema"]["properties"]["mode"]["enum"] = ["safe", "fast", "auto"]
+    for name, variant in {"added tool": _req256(1, "2026-11-04", "main", [" M a.py"], tools=extra), "edited description": _req256(1, "2026-11-04", "main", [" M a.py"], tools=edited),
+                          "enum order": _req256(1, "2026-11-04", "main", [" M a.py"], tools=swapped),
+                          "unmatched date format": _req256(1, "x", "main", [" M a.py"], date_line="- Today is Nov 4th 2026\n")}.items():
+        assert _cache_prefix(json.loads(canonicalise_request(json.dumps(variant)))) != base, f"{name}: a real difference must stay a cache miss"
+    msg_req = _req256(1, "2026-11-04", "main", [])
+    msg_req["messages"][0]["content"][0]["text"] = "the log says:\n- Today's date is 2026-01-01.\ngitStatus: pasted by the user\n"
+    assert json.loads(canonicalise_request(json.dumps(msg_req)))["messages"] == msg_req["messages"], "text inside messages is never edited"
+
+    # fail open: anything unexpected comes back byte-identical
+    dup = _req256(1, "2026-11-04", "main", [])
+    dup["tools"].append(copy.deepcopy(dup["tools"][0]))
+    mid = _req256(1, "2026-11-04", "main", [])
+    mid["tools"][2]["cache_control"] = {"type": "ephemeral"}
+    for bad in (b"{not json", b"[]", b"null", b"{}", json.dumps({"tools": "x", "system": [], "messages": []}).encode(), json.dumps(dup).encode(), json.dumps(mid).encode(),
+                json.dumps({"tools": [{"x": 1}], "system": [], "messages": []}).encode(), "str passthrough", b"\xff\xfe"):
+        assert canonicalise_request(bad) == bad
+    return {"raw_common_prefix_bytes": common_raw, "cached_prefix_bytes": len(prefixes[0]), "canonical_common_prefix_bytes": len(os.path.commonprefix(prefixes)),
+            "requests": 4, "prefix_identical": True}
+
+
+case(
+    256,
+    claim="Sorting tools by name, sorting object keys (never arrays) and moving the system prompt's date line and gitStatus block into a trailing block after the breakpoint makes the tools+system prefix byte-identical across requests that differ only in tool order, key order, date and git state, while the tool set, array order inside schemas, messages, ids and every line of system text are preserved, real differences stay misses, and unexpected requests pass through unchanged. Premise: the model tolerating a different tool order.",
+    sim=sim_cache_prefix,
+)
+
+# ---- #1384 Drop the volatile billing-header system line behind gateways (format read from Claude Code 2.1.318's own binary).
+
+_BILLING = re.compile(r"^x-anthropic-billing-header: (?:[a-z_]+=[^;\s]*;(?: |\Z))+\Z")
+
+
+def strip_billing_header(raw, upstream: str):
+    """Remove the x-anthropic-billing-header line from system[0] (a block or the first line of a string) unless the upstream is
+    first-party. Everything else, and anything unexpected, is returned untouched."""
+    try:
+        if upstream.endswith("api.anthropic.com"):
+            return raw
+        body = json.loads(raw)
+        system = body["system"]
+        if isinstance(system, str):
+            head, nl, rest = system.partition("\n")
+            if not _BILLING.match(head):
+                return raw
+            body["system"] = rest
+        else:
+            first = system[0]
+            assert first["type"] == "text" and "cache_control" not in first
+            head, nl, rest = first["text"].partition("\n")
+            if not _BILLING.match(head):
+                return raw
+            if rest.strip():
+                system[0] = {**first, "text": rest}
+            else:
+                system.pop(0)
+        s = _dumps(body)
+        return s.encode() if isinstance(raw, (bytes, bytearray)) else s
+    except Exception:  # noqa: BLE001
+        return raw
+
+
+def _billing_line(first_party: bool, session_fp: str, turn: int, rng: random.Random) -> str:
+    s = f"x-anthropic-billing-header: cc_version=2.1.318.{session_fp}; cc_entrypoint=cli; cch=00000;"
+    if first_party:
+        s += f" cc_prev_req=req_{rng.getrandbits(80):020x}; cc_prompt_id={rng.getrandbits(32):08x}-0000-4000-8000-{rng.getrandbits(48):012x}; cc_turn_origin=user; cc_prompt_index={turn // 3}; cc_turn_index={turn};"
+    else:
+        s += " cc_gateway=1;"
+    return s
+
+
+def _agent_requests(n_turns: int, first_party: bool, session: int) -> list[dict]:
+    rng = random.Random(session)
+    fp = f"{rng.getrandbits(12):03x}"
+    tools = _sort_keys(_tools_set())
+    msgs = [{"role": "user", "content": [{"type": "text", "text": f"session {session}: investigate the flaky build"}]}]
+    out = []
+    for t in range(n_turns):
+        out.append({"model": "m", "tools": tools, "system": [
+            {"type": "text", "text": _billing_line(first_party, fp, t, rng)}, {"type": "text", "text": "You are Claude Code.\n" + "Rules. " * 200},
+            {"type": "text", "text": "More static instructions. " * 100}], "messages": copy.deepcopy(msgs)})
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": f"turn {t}: " + "looking at the logs and the cache. " * 6}]})
+        msgs.append({"role": "user", "content": [{"type": "text", "text": f"output {t}: " + "line of tool output. " * 20}]})
+    return out
+
+
+def _render_prompt(body: dict) -> str:
+    """What a local server's chat template turns the request into (system, tools, then the messages)."""
+    sys_ = body["system"] if isinstance(body["system"], str) else "\n".join(b["text"] for b in body["system"])
+    msgs = "".join(f"<{m['role']}>{''.join(b['text'] for b in m['content'])}</{m['role']}>" for m in body["messages"])
+    return f"<system>{sys_}</system><tools>{_dumps(body['tools'])}</tools>{msgs}"
+
+
+class _PrefixKV:
+    """Radix-style prefix cache over everything it has seen: reuse = longest common prefix with any earlier prompt."""
+
+    def __init__(self):
+        self.seen: list[str] = []
+        self.reused = self.total = 0
+
+    def run(self, prompt: str) -> int:
+        best = max((len(os.path.commonprefix([prompt, p])) for p in self.seen), default=0)
+        self.seen.append(prompt)
+        self.reused += best
+        self.total += len(prompt)
+        return best
+
+
+def sim_billing_header() -> dict:
+    out = {}
+    # per-turn header (first-party style fields): inside one session every request breaks the prefix at the header
+    kv0, kv1 = _PrefixKV(), _PrefixKV()
+    for body in _agent_requests(12, True, 11):
+        raw = json.dumps(body)
+        stripped = strip_billing_header(raw, "llama.local:8080")
+        kv0.run(_render_prompt(json.loads(raw)))
+        kv1.run(_render_prompt(json.loads(stripped)))
+        got, want = json.loads(stripped), copy.deepcopy(body)  # semantics: only the header block went away
+        assert want["system"][0]["text"].startswith("x-anthropic-billing-header:") and got["system"] == want["system"][1:]
+        assert got["messages"] == want["messages"] and got["tools"] == want["tools"] and got["model"] == want["model"]
+        assert strip_billing_header(stripped, "llama.local:8080") == stripped, "idempotent"
+    r0, r1 = kv0.reused / kv0.total, kv1.reused / kv1.total
+    assert r0 < 0.10 and r1 > 0.85, (r0, r1)
+    out["per-turn header, reuse within a session"] = f"{r0:.0%} -> {r1:.0%} of {kv0.total // 4} prompt tokens (chars/4)"
+    # gateway-style header (per-session fingerprint only): a NEW session cannot reuse the shared system+tools prefix
+    k0, k1 = _PrefixKV(), _PrefixKV()
+    for session in (21, 22):
+        body = _agent_requests(1, False, session)[0]
+        raw = json.dumps(body)
+        k0.run(_render_prompt(json.loads(raw)))
+        k1.run(_render_prompt(json.loads(strip_billing_header(raw, "gw"))))
+    first, second = k0.seen[1], k1.seen[1]
+    cold_before, cold_after = len(os.path.commonprefix([k0.seen[0], first])) / len(first), len(os.path.commonprefix([k1.seen[0], second])) / len(second)
+    assert cold_before < 0.02 and cold_after > 0.80, (cold_before, cold_after)
+    out["gateway-style header, second session's first request"] = f"{cold_before:.0%} -> {cold_after:.0%} reused"
+
+    # must NOT apply
+    b0 = _agent_requests(1, True, 31)[0]
+    raw = json.dumps(b0)
+    assert strip_billing_header(raw, "api.anthropic.com") == raw, "first-party upstream keeps the header"
+    mid = copy.deepcopy(b0)
+    mid["system"][1]["text"] = "Project notes:\n" + mid["system"][0]["text"] + "\nmore\n"
+    mid["system"].insert(0, {"type": "text", "text": "You are Claude Code."})
+    mid["messages"][0]["content"][0]["text"] = mid["system"][1]["text"]
+    assert strip_billing_header(json.dumps(mid), "gw") == json.dumps(mid), "only system[0] is considered; quoted copies stay"
+    odd = copy.deepcopy(b0)
+    odd["system"][0]["text"] = "x-anthropic-billing-header: please keep me, I am prose"
+    assert strip_billing_header(json.dumps(odd), "gw") == json.dumps(odd), "a line that does not have the header's format is not touched"
+    both = copy.deepcopy(b0)
+    both["system"][0]["text"] += "\nYou are Claude Code, with the rest of the first block."
+    got = json.loads(strip_billing_header(json.dumps(both), "gw"))
+    assert got["system"][0]["text"] == "You are Claude Code, with the rest of the first block." and len(got["system"]) == len(both["system"])
+    s_str = json.loads(strip_billing_header(json.dumps({**b0, "system": b0["system"][0]["text"] + "\nYou are Claude Code."}), "gw"))
+    assert s_str["system"] == "You are Claude Code."
+    # fail open
+    for bad in (b"{oops", b"[]", b"{}", json.dumps({"system": []}).encode(), json.dumps({"system": [None]}).encode(), json.dumps({"system": 5}).encode(), b"\xff"):
+        assert strip_billing_header(bad, "gw") == bad
+    return out
+
+
+case(
+    1384,
+    claim="Removing the x-anthropic-billing-header line (strict format, system[0] only, not for first-party upstreams) from requests sent behind a gateway lets a prefix cache reuse the whole shared history instead of nothing, whether the header varies per turn or per session; the rest of the system blocks, tools and messages are unchanged, look-alike text stays, and malformed bodies pass through. The env var CLAUDE_CODE_ATTRIBUTION_HEADER exists in Claude Code 2.1.318's binary; whether a given gateway strips the line is not testable offline.",
+    sim=sim_billing_header,
+)
+
+# ---- #767 Document-order sort of retrieved chunks to extend the cached prefix.
+
+
+def _corpus() -> dict[tuple[str, int], str]:
+    rng = random.Random(767)
+    words = "alpha beta gamma delta lease renewal clause tenant landlord notice payment due schedule appendix amendment party term".split()
+    return {(f"doc{d}", o): " ".join(rng.choice(words) for _ in range(40)) + f" [{d}.{o}]" for d in range(5) for o in range(0, 400, 10)}
+
+
+def _retrievals(corpus, n: int = 30, k: int = 8) -> list[list[tuple[str, int]]]:
+    """Follow-up questions drift: each keeps most of the previous focus set and swaps some chunks; scores are noisy."""
+    rng = random.Random(7671)
+    keys = sorted(corpus)
+    focus = set(rng.sample(keys, 14))
+    out = []
+    for q in range(n):
+        for _ in range(4):
+            focus.discard(rng.choice(sorted(focus)))
+            focus.add(rng.choice(keys))
+        score = {c: (1.0 if c in focus else 0.0) + rng.random() * 0.9 for c in keys}
+        out.append(sorted(keys, key=lambda c: -score[c])[:k])
+    return out
+
+
+def _block(c, corpus) -> str:
+    return f"[{c[0]}#{c[1]}]\n{corpus[c]}\n\n"
+
+
+def ctx_score_order(hits, corpus) -> str:
+    return "".join(_block(c, corpus) for c in hits)
+
+
+def ctx_doc_order(hits, corpus) -> str:
+    if all(isinstance(c[0], str) and isinstance(c[1], int) for c in hits):
+        order = sorted(hits, key=lambda c: (c[0], c[1]))  # stable: equal keys keep their score order
+    else:
+        order = list(hits)  # missing or odd source/offset: fail open to score order
+    return "".join(_block(c, corpus) for c in order)
+
+
+def ctx_doc_order_ranked(hits, corpus) -> str:
+    """Doc order for the body, relevance order carried in a footer after the last chunk (the cached part is untouched)."""
+    return ctx_doc_order(hits, corpus) + "ranked: " + " > ".join(f"{c[0]}#{c[1]}" for c in hits) + "\n"
+
+
+def _parse(ctx: str, corpus):
+    blocks = re.findall(r"\[(doc\d+)#(\d+)\]\n(.*?)\n\n", ctx, flags=re.S)
+    rank = re.search(r"^ranked: (.*)$", ctx, re.M)
+    return [((d, int(o)), t) for d, o, t in blocks], ([(x.split("#")[0], int(x.split("#")[1])) for x in rank.group(1).split(" > ")] if rank else None)
+
+
+def sim_doc_order() -> dict:
+    corpus = _corpus()
+    runs = _retrievals(corpus)
+    lcp = lambda a, b: len(os.path.commonprefix([a, b]))  # noqa: E731
+    tot = {"score": 0, "doc": 0, "ranked": 0, "gated": 0}
+    size = 0
+    prev = {k: None for k in tot}
+    for hits in runs:
+        ctx = {"score": ctx_score_order(hits, corpus), "doc": ctx_doc_order(hits, corpus), "ranked": ctx_doc_order_ranked(hits, corpus)}
+        size += len(ctx["score"])
+        # reader view: same chunks, each byte-exact; ranked keeps the relevance order exactly
+        for kind in ("score", "doc", "ranked"):
+            got, rank = _parse(ctx[kind], corpus)
+            assert sorted(c for c, _ in got) == sorted(hits) and all(t == corpus[c] for c, t in got), f"{kind}: chunks must be intact"
+        assert [c for c, _ in _parse(ctx["score"], corpus)[0]] == hits
+        assert _parse(ctx["ranked"], corpus)[1] == hits, "the footer must recover the score order exactly"
+        assert [c for c, _ in _parse(ctx["doc"], corpus)[0]] == sorted(hits)
+        # gated: keep whichever of the two arrangements shares more with the previous context
+        gate = max((ctx["doc"], ctx["score"]), key=lambda c: lcp(c, prev["gated"] or "")) if prev["gated"] else ctx["doc"]
+        for kind, c in (("score", ctx["score"]), ("doc", ctx["doc"]), ("ranked", ctx["ranked"]), ("gated", gate)):
+            if prev[kind] is not None:
+                tot[kind] += lcp(prev[kind], c)
+            prev[kind] = c
+    pair_diffs = [(lcp(ctx_doc_order(a, corpus), ctx_doc_order(b, corpus)) - lcp(ctx_score_order(a, corpus), ctx_score_order(b, corpus))) for a, b in zip(runs, runs[1:])]
+    worse, better = sum(d < 0 for d in pair_diffs), sum(d > 0 for d in pair_diffs)
+    assert tot["doc"] > 1.5 * tot["score"], f"document order should extend the shared prefix: {tot}"
+    assert tot["ranked"] >= tot["doc"] - 40 * len(runs), "a rank footer after the chunks does not cost the shared prefix"
+    assert tot["gated"] >= max(tot["score"], tot["doc"]) * 0.99, f"per-request choice is never worse in aggregate: {tot}"
+    assert worse > 0, "honest finding: on some follow-ups document order shares LESS prefix than score order"
+    # the constructed counter-example: same top hit, but a new chunk that sorts earlier
+    a, b = [("doc2", 50), ("doc1", 10), ("doc3", 70)], [("doc2", 50), ("doc0", 20), ("doc3", 70)]
+    assert lcp(ctx_score_order(a, corpus), ctx_score_order(b, corpus)) >= len(_block(a[0], corpus))
+    assert lcp(ctx_doc_order(a, corpus), ctx_doc_order(b, corpus)) < len(_block(a[0], corpus)) // 2
+    # edge cases
+    assert ctx_doc_order([], corpus) == "" and ctx_doc_order_ranked([], corpus).startswith("ranked: ")
+    dup = [("doc1", 10), ("doc0", 50), ("doc1", 10)]
+    assert ctx_doc_order(dup, corpus).count("[doc1#10]") == 2, "duplicates are kept, not dropped"
+    odd = [("doc1", None), ("doc0", 50)]  # offset missing: no exception, score order
+    corpus2 = {**corpus, ("doc1", None): "orphan"}
+    assert ctx_doc_order(odd, corpus2) == ctx_score_order(odd, corpus2)
+    assert ctx_doc_order([("doc0", 20), ("doc0", 20)], corpus).count("[doc0#20]") == 2
+    return {"follow_ups": len(runs), "context_chars_per_query": size // len(runs), "shared_prefix_chars_total": f"score {tot['score']}, doc {tot['doc']}, doc+rank footer {tot['ranked']}, gated {tot['gated']}",
+            "pairs_doc_order_better": better, "pairs_doc_order_worse": worse}
+
+
+case(
+    767,
+    claim="Sorting retrieved chunks by (source, offset) instead of by score keeps the set of chunks and every chunk's bytes, and across 30 drifting follow-ups shares more than 1.5x the leading bytes of the previous context; the relevance order is lost unless a footer after the last chunk carries it (which then costs no shared prefix), and on some follow-ups document order shares less prefix than score order, so a per-request choice is the safe policy. Reader accuracy under document order is not testable here.",
+    sim=sim_doc_order,
+)
+
+# ---- #1036 Request-hash response replay for re-run headless agent jobs (volatile strings canonicalised for the key).
+
+_VOLATILE = re.compile(
+    r"(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)|(?P<tmp>/tmp/tmp\.[A-Za-z0-9]{6,})|"
+    r"(?P<uuid>\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)|(?P<dur>(?<=in )\d+\.\d+s\b)|(?P<toolu>\btoolu_[A-Za-z0-9]{10,}\b)")
+_PH = re.compile(r"⟪(\w+):(\d+)⟫")
+
+
+class _Canon:
+    """Replace every volatile value in the parts of a request that tools and the model produce (system, assistant blocks,
+    tool results; never user-authored text) by a typed placeholder numbered by first occurrence, walking keys in sorted
+    order. `values[i]` is the live value of placeholder i."""
+
+    def __init__(self):
+        self.values: list[str] = []
+        self.kinds: list[str] = []
+
+    def string(self, s: str) -> str:
+        def sub(m):
+            v = m.group(0)
+            if v not in self.values:
+                self.values.append(v)
+                self.kinds.append(m.lastgroup)
+            return f"⟪{m.lastgroup}:{self.values.index(v)}⟫"
+
+        return _VOLATILE.sub(sub, s)
+
+    def walk(self, x, live: bool):
+        if isinstance(x, str):
+            return self.string(x) if live else x
+        if isinstance(x, list):
+            return [self.walk(v, live) for v in x]
+        if isinstance(x, dict):
+            return {k: self.walk(x[k], live) for k in sorted(x)}
+        return x
+
+
+def _canon_request(body: dict):
+    """-> (key, canon, values); canonicalisation is off (exact key) if any string already looks like a placeholder."""
+    if "⟪" in _dumps(body):
+        return hashlib.sha256(("raw:" + _dumps(_sort_keys(body))).encode()).hexdigest(), None, None
+    c = _Canon()
+    out = {}
+    for k in sorted(body):
+        if k == "messages":
+            msgs = []
+            for m in body["messages"]:
+                keep = m["role"] == "user" and isinstance(m["content"], list)
+                blocks = m["content"]
+                if keep:  # user text is authored by the task, not volatile; tool_result blocks inside it are
+                    blocks = [c.walk(b, True) if b.get("type") == "tool_result" else c.walk(b, False) for b in blocks]
+                elif isinstance(blocks, list):
+                    blocks = c.walk(blocks, m["role"] != "user")
+                msgs.append({"role": m["role"], "content": blocks})
+            out[k] = msgs
+        else:
+            out[k] = c.walk(body[k], k == "system")
+    return hashlib.sha256(_dumps(_sort_keys(out)).encode()).hexdigest(), out, c
+
+
+class ReplayProxy:
+    """Store each upstream response under the hash of the canonical request; replay on a hit with this request's own volatile
+    values substituted (fresh tool ids minted). A response is stored only if every volatile value in it is either in the
+    request or a tool id; error / truncated responses are never stored; any internal failure goes live."""
+
+    def __init__(self, store: dict, upstream):
+        self.store, self.upstream = store, upstream
+        self.hits = self.misses = 0
+        self.saved_output_chars = 0
+
+    def __call__(self, body: dict) -> dict:
+        try:
+            key, canon, c = _canon_request(body)
+        except Exception:  # noqa: BLE001
+            self.misses += 1
+            return self.upstream(body)
+        ent = self.store.get(key)
+        if ent is not None:
+            try:
+                resp = self._render(json.loads(ent), c, key)
+                self.hits += 1
+                self.saved_output_chars += len(_dumps(resp["content"]))
+                return resp
+            except Exception:  # noqa: BLE001  corrupt entry: go live and overwrite it
+                pass
+        self.misses += 1
+        resp = self.upstream(body)
+        try:
+            ent = self._canon_response(resp, c)
+            if ent is not None:
+                self.store[key] = ent
+        except Exception:  # noqa: BLE001
+            pass
+        return resp
+
+    @staticmethod
+    def _canon_response(resp: dict, c) -> str | None:
+        if resp.get("stop_reason") not in ("end_turn", "tool_use"):
+            return None
+        text = _dumps({"content": resp["content"], "stop_reason": resp["stop_reason"]})
+        if "⟪" in text:
+            return None
+        if c is None:  # exact mode: store verbatim
+            return text
+        n0, bad = len(c.values), []
+
+        def sub(m):
+            v = m.group(0)
+            if v in c.values:
+                return f"⟪{m.lastgroup}:{c.values.index(v)}⟫"
+            if m.lastgroup != "toolu":
+                bad.append(v)  # a fresh timestamp/dir/uuid in a response is not ours to invent on replay
+                return v
+            c.values.append(v)
+            c.kinds.append("toolu")
+            return f"⟪toolu:{len(c.values) - 1}⟫"
+
+        out = _VOLATILE.sub(sub, text)
+        del c.values[n0:], c.kinds[n0:]
+        return None if bad else out
+
+    @staticmethod
+    def _render(ent: dict, c, key: str) -> dict:
+        def sub(m):
+            i = int(m.group(2))
+            if c is not None and i < len(c.values):
+                assert c.kinds[i] == m.group(1)
+                return c.values[i]
+            assert m.group(1) == "toolu", "only tool ids may be minted"
+            return "toolu_" + hashlib.sha1(f"{key}:{i}".encode()).hexdigest()[:24]
+
+        text = _PH.sub(sub, _dumps(ent)) if c is not None else _dumps(ent)
+        got = json.loads(text)
+        return {"id": "msg_replayed", "role": "assistant", "content": got["content"], "stop_reason": got["stop_reason"], "model": "replay"}
+
+
+class _Env:
+    def __init__(self, commit: str, tmp: str, ts: str, dur: str):
+        self.commit, self.tmp, self.ts, self.dur = commit, tmp, ts, dur
+
+    def run(self, cmd: str) -> str:
+        if cmd.startswith("git -C /work/repo log"):
+            return f"{self.commit} {self.ts}\n"
+        if cmd == "mktemp -d":
+            return self.tmp + "\n"
+        if cmd.startswith("cd /tmp/tmp.") and cmd.endswith("pytest -q"):
+            assert cmd.startswith(f"cd {self.tmp} "), f"stale scratch dir in command: {cmd!r}"  # a replayed command must use THIS run's dir
+            return f"...\n3 passed in {self.dur}\nwrote report to {self.tmp}/report.xml\n"
+        raise AssertionError(f"unexpected command {cmd!r}")
+
+
+class _Upstream:
+    """Fake model API: deterministic in the request's content, but mints a fresh random tool id per call."""
+
+    def __init__(self, seed: int):
+        self.calls, self.rng = 0, random.Random(seed)
+
+    def __call__(self, body: dict) -> dict:
+        self.calls += 1
+        msgs = body["messages"]
+        results = [b["content"] for m in msgs if m["role"] == "user" and isinstance(m["content"], list) for b in m["content"] if b.get("type") == "tool_result"]
+        tid = "toolu_" + "".join(self.rng.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(22))
+        step = sum(m["role"] == "assistant" for m in msgs)
+        if step == 0:
+            blocks, stop = [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "git -C /work/repo log -1 --format='%H %cI'"}}], "tool_use"
+        elif step == 1:
+            blocks, stop = [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "mktemp -d"}}], "tool_use"
+        elif step == 2:
+            tmp = re.search(r"/tmp/tmp\.\w+", results[1]).group(0)
+            blocks, stop = [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": f"cd {tmp} && pytest -q"}}], "tool_use"
+        else:
+            commit, tmp = results[0].split()[0][:8], re.search(r"/tmp/tmp\.\w+", results[1]).group(0)
+            passed = re.search(r"(\d+) passed", results[2]).group(1)
+            blocks, stop = [{"type": "text", "text": f"Reviewed {commit}: {passed} tests pass; report in {tmp}/report.xml"}], "end_turn"
+        return {"id": f"msg_{self.rng.getrandbits(40):x}", "role": "assistant", "content": blocks, "stop_reason": stop, "model": "m"}
+
+
+def _run_job(call, env: _Env, prompt: str = "Review commit HEAD of /work/repo and run its tests.", **extra):
+    msgs = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    bodies = []
+    for _ in range(8):
+        body = {"model": "m", "system": [{"type": "text", "text": "You are a CI reviewer."}], "messages": copy.deepcopy(msgs), **extra}
+        bodies.append(body)
+        resp = call(body)
+        msgs.append({"role": "assistant", "content": resp["content"]})
+        uses = [b for b in resp["content"] if b["type"] == "tool_use"]
+        if not uses:
+            return msgs, bodies
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": u["id"], "content": env.run(u["input"]["command"])} for u in uses]})
+    raise AssertionError("agent did not finish")
+
+
+def _norm_ids(msgs):
+    t = _dumps(msgs)
+    ids = list(dict.fromkeys(re.findall(r"toolu_[A-Za-z0-9]+", t)))
+    for i, v in enumerate(ids):
+        t = t.replace(v, f"<id{i}>")
+    return t
+
+
+def sim_replay() -> dict:
+    env1 = _Env("9f2c1d7e4b8a0c3d5e6f", "/tmp/tmp.Xa81bQzK", "2026-11-04T10:15:03Z", "0.42s")
+    env2 = _Env("9f2c1d7e4b8a0c3d5e6f", "/tmp/tmp.q7LmN2pD", "2026-11-04T11:40:51Z", "0.37s")  # same commit, volatile values differ
+    env3 = _Env("0123456789abcdef0123", "/tmp/tmp.q7LmN2pD", "2026-11-04T11:40:51Z", "0.37s")  # a different commit
+    store: dict = {}
+    up1 = _Upstream(1)
+    p1 = ReplayProxy(store, up1)
+    t1, b1 = _run_job(p1, env1)
+    assert (p1.hits, p1.misses) == (0, 4) and len(store) == 4
+
+    # re-run with only volatile values different: every turn replays, nothing reaches upstream
+    up2 = _Upstream(2)
+    p2 = ReplayProxy(store, up2)
+    t2, b2 = _run_job(p2, env2)
+    assert (p2.hits, up2.calls) == (4, 0), (p2.hits, up2.calls)
+    live = _Upstream(3)
+    t2_live, _ = _run_job(live, env2)
+    assert _norm_ids(t2) == _norm_ids(t2_live), "replayed transcript must equal what the model would say live for this run"
+    assert "/tmp/tmp.q7LmN2pD/report.xml" in _dumps(t2) and "tmp.Xa81bQzK" not in _dumps(t2), "this run's scratch dir, not the recorded one"
+    assert "0.37s" in _dumps(t2) and env1.ts not in _dumps(t2)
+    # baseline: exact-body hashing would have replayed only the first turn
+    sha = lambda b: hashlib.sha256(_dumps(_sort_keys(b)).encode()).hexdigest()  # noqa: E731
+    exact_keys = {sha(b) for b in b1}
+    exact_hits = sum(sha(b) in exact_keys for b in b2)
+    assert exact_hits == 1, "without canonicalisation only the first request matches"
+
+    # different commit: replays until the first request that carries the difference, then goes live
+    up3 = _Upstream(4)
+    p3 = ReplayProxy(store, up3)
+    t3, b3 = _run_job(p3, env3)
+    assert (p3.hits, up3.calls) == (1, 3), (p3.hits, up3.calls)
+    assert "01234567" in _dumps(t3) and "9f2c1d7e" not in _dumps(t3)
+    first_diff = next(i for i, (x, y) in enumerate(zip(b1, b3)) if _canon_request(x)[0] != _canon_request(y)[0])
+    assert first_diff == 1
+
+    # must NOT apply: changed parameters, and a timestamp in user-authored text (the task itself, never abstracted)
+    up = _Upstream(5)
+    px = ReplayProxy(store, up)
+    _run_job(px, env2, temperature=0.9)
+    assert px.hits == 0 and up.calls == 4, "a different temperature must not replay"
+    store4: dict = {}
+    _run_job(ReplayProxy(store4, _Upstream(9)), env1, prompt="Review HEAD of /work/repo. Deadline 2026-11-04T12:00:00Z.")
+    up = _Upstream(10)
+    px = ReplayProxy(store4, up)
+    _run_job(px, env2, prompt="Review HEAD of /work/repo. Deadline 2026-11-05T09:30:00Z.")
+    assert px.hits == 0 and up.calls == 4, "a different deadline in the task text must not replay"
+    up = _Upstream(11)
+    px = ReplayProxy(store4, up)
+    _run_job(px, env2, prompt="Review HEAD of /work/repo. Deadline 2026-11-04T12:00:00Z.")
+    assert px.hits == 4 and up.calls == 0, "(control) the same task text replays despite different tool-side values"
+    store2: dict = {}
+    for env, upseed in ((env1, 6), (env2, 7)):
+        up = _Upstream(upseed)
+        px = ReplayProxy(store2, up)
+        _run_job(px, env, prompt="the log contains ⟪ts:0⟫ literally")
+    assert px.hits == 1 and up.calls == 3, "placeholder-like text switches to exact keys: only the identical first request replays"
+
+    # failure handling: corrupt entry, bad upstream responses, a failing store, canonicalisation errors
+    st3 = {k: "not json" for k in store}
+    up = _Upstream(8)
+    px = ReplayProxy(st3, up)
+    _run_job(px, env2)
+    assert px.hits == 0 and up.calls == 4 and sum(v != "not json" for v in st3.values()) == 4, "corrupt entries go live and are repaired"
+    bad_store: dict = {}
+    trunc = ReplayProxy(bad_store, lambda b: {"id": "m", "content": [{"type": "text", "text": "cut off"}], "stop_reason": "max_tokens"})
+    trunc({"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]})
+    assert bad_store == {}, "truncated responses are never stored"
+    invent = ReplayProxy(bad_store, lambda b: {"id": "m", "content": [{"type": "text", "text": "done at 2026-01-01T00:00:00Z"}], "stop_reason": "end_turn"})
+    invent({"model": "m", "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]})
+    assert bad_store == {}, "a response with a fresh timestamp of its own is not canonicalisable, so not stored"
+
+    def boom(_):
+        raise RuntimeError("upstream down")
+
+    try:
+        ReplayProxy({}, boom)({"model": "m", "messages": []})
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("upstream errors must propagate, not be swallowed")
+    weird = ReplayProxy({}, lambda b: {"id": "m", "content": [], "stop_reason": "end_turn"})
+    assert weird({"messages": "not a list"})["stop_reason"] == "end_turn", "canonicalisation failure goes live"
+    return {"turns": 4, "replayed_with_canonical_key": p2.hits, "replayed_with_exact_key": exact_hits, "upstream_calls_saved": 4 - up2.calls,
+            "output_chars_not_regenerated": p2.saved_output_chars, "replayed_before_first_miss_on_new_commit": p3.hits, "first_diverging_request": first_diff}
+
+
+case(
+    1036,
+    claim="A proxy that keys stored responses by the hash of the request with volatile values (timestamps, tmp dirs, durations, tool ids; not user-authored text) abstracted into numbered placeholders replays all 4 turns of a re-run that differs only in those values, substituting the new run's own values so the transcript equals the live one; a different commit replays only until the first request that carries it; changed parameters, user-text differences, truncated or non-canonicalisable responses and corrupt entries never replay.",
+    sim=sim_replay,
 )

@@ -535,9 +535,13 @@ def ser(v):
 
 
 def _norm_escapes(text):
-    if MARK in text:
-        return text  # the marker key already occurs: refuse, so the marker stays unambiguous
     return ser(jtree(text))
+
+
+def enc128(text):
+    if text.startswith(SIG) or MARK in text:
+        return RAW + text  # the marker (or an escape) is already in the input: escape it so the marker stays unambiguous
+    return guarded(text, _norm_escapes)
 
 
 def _norm128(v, encoded):
@@ -555,12 +559,14 @@ def _norm128(v, encoded):
 
 def oracle128(x, e):
     """x and e carry the same values; a string that is itself a JSON object/array may appear inline (wrapped in the marker)."""
+    if e.startswith(RAW):
+        return e[len(RAW):] == x and (x.startswith(SIG) or MARK in x)  # the escape is only legitimate where the marker is ambiguous
     try:
         a = jtree(x)
     except Exception:  # noqa: BLE001
         return e == x
     if MARK in x:
-        return e == x
+        return False
     try:
         b = jtree(e)
     except Exception:  # noqa: BLE001
@@ -585,7 +591,7 @@ case(
     128,
     claim="Redundant string escapes (\\uXXXX for printable characters, \\/) are written as the characters, and a string value that is itself a JSON object or array is inlined as structure inside {\"§json\": ...}; every value, number spelling, duplicate key and key order is preserved.",
     loses="the exact text of an inlined JSON string (its whitespace and escape spelling; only its parsed value survives), whitespace between tokens, and the spelling of \\uXXXX / \\/ escapes; \\r\\n escapes stay escaped because a raw newline cannot live inside a JSON string",
-    encode=lambda t: guarded(t, _norm_escapes),
+    encode=enc128,
     equivalent=oracle128,
     fixtures=[
         Fixture("MCP text wrapper around an issue (Go escapes)", MCP_WRAP, True),
@@ -595,11 +601,14 @@ case(
         Fixture("strings that only look like JSON", compact({"a": "{not json}", "b": "[1, 2", "c": "123", "d": "true", "e": " {\"k\": 1}"}), False),
         Fixture("not JSON", "plain log line with \\u003c in it\n", False),
         Fixture("the marker key already present", pretty({"§json": {"a": 1}, "s": "{\"a\": 1}"}), None),
+        Fixture("the marker only inside a string value", compact({"s": "see §json docs", "t": "{\"a\": 1}"}), None),
+        Fixture("text starting with the sigil", "§json is a note\n", None),
         Fixture("lone surrogate, U+2028, NUL", '{"a": "\\ud800", "b": "x\\u2028y", "c": "\\u0000", "d": "\\ud83d\\ude00 \\u00e9"}', None),
         Fixture("inlined JSON keeps duplicate keys and number lexemes", pretty({"s": '{"a": 1, "a": 2, "n": 1E5, "m": 1.0}'}), None),
         Fixture("embedded JSON string with leading space is left as a string", pretty({"s": ' {"a": 1}', "t": '{"b":"\\u003c"}'}), None),
     ],
     min_gain=0.15,
+    idempotent=False,  # encoded output contains the marker, so re-encoding escapes it (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -901,7 +910,7 @@ def _rewrite316(n):
 
 
 def _kv_enc(text):
-    if KV in text or not is_json(text):
+    if not is_json(text):
         return text
     root = lex_parse(text)
     new = _rewrite316(root)
@@ -919,7 +928,15 @@ def _unrewrite316(n):
     return ("o", [(k, _unrewrite316(v)) for k, v in n[1]])
 
 
+def enc316(text):
+    if text.startswith(SIG) or KV in text:
+        return RAW + text  # the marker is already in the input: escape it so a decoder cannot mistake it for ours
+    return guarded(text, _kv_enc)
+
+
 def dec316(text):
+    if text.startswith(RAW):
+        return text[len(RAW):]
     return lex_dump(_unrewrite316(lex_parse(text))) if is_json(text) else text
 
 
@@ -943,7 +960,7 @@ case(
     316,
     claim="A list of {Key,Value} (or key/value, name/value) objects with unique string keys becomes an object whose first member {\"§kv\":\"Key,Value\"} names the original fields; decoding rebuilds the identical list, and lists with duplicate keys, extra fields, mixed shapes or non-string keys are left as lists.",
     loses="whitespace between tokens (output is minified)",
-    encode=lambda t: guarded(t, _kv_enc),
+    encode=enc316,
     equivalent=json_codec_oracle(dec316),
     fixtures=[
         Fixture("aws ec2 describe-instances (pretty)", pretty(ec2_describe(5), 4), True),
@@ -957,6 +974,7 @@ case(
                                                                                 {"Key": "o", "Value": {"Tags": [{"Key": "in", "Value": "v"}, {"Key": "in2", "Value": "w"}]}},
                                                                                 {"Key": "e", "Value": []}], "Empty": []}), None),
         Fixture("entries with different field order", compact({"Tags": [{"Key": "a", "Value": "1"}, {"Value": "2", "Key": "b"}, {"Key": "c", "Value": "3"}]}), None),
+        Fixture("a real object whose first key is the marker", compact({"x": {"§kv": "Key,Value", "a": "b"}}), None),
         Fixture("non-string key and key equal to the marker", compact({"A": [{"Key": 1, "Value": "x"}, {"Key": 2, "Value": "y"}], "B": [{"Key": "§kv", "Value": "x"}, {"Key": "z", "Value": "y"}]}), None),
         Fixture("keys spelled differently but equal", compact({"T": [{"Key": "a", "Value": 1}, {"Key": "\\u0061", "Value": 2}]}).replace("\\\\u", "\\u"), None),
     ],
@@ -1697,38 +1715,46 @@ def _table_dec(text):
 
 enc37, dec37 = make_codec(TBL, _table_enc, _table_dec)
 
-KUBECTL = """NAME                                READY   STATUS             RESTARTS      AGE
-api-7d9f8b6c5-abcde                 1/1     Running            0             3d4h
-api-7d9f8b6c5-fghij                 1/1     Running            0             3d4h
-worker-5c6d7f8b9-xyz12              0/1     CrashLoopBackOff   12 (3m ago)   2h17m
-cron-nightly-28591440-qrstu         0/1     Completed          0             9h
-ingress-nginx-controller-6f8d9-k2   1/1     Running            2 (1d ago)    41d
-"""
-DOCKER_PS = """CONTAINER ID   IMAGE                    COMMAND                  CREATED          STATUS                     PORTS                  NAMES
-a1b2c3d4e5f6   nginx:1.25               "/docker-entrypoint.…"   2 hours ago      Up 2 hours                 0.0.0.0:80->80/tcp     web
-b2c3d4e5f6a1   postgres:16              "docker-entrypoint.s…"   2 hours ago      Up 2 hours                 5432/tcp               db
-c3d4e5f6a1b2   redis:7-alpine           "docker-entrypoint.s…"   3 days ago       Exited (0) 3 days ago                             cache
-d4e5f6a1b2c3   ghcr.io/acme/api:v2.1    "/app/server --port …"   About a minute   Up About a minute (healthy)  0.0.0.0:8080->8080/tcp   api
-"""
-PS_AUX = """USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
-root           1  0.0  0.1 168936 11824 ?        Ss   Oct28   0:03 /sbin/init splash
-root           2  0.0  0.0      0     0 ?        S    Oct28   0:00 [kthreadd]
-www-data    1042  1.2  2.4 812340 98432 ?        Sl   09:12   0:41 nginx: worker process
-postgres    2210 10.5 11.3 2203112 454012 ?      Ss   09:13   3:02 postgres: main checkpointer
-alice       4711  0.0  0.1  15432  5120 pts/0    R+   10:01   0:00 ps aux
-"""
-DF_H = """Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda1        50G   32G   16G  67% /
-tmpfs           3.9G     0  3.9G   0% /dev/shm
-/dev/sdb1       916G  312G  558G  36% /mnt/data
-overlay          50G   32G   16G  67% /var/lib/docker/overlay2/abc123/merged
-"""
-NOTES = """NAME     STATUS    NOTE
-alpha    ok
-beta     failed    disk full on node 3
-gamma    ok
-delta    pending   waiting for quota
-"""
+def tabular(rows, gap=3):
+    """kubectl / docker style: left-aligned columns, width = widest cell + gap, no trailing padding."""
+    n = max(map(len, rows))
+    w = [max(len(r[i]) if i < len(r) else 0 for r in rows) + gap for i in range(n)]
+    return "".join("".join(c.ljust(w[i]) for i, c in enumerate(r)).rstrip(" ") + "\n" for r in rows)
+
+
+_PODS = [("api-7d9f8b6c5-abcde", "1/1", "Running", "0", "3d4h"), ("api-7d9f8b6c5-fghij", "1/1", "Running", "0", "3d4h"),
+         ("worker-5c6d7f8b9-xyz12", "0/1", "CrashLoopBackOff", "12 (3m ago)", "2h17m"), ("cron-nightly-28591440-qrstu", "0/1", "Completed", "0", "9h"),
+         ("ingress-nginx-controller-6f8d9-k2", "1/1", "Running", "2 (1d ago)", "41d"), ("redis-0", "1/1", "Running", "0", "41d"),
+         ("redis-1", "1/1", "Running", "0", "41d"), ("migrate-20240601-zk9fp", "0/1", "Error", "0", "5d"),
+         ("web-6b7c8d9e5-mnop1", "1/1", "Running", "1 (2d ago)", "12d"), ("web-6b7c8d9e5-qrst2", "1/1", "Running", "0", "12d")]
+KUBECTL = tabular([("NAME", "READY", "STATUS", "RESTARTS", "AGE"), *_PODS])
+_CONT = [("a1b2c3d4e5f6", "nginx:1.25", '"/docker-entrypoint.…"', "2 hours ago", "Up 2 hours", "0.0.0.0:80->80/tcp", "web"),
+         ("b2c3d4e5f6a1", "postgres:16", '"docker-entrypoint.s…"', "2 hours ago", "Up 2 hours", "5432/tcp", "db"),
+         ("c3d4e5f6a1b2", "redis:7-alpine", '"docker-entrypoint.s…"', "3 days ago", "Exited (0) 3 days ago", "", "cache"),
+         ("d4e5f6a1b2c3", "ghcr.io/acme/api:v2.1", '"/app/server --port …"', "About a minute ago", "Up About a minute (healthy)", "0.0.0.0:8080->8080/tcp", "api"),
+         ("e5f6a1b2c3d4", "busybox", '"sleep 3600"', "5 minutes ago", "Exited (137) 2 minutes ago", "", "tmp")]
+DOCKER_PS = tabular([("CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "PORTS", "NAMES"), *_CONT])
+_PS = [("root", 1, 0.0, 0.1, 168936, 11824, "?", "Ss", "Oct28", "0:03", "/sbin/init splash"), ("root", 2, 0.0, 0.0, 0, 0, "?", "S", "Oct28", "0:00", "[kthreadd]"),
+       ("www-data", 1042, 1.2, 2.4, 812340, 98432, "?", "Sl", "09:12", "0:41", "nginx: worker process"),
+       ("postgres", 2210, 10.5, 11.3, 2203112, 454012, "?", "Ss", "09:13", "3:02", "postgres: main checkpointer"),
+       ("alice", 4711, 0.0, 0.1, 15432, 5120, "pts/0", "R+", "10:01", "0:00", "ps aux"), ("alice", 4690, 0.3, 0.2, 22100, 8192, "pts/0", "Ss", "10:00", "0:00", "-bash")]
+
+
+def ps_aux(rows, vsz_w=7, rss_w=6):
+    head = f"{'USER':<8} {'PID':>5} {'%CPU':>4} {'%MEM':>4} {'VSZ':>{vsz_w}} {'RSS':>{rss_w}} {'TTY':<8} {'STAT':<4} {'START':<5} {'TIME':>4} COMMAND"
+    return "\n".join([head] + [f"{u:<8} {p:>5} {c:>4} {m:>4} {v:>{vsz_w}} {r:>{rss_w}} {t:<8} {st:<4} {s:<5} {tm:>4} {cmd}"
+                              for u, p, c, m, v, r, t, st, s, tm, cmd in rows]) + "\n"
+
+
+PS_AUX = ps_aux(_PS)
+PS_AUX_OVERFLOW = ps_aux(_PS, vsz_w=6, rss_w=5)  # ps does not widen a column: big values push the rest of the row sideways
+_FS = [("/dev/sda1", "50G", "32G", "16G", "67%", "/"), ("tmpfs", "3.9G", "0", "3.9G", "0%", "/dev/shm"), ("/dev/sdb1", "916G", "312G", "558G", "36%", "/mnt/data"),
+       ("overlay", "50G", "32G", "16G", "67%", "/var/lib/docker/overlay2/abc123/merged"), ("/dev/sdc1", "2.0T", "1.1T", "0.9T", "55%", "/srv/backups"),
+       ("tmpfs", "780M", "1.2M", "779M", "1%", "/run/user/1000")]
+DF_H = "".join(f"{a:<14} {b:>5} {c:>5} {d:>5} {e:>4} {f}\n" for a, b, c, d, e, f in [("Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on"), *_FS])
+NOTES = tabular([("NAME", "STATUS", "NOTE")] + [(f"job-{i:02d}", st, nt) for i, (st, nt) in enumerate(
+    [("ok", ""), ("failed", "disk full on node 3"), ("ok", ""), ("pending", "waiting for quota"), ("ok", ""), ("failed", "timeout after 30s"),
+     ("ok", ""), ("ok", ""), ("pending", "queued"), ("ok", "")])])
 
 case(
     37,
@@ -1739,8 +1765,9 @@ case(
         Fixture("kubectl get pods", KUBECTL, True),
         Fixture("docker ps with empty PORTS cells", DOCKER_PS, True),
         Fixture("ps aux with right-aligned numbers", PS_AUX, True),
+        Fixture("ps aux where a number overflows its column", PS_AUX_OVERFLOW, False),
         Fixture("df -h", DF_H, True),
-        Fixture("last column empty on some rows", NOTES, True),
+        Fixture("last column empty on some rows (small table: header costs as much as it saves)", NOTES, None),
         Fixture("prose", "The quick brown fox jumps over the lazy dog.\nA second line, a little longer than the first one.\nShort.\n", False),
         Fixture("single column", "alpha\nbeta\ngamma\ndelta\n", False),
         Fixture("table with a tab", KUBECTL.replace("Running", "Run\ting", 1), False),
@@ -1823,7 +1850,8 @@ def minimal_md_tables(text):
         else:
             def trim(c):
                 c = c.strip(" \t")
-                return c + " " if len(c) - len(c.rstrip("\\")) % 2 else c  # "a\\" + "|" would read as an escaped pipe
+                odd = (len(c) - len(c.rstrip("\\"))) % 2  # "a\\" + "|" would read as an escaped pipe
+                return c + " " if odd else c
 
             fmt = lambda cells: "|" + "|".join(trim(c) for c in cells) + "|"  # noqa: E731
             out.append(fmt(head))
@@ -2011,8 +2039,682 @@ case(
         Fixture("upper and mixed case, run at EOF, glued neighbours", "DE AD BE EF 00 11 22 33\nzzaa bb cc dd ee ff gg\nAa Bb cC Dd eE Ff 1234\n0A 0B 0C 0D 0E 0F", None),
         Fixture("zero fill and a repeated-line star", "00000000  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|\n*\n00001000\n", None),
     ],
+    min_gain=0.05,
+    idempotent=False,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #323 Unwrap syntax-highlighter span soup in HTML code blocks
+
+_ATTR = r"""(?:[^<>"']|"[^"<]*"|'[^'<]*')"""  # one attribute character, or a quoted value (which may hold '>' but never '<')
+_TAG = re.compile(rf"</?[A-Za-z][A-Za-z0-9-]*(?:\s{_ATTR}*)?>")
+
+
+def _open(name, cls=None):
+    """Regex source of an opening <name ...> tag, optionally one whose class attribute lists the class token cls."""
+    want = rf'(?:\s{_ATTR}*?)??\sclass="[^"<]*(?<![^\s"])(?:{cls})(?![^\s"])[^"<]*"' if cls else r""
+    return rf"<{name}(?![A-Za-z0-9-]){want}(?:\s{_ATTR}*)?>"
+
+
+_PRE = re.compile(rf"({_open('pre')})(.*?)(</pre\s*>)", re.S | re.I)
+_CODE_WRAP = re.compile(rf"(\s*{_open('code')})(.*)(</code\s*>\s*)\Z", re.S | re.I)
+_LINENO_TD = re.compile(rf"{_open('td', 'linenos|hljs-ln-numbers')}.*?</td\s*>", re.S | re.I)
+_LINENO_SPAN = re.compile(rf"{_open('span', 'linenos?')}.*?</span\s*>", re.S | re.I)
+
+
+def flatten_highlighted(text):
+    text = _LINENO_TD.sub("", text)
+
+    def fix(m):
+        open_, inner, close = m.groups()
+        inner = _LINENO_SPAN.sub("", inner)
+        names = {re.match(r"</?([A-Za-z0-9-]+)", t.group()).group(1).lower() for t in _TAG.finditer(inner)}
+        if not names or names - {"span", "code"}:
+            return m.group(0)  # no markup to drop, or markup that carries meaning (links, images, breaks): keep the block as it is
+        w = _CODE_WRAP.match(inner)
+        pre, body, post = (w.group(1), w.group(2), w.group(3)) if w else ("", inner, "")
+        flat = _TAG.sub("", body)
+        if "<" in flat:
+            return m.group(0)  # a '<' that is not one of the tags we removed: unknown markup, keep the block
+        return open_ + pre + flat + post + close
+
+    return _PRE.sub(fix, text)
+
+
+class _CodeView(HTMLParser):
+    """Oracle view: text of every <pre> element (entities decoded) and of everything outside <pre>, ignoring line-number
+    cells and spans. Uses html.parser's own tokenizer, not the regexes the encoder uses."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.depth, self.pres, self.outside, self.skip = 0, [], [], None
+
+    def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
+        if self.skip:
+            self.skip[1] += tag == self.skip[0]
+        elif (tag == "td" and ("linenos" in classes or "hljs-ln-numbers" in classes)) or (tag == "span" and ("linenos" in classes or "lineno" in classes)):
+            self.skip = [tag, 1]
+        elif tag == "pre":
+            if self.depth == 0:
+                self.pres.append([])
+            self.depth += 1
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            if tag == self.skip[0]:
+                self.skip[1] -= 1
+                if self.skip[1] == 0:
+                    self.skip = None
+        elif tag == "pre" and self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data):
+        if not self.skip:
+            (self.pres[-1] if self.depth else self.outside).append(data)
+
+
+def code_view(html_text):
+    v = _CodeView()
+    v.feed(html_text)
+    v.close()
+    return ["".join(p) for p in v.pres], "".join(v.outside)
+
+
+_PYTOK = re.compile(r"""(?P<c>\#[^\n]*)|(?P<s>"[^"\n]*"|'[^'\n]*')|(?P<k>\b(?:def|return|import|from|for|in|if|else|class|raise|with|as|None|True|False)\b)"""
+                    r"""|(?P<n>\b\d+(?:\.\d+)?\b)|(?P<i>[A-Za-z_]\w*)|(?P<o>[-+*/=<>!%&|.:,()\[\]{}]+)|(?P<w>[ \t]+)|(?P<nl>\n)|(?P<x>.)""")
+_CLASSES = {
+    "pygments": {"c": "c1", "s": "s2", "k": "k", "n": "mi", "i": "n", "o": "o", "x": "err"},
+    "hljs": {"c": "hljs-comment", "s": "hljs-string", "k": "hljs-keyword", "n": "hljs-number", "o": "hljs-operator"},
+    "prism": {"c": "token comment", "s": "token string", "k": "token keyword", "n": "token number", "o": "token operator", "i": "token function"},
+}
+
+
+def highlight(code, style):
+    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")  # noqa: E731
+    colors = {"c": "#6A737D", "s": "#9ECBFF", "k": "#F97583", "n": "#79B8FF", "i": "#E1E4E8", "o": "#F97583", "w": "#E1E4E8", "x": "#E1E4E8"}
+    out = []
+    for m in _PYTOK.finditer(code):
+        kind, tok = m.lastgroup, m.group()
+        if style == "shiki" and kind != "nl":
+            out.append(f'<span style="color:{colors[kind]}">{esc(tok)}</span>')
+        elif style != "shiki" and kind in _CLASSES[style]:
+            out.append(f'<span class="{_CLASSES[style][kind]}">{esc(tok)}</span>')
+        else:
+            out.append(esc(tok))
+    return "".join(out)
+
+
+SAMPLE = '''import json
+from pathlib import Path
+
+
+def load(path, strict=False):
+    # read the config, fail on unknown keys when strict
+    data = json.loads(Path(path).read_text())
+    if strict and "extra" in data:
+        raise ValueError("unknown key: extra <" + str(len(data)) + "> & more")
+    return {"name": data.get("name", 'anon'), "retries": 3}
+'''
+INTRO = '<html><body><h1>Loading config</h1>\n<p>Call <code>load()</code> with a path; see <a href="/api#load">the API page</a>.</p>\n'
+OUTRO = "\n<p>That is all &mdash; it returns a dict.</p>\n</body></html>\n"
+PYG = (INTRO + '<div class="highlight"><pre><span></span>' + highlight(SAMPLE, "pygments") + "</pre></div>" + OUTRO)
+HLJS = INTRO + '<pre><code class="hljs language-python">' + highlight(SAMPLE, "hljs") + "</code></pre>" + OUTRO
+PRISM = INTRO + '<pre class="language-python"><code class="language-python">' + highlight(SAMPLE, "prism") + "</code></pre>" + OUTRO
+SHIKI = (INTRO + '<pre class="shiki github-dark" style="background-color:#24292e;color:#e1e4e8" tabindex="0"><code>'
+         + "\n".join(f'<span class="line">{highlight(ln, "shiki")}</span>' for ln in SAMPLE.rstrip("\n").split("\n")) + "</code></pre>" + OUTRO)
+_NUMS = "\n".join(f'<span class="normal">{i:2d}</span>' for i in range(1, SAMPLE.count("\n") + 1))
+PYG_TABLE = (INTRO + '<div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre>' + _NUMS
+             + '</pre></div></td><td class="code"><div class="highlight"><pre><span></span>' + highlight(SAMPLE, "pygments")
+             + "</pre></div>\n</td></tr></table></div>" + OUTRO)
+PYG_INLINE_NUMS = (INTRO + '<div class="highlight"><pre><span></span>' + "".join(
+    f'<span class="linenos">{i:2d} </span>{highlight(ln, "pygments")}\n' for i, ln in enumerate(SAMPLE.rstrip("\n").split("\n"), 1)) + "</pre></div>" + OUTRO)
+
+case(
+    323,
+    claim="Inside <pre> blocks whose only markup is <span> and <code>, the tags are removed (entities left as written) and line-number cells and spans are dropped; paragraphs, links, other markup and blocks with links, images or breaks are untouched.",
+    loses="the class and style attributes of the highlighter spans, and line numbers",
+    encode=lambda t: guarded(t, flatten_highlighted),
+    equivalent=lambda x, e: code_view(x) == code_view(e),
+    fixtures=[
+        Fixture("Pygments", PYG, True),
+        Fixture("highlight.js", HLJS, True),
+        Fixture("Prism", PRISM, True),
+        Fixture("Shiki with per-line spans", SHIKI, True),
+        Fixture("Pygments table with a line-number column", PYG_TABLE, True),
+        Fixture("Pygments with inline line numbers", PYG_INLINE_NUMS, True),
+        Fixture("page without code", INTRO + "<p>Nothing to see &amp; nothing to flatten.</p>\n</body></html>\n", False),
+        Fixture("pre with plain text only", "<pre>$ make test\nok 12 tests\n</pre>\n", False),
+        Fixture("pre with a link", '<pre>see <a href="/docs/x">the docs</a> and <span class="k">def</span> f()\n</pre>\n', False),
+        Fixture("pre with a line break tag", "<pre><span>a</span><br><span>b</span></pre>\n", False),
+        Fixture("unclosed pre (truncated page)", PYG[: len(PYG) // 2], None),
+        Fixture("raw < and a > inside an attribute", '<pre><span class="k">a</span> < <span title="x>y">b</span></pre>\n<pre><span title="a>b">x</span> y</pre>\n', None),
+        Fixture("upper-case tags and entity soup", '<PRE><SPAN CLASS="k">&lt;div&gt;</SPAN> &amp;&amp; <SPAN CLASS="s">&quot;a&#x27;b&quot;</SPAN> &#8594; &nbsp;x</PRE>\n', None),
+        Fixture("two blocks and text between", PYG + PRISM, True),
+    ],
+    min_gain=0.3,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #325 Decode base64 text content fields in API JSON
+
+B64ENC = "decoded-from-base64/"
+_SECRET_NAME = re.compile(r"(^|/)(\.env(\..*)?|id_[a-z0-9]+|.*\.(pem|key|p12|pfx|jks|keystore)|\.npmrc|\.netrc|credentials|secrets?(\..*)?)$", re.I)
+_SECRET_BODY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|^[A-Z0-9_]*(SECRET|TOKEN|PASSWORD|API_?KEY|PASSWD)[A-Z0-9_]*\s*[=:]", re.M | re.I)
+
+
+def _wrap60(b64, width, nl):
+    if width == 0:
+        return b64 + ("\n" if nl else "")
+    return "\n".join(b64[i:i + width] for i in range(0, len(b64), width)) + ("\n" if nl else "")
+
+
+def _b64_shape(val):
+    """(width, trailing newline) if val is canonical base64 as GitHub writes it (fixed-width lines), else None."""
+    nl = val.endswith("\n")
+    lines = val[:-1].split("\n") if nl else val.split("\n")
+    width = len(lines[0]) if len(lines) > 1 else 0
+    return (width, nl) if lines and all(lines) else None
+
+
+def _decode_obj(pairs):
+    """New pairs for one object node, or None if it is not a decodable GitHub contents-style object."""
+    keys = {}
+    for k, v in pairs:
+        keys.setdefault(json.loads(k), []).append(v)
+    enc, content = keys.get("encoding", []), keys.get("content", [])
+    if len(enc) != 1 or len(content) != 1 or enc[0] != ("l", '"base64"') or content[0][0] != "l" or content[0][1][:1] != '"':
+        return None
+    lex = content[0][1]
+    val = json.loads(lex)
+    shape = _b64_shape(val)
+    if shape is None:
+        return None
+    width, nl = shape
+    try:
+        raw = base64.b64decode(val.replace("\n", ""), validate=True)
+        text = raw.decode("utf-8")  # strict: invalid UTF-8 raises
+    except ValueError:
+        return None
+    if _wrap60(base64.b64encode(raw).decode(), width, nl) != val or json.dumps(val) != lex:
+        return None  # not byte-for-byte what the decoder will rebuild
+    if "\x00" in text or re.search("[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+        return None  # binary in disguise
+    names = [json.loads(v[1]) for k, v in pairs if json.loads(k) in ("name", "path") and v[0] == "l" and v[1][:1] == '"']
+    if any(_SECRET_NAME.search(n) for n in names) or _SECRET_BODY.search(text):
+        return None  # secrets stay opaque
+    return [(k, ("l", ser_str(text)) if json.loads(k) == "content" else ("l", json.dumps(f"{B64ENC}{width}/{int(nl)}")) if json.loads(k) == "encoding" else v) for k, v in pairs]
+
+
+def _walk325(n, changed):
+    if n[0] == "l":
+        return n
+    if n[0] == "a":
+        return ("a", [_walk325(c, changed) for c in n[1]])
+    if any(json.loads(k) == "kind" and v[0] == "l" and v[1] in ('"Secret"', '"SecretList"') for k, v in n[1]):
+        return n  # a Kubernetes Secret (or list of them): nothing inside is touched
+    new = _decode_obj(n[1])
+    if new is not None:
+        changed.append(1)
+        return ("o", new)
+    return ("o", [(k, _walk325(v, changed)) for k, v in n[1]])
+
+
+def _b64_enc(text):
+    if not is_json(text):
+        return text
+    changed: list[int] = []
+    new = _walk325(lex_parse(text), changed)
+    return lex_dump(new) if changed else text
+
+
+def _unwalk325(n):
+    if n[0] == "l":
+        return n
+    if n[0] == "a":
+        return ("a", [_unwalk325(c) for c in n[1]])
+    enc = [v for k, v in n[1] if json.loads(k) == "encoding"]
+    if len(enc) == 1 and enc[0][0] == "l" and enc[0][1].startswith('"' + B64ENC):
+        width, nl = json.loads(enc[0][1])[len(B64ENC):].split("/")
+        out = []
+        for k, v in n[1]:
+            if json.loads(k) == "content":
+                v = ("l", json.dumps(_wrap60(base64.b64encode(json.loads(v[1]).encode("utf-8")).decode(), int(width), nl == "1")))
+            elif json.loads(k) == "encoding":
+                v = ("l", '"base64"')
+            out.append((k, v))
+        return ("o", out)
+    return ("o", [(k, _unwalk325(v)) for k, v in n[1]])
+
+
+def enc325(text):
+    if text.startswith(SIG) or B64ENC in text:
+        return RAW + text  # the marker is already in the input: escape it so a decoder cannot mistake it for ours
+    return guarded(text, _b64_enc)
+
+
+def dec325(text):
+    if text.startswith(RAW):
+        return text[len(RAW):]
+    return lex_dump(_unwalk325(lex_parse(text))) if is_json(text) else text
+
+
+_APP = '''"""Small CLI that prints a greeting."""
+import argparse
+import sys
+
+GREETING = "Hello, {name}! — welcome"
+
+
+def build_parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("name", nargs="?", default="world")
+    p.add_argument("--shout", action="store_true", help="upper-case the greeting")
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    msg = GREETING.format(name=args.name)
+    print(msg.upper() if args.shout else msg)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def contents_api(path, raw, width=60, nl=True, **extra):
+    b64 = base64.b64encode(raw).decode()
+    return {"name": path.rsplit("/", 1)[-1], "path": path, "sha": "3d21ec53a331a6f037a91c368710b99387d012c1", "size": len(raw),
+            "url": f"https://api.github.com/repos/acme/widgets/contents/{path}?ref=main", "type": "file",
+            "content": _wrap60(b64, width, nl), "encoding": "base64", **extra}
+
+
+GH_CONTENTS = pretty(contents_api("src/app.py", _APP.encode()))
+GH_CONTENTS_MIN = compact(contents_api("src/app.py", _APP.encode()))
+K8S_SECRET = pretty({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "db", "namespace": "prod"}, "type": "Opaque",
+                     "data": {"password": base64.b64encode(b"s3cr3t-pass").decode(), "username": base64.b64encode(b"admin").decode(),
+                              "tls.crt": base64.b64encode(b"-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n").decode()}})
+SECRET_WITH_BLOB = pretty({"kind": "Secret", "data": {"a": "YQ=="}, "content": base64.b64encode(b"hello world, plain text").decode(), "encoding": "base64"})
+
+case(
+    325,
+    claim="In objects that have a \"content\" string and \"encoding\": \"base64\" (GitHub contents API), canonical base64 that decodes to valid UTF-8 without control characters or NULs is replaced by the text (JSON-escaped) and the encoding field records the line width and trailing newline; decoding rebuilds the identical base64, and Kubernetes Secrets, secret-looking files, binaries and non-canonical base64 are left alone.",
+    loses="whitespace between JSON tokens (output is minified)",
+    encode=enc325,
+    equivalent=json_codec_oracle(dec325),
+    fixtures=[
+        Fixture("gh api contents of a Python file (pretty)", GH_CONTENTS, True),
+        Fixture("same, minified", GH_CONTENTS_MIN, True),
+        Fixture("two files in a list, one binary", pretty([contents_api("src/app.py", _APP.encode()), contents_api("img/logo.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(40)))]), True),
+        Fixture("kubectl get secret -o json", K8S_SECRET, False),
+        Fixture("contents-style blob inside a Secret", SECRET_WITH_BLOB, False),
+        Fixture(".env file via the contents API", compact(contents_api(".env", b"API_KEY=abc123\nDEBUG=1\n" * 8)), False),
+        Fixture("private key file via the contents API", compact(contents_api("deploy/id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"b3BlbnNzaC1rZXktdjEAAAAA" * 8 + b"\n-----END OPENSSH PRIVATE KEY-----\n")), False),
+        Fixture("binary content (NUL bytes)", compact(contents_api("data.bin", bytes(range(0, 90)))), False),
+        Fixture("invalid UTF-8 (latin-1 text)", compact(contents_api("legacy.txt", ("café résumé naïve " * 12).encode("latin-1"))), False),
+        Fixture("base64 that is not canonical (no padding, odd wrap)", compact({"content": base64.b64encode(b"hello world, plain text!!").decode().rstrip("=") + "\n", "encoding": "base64"}), False),
+        Fixture("not JSON", "content: aGVsbG8=\nencoding: base64\n", False),
+        Fixture("single-line base64, no trailing newline, CRLF and unicode text", compact(contents_api("notes.txt", ("line one\r\nline two — 日本語 \U0001f600\r\n" * 6).encode(), width=0, nl=False)), None),
+        Fixture("76-column base64 (python base64.encodebytes)", compact(contents_api("a.txt", ("The quick brown fox jumps over the lazy dog. " * 12).encode(), width=76)), True),
+        Fixture("empty file", compact(contents_api("empty.txt", b"")), None),
+        Fixture("duplicate content key", '{"content":"aGVsbG8gd29ybGQ=\\n","content":"x","encoding":"base64"}', None),
+        Fixture("the encoder's own marker in the input", compact({"content": "hello", "encoding": B64ENC + "60/1"}), None),
+    ],
     min_gain=0.1,
     idempotent=False,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #407 Hoist constant and default-index columns from CSV text tables
+
+HOISTC = "§csvhoist "
+
+
+def parse_csv(text):
+    """RFC 4180 records as [(raw cells, line ending)], or None if the text is not clean CSV (stray quotes, unterminated)."""
+    recs, i, n = [], 0, len(text)
+    while i < n:
+        cells = []
+        while True:
+            if i < n and text[i] == '"':
+                j = i + 1
+                while True:
+                    k = text.find('"', j)
+                    if k < 0:
+                        return None
+                    if text[k + 1:k + 2] == '"':
+                        j = k + 2
+                        continue
+                    break
+                end = k + 1
+                if end < n and text[end] not in ",\r\n" or (text[end:end + 1] == "\r" and text[end + 1:end + 2] != "\n"):
+                    return None
+            else:
+                end = i
+                while end < n and text[end] != "," and text[end] != "\n" and not (text[end] == "\r" and text[end + 1:end + 2] == "\n"):
+                    end += 1
+            cells.append(text[i:end])
+            i = end
+            if i < n and text[i] == ",":
+                i += 1
+                continue
+            break
+        eol = "\r\n" if text.startswith("\r\n", i) else "\n" if text[i:i + 1] == "\n" else ""
+        i += len(eol)
+        recs.append((cells, eol))
+    return recs
+
+
+def _csv_text(recs):
+    return "".join(",".join(c) + e for c, e in recs)
+
+
+def _csv_enc(text):
+    recs = parse_csv(text)
+    if recs is None or len(recs) < 4 or _csv_text(recs) != text:
+        return text
+    width = len(recs[0][0])
+    if width < 2 or any(len(c) != width for c, _e in recs):
+        return text
+    head, rows = recs[0][0], recs[1:]
+    entries, drop = [], set()
+    for j in range(width):
+        col = [r[0][j] for r in rows]
+        if head[j] in ("", "Unnamed: 0") and all(c == str(i) for i, c in enumerate(col)):
+            entries.append([j, head[j], None])  # pandas' default RangeIndex written by to_csv
+            drop.add(j)
+        elif len(set(col)) == 1:
+            entries.append([j, head[j], col[0]])
+            drop.add(j)
+    if not entries or len(drop) == width:
+        return text
+    kept = [(([c for j, c in enumerate(cells) if j not in drop]), eol) for cells, eol in recs]
+    out = HOISTC + json.dumps(entries, ensure_ascii=False, separators=(",", ":")) + "\n" + _csv_text(kept)
+    return out if _csv_dec(out) == text else text  # exactness guard
+
+
+def _csv_dec(text):
+    head, _, body = text.partition("\n")
+    entries = json.loads(head[len(HOISTC):])
+    recs = parse_csv(body)
+    out = []
+    for r, (cells, eol) in enumerate(recs):
+        cells, full = list(cells), []
+        for p in range(len(cells) + len(entries)):
+            ent = next((e for e in entries if e[0] == p), None)
+            if ent is None:
+                full.append(cells.pop(0))
+            else:
+                full.append(ent[1] if r == 0 else str(r - 1) if ent[2] is None else ent[2])
+        out.append((full, eol))
+    return _csv_text(out)
+
+
+enc407, dec407 = make_codec(HOISTC, _csv_enc, _csv_dec)
+
+
+def df_csv(n, index=True, eol="\n"):
+    cols = ["run_id", "model", "lr", "epochs", "region", "env", "schema", "loss", "acc", "note"]
+    lines = [(["" if index else None] if index else []) + cols]
+    rnd = random.Random(407)
+    for i in range(n):
+        row = [f"r{1000 + i * 7}", ["resnet", "vit", "bert"][i % 3], f"{rnd.choice([0.001, 0.003, 0.01])}", str(10 * (1 + i % 3)), "us-east-1", "prod", "v3",
+               f"{rnd.random():.4f}", f"{rnd.random():.3f}", rnd.choice(["", "ok", '"warm, start"', '"say ""hi"""'])]
+        lines.append(([str(i)] if index else []) + row)
+    return "".join(",".join(r) + eol for r in lines)
+
+
+case(
+    407,
+    claim="CSV columns whose cell text is identical in every row, and pandas' unnamed 0..N-1 index column, are listed once in a header line (position, raw header cell, raw value) and removed from the rows; decoding re-inserts them, restoring the original bytes including quoting and line endings.",
+    encode=enc407,
+    decode=dec407,
+    fixtures=[
+        Fixture("df.to_csv() with index and 3 constant columns", df_csv(16), True),
+        Fixture("mlflow-style CSV without an index", df_csv(16, index=False), True),
+        Fixture("CRLF CSV", df_csv(14, eol="\r\n"), True),
+        Fixture("no constant column, no index", "a,b,c\n1,x,3\n2,y,4\n3,z,5\n4,w,6\n", False),
+        Fixture("index column that does not start at 0", "".join(f"{i + 1},v{i},{i * 3}\n" for i in range(8)).join(["i,a,b\n", ""]), False),
+        Fixture("quoted 0 is not the default index", ',a\n"0",x\n"1",y\n"2",z\n"3",w\n', False),
+        Fixture("ragged rows", "a,b,c\n1,2\n3,4,5\n6,7,8\n9,9,9\n", False),
+        Fixture("only two data rows", "a,b,c\n1,1,x\n1,1,y\n", False),
+        Fixture("prose with commas", "Well, it works, mostly.\nHowever, not always, as seen.\nSo, test, test, test.\nOk, done, here, now.\n", False),
+        Fixture("every column constant", "a,b\n1,2\n1,2\n1,2\n1,2\n", None),
+        Fixture("empty-string constant column and trailing comma", "a,b,c,\n1,,x,\n2,,y,\n3,,z,\n4,,w,\n", None),
+        Fixture("multi-line quoted cells, same value quoted two ways", 'k,v,s\n1,"a\nb",x\n2,"a\nb",x\n3,a,x\n4,"a\nb",x\n', None),
+        Fixture("unterminated quote (truncated CSV)", df_csv(8)[:-9] + '"cut', None),
+        Fixture("text that starts like encoder output", '§csvhoist [[0,"a","1"]]\nb\n1\n2\n3\n', None),
+        Fixture("no final newline", df_csv(12).rstrip("\n"), True),
+    ],
+    min_gain=0.05,
+    idempotent=False,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #408 Strip column-uniform trailing zeros from printed floats
+
+_FLOAT = re.compile(r"-?[0-9]+\.[0-9]+\Z")
+
+
+def strip_uniform_zeros(text):
+    lines = text.split("\n")
+    cols: dict[int, list[tuple[int, int, str]]] = {}
+    for li, ln in enumerate(lines):
+        for m in re.finditer(r"\S+", ln):
+            if _FLOAT.match(m.group()):
+                cols.setdefault(m.end(), []).append((li, m.start(), m.group()))  # keyed by end offset: right-aligned columns
+    edits: dict[int, list[tuple[int, int, str]]] = {}
+    for end, items in cols.items():
+        if len(items) < 3 or len({len(t.split(".")[1]) for _l, _s, t in items}) != 1 or len(items[0][2].split(".")[1]) < 2:
+            continue  # need a clearly uniform fixed-decimals column, not a scatter of unrelated floats
+        for li, s, t in items:
+            new = t.rstrip("0").rstrip(".")
+            if new != t:
+                edits.setdefault(li, []).append((s, end, new))
+    for li, es in edits.items():
+        for s, e, new in sorted(es, reverse=True):
+            lines[li] = lines[li][:s] + new + lines[li][e:]
+    return "\n".join(lines)
+
+
+def oracle408(x, e):
+    """Same lines, same whitespace between tokens, and each differing token is a float with zeros cut off its end."""
+    a, b = x.split("\n"), e.split("\n")
+    if len(a) != len(b):
+        return False
+    for la, lb in zip(a, b):
+        pa, pb = re.split(r"(\s+)", la), re.split(r"(\s+)", lb)
+        if len(pa) != len(pb):
+            return False
+        for ta, tb in zip(pa, pb):
+            if ta == tb:
+                continue
+            if not tb or not ta.startswith(tb) or not set(ta[len(tb):]) <= set("0."):
+                return False
+            try:
+                fa, fb = float(ta), float(tb)
+            except ValueError:
+                return False
+            if fa != fb or str(fa)[0] != str(fb)[0] and fa == 0:
+                return False
+    return True
+
+
+def describe(cols, rows):
+    """pandas DataFrame.describe() layout: index left-aligned, every cell of a column printed with the same decimals."""
+    cells = [[f"{v:.6f}" for v in col] for col in cols]
+    w = [max(len(c) for c in col) + 2 for col in cells]
+    names = ["count", "mean", "std", "min", "25%", "50%", "75%", "max"]
+    out = [" " * 5 + "".join(n.rjust(w[i]) for i, n in enumerate(rows))]
+    out += [f"{names[r]:<5}" + "".join(cells[i][r].rjust(w[i]) for i in range(len(cells))) for r in range(len(names))]
+    return "\n".join(out) + "\n"
+
+
+DESCRIBE = describe([[200.0, 0.512345, 0.288675, 0.0, 0.25, 0.5, 0.75, 1.0], [200.0, 15.5, 4.125, 1.0, 12.0, 15.5, 19.0, 25.0],
+                     [200.0, -0.04, 1.0, -3.2, -0.7, -0.05, 0.62, 2.9], [200.0, 1000.0, 250.5, 500.0, 800.0, 1000.0, 1200.0, 1500.0]], ["a", "b", "c", "d"])
+CLASSREP = """              precision    recall  f1-score   support
+
+           0       0.50      1.00      0.67         1
+           1       0.00      0.00      0.00         1
+           2       1.00      0.50      0.67         2
+           3       0.75      0.75      0.75         4
+
+    accuracy                           0.62         8
+   macro avg       0.56      0.56      0.52         8
+weighted avg       0.66      0.62      0.60         8
+"""
+FRAME = """   price  qty  total
+0  10.50    2  21.00
+1   3.00   10  30.00
+2  99.90    1  99.90
+3   7.25    4  29.00
+"""
+
+case(
+    408,
+    claim="In a printed table, a right-aligned column whose cells all carry the same number of decimals (pandas describe(), sklearn reports, DataFrame prints) has trailing zeros cut from each cell; every cell still parses to the same float, and every other character, including the whitespace between tokens, is unchanged.",
+    loses="the fixed decimal width of the column (200.000000 becomes 200, 0.50 becomes 0.5) and the vertical alignment of the table",
+    encode=lambda t: guarded(t, strip_uniform_zeros),
+    equivalent=oracle408,
+    fixtures=[
+        Fixture("pandas describe()", DESCRIBE, True),
+        Fixture("sklearn classification_report (two decimals: only a few percent)", CLASSREP, None),
+        Fixture("DataFrame print with 2-decimal columns", FRAME * 3, True),
+        Fixture("integer table", "   a  b\n0  1  2\n1  3  4\n2  5  6\n3  7  8\n", False),
+        Fixture("columns with mixed decimals", "   x\n0  1.5\n1  2.25\n2  3.125\n3  4.5\n", False),
+        Fixture("prose with a few floats", "The run took 12.500 seconds, then 3.140 more.\nLoss fell to 0.100 and 0.250 later.\nDone at 99.000 percent.\n", False),
+        Fixture("floats with no trailing zero", "  a     b\n0 0.51  0.12\n1 0.34  0.56\n2 0.78  0.91\n3 0.23  0.45\n", False),
+        Fixture("exponents, NaN, inf, negative zero", "        a         b\nx   1.500000  nan\ny  -0.000000  1.5e+03\nz   2.000000  inf\nw   0.250000  -2.500000\n", None),
+        Fixture("left-aligned version-like column is not right-aligned", "name   ver\nalpha  1.10\nbeta   22.10\ngamma  3.10\ndelta  4.10\n", None),
+        Fixture("no final newline, CRLF", DESCRIBE.replace("\n", "\r\n").rstrip("\r\n"), True),
+        Fixture("tokens with units are not floats", "  t\n0  1.50s\n1  2.50s\n2  3.00s\n3  4.00s\n", False),
+    ],
+    min_gain=0.1,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #412 ASCII +---+ grid tables to TSV (Spark show(), mysql, beeline)
+
+_BORDER = re.compile(r"\+(?:-+\+)+\Z")
+
+
+def _grid_at(lines, i):
+    """(number of lines, rows of cells) for a clean +---+ grid starting at lines[i], else None."""
+    b = lines[i]
+    if not _BORDER.match(b):
+        return None
+    cuts = [k for k, c in enumerate(b) if c == "+"]
+
+    def cells(ln):
+        if len(ln) != len(b) or any(ln[k] != "|" for k in cuts):
+            return None
+        return [ln[cuts[j] + 1:cuts[j + 1]] for j in range(len(cuts) - 1)]
+
+    if i + 2 >= len(lines) or cells(lines[i + 1]) is None or lines[i + 2] != b:
+        return None
+    rows, k = [cells(lines[i + 1])], i + 3
+    while k < len(lines) and cells(lines[k]) is not None:
+        rows.append(cells(lines[k]))
+        k += 1
+    if k >= len(lines) or lines[k] != b:
+        return None
+    return k + 1 - i, rows
+
+
+def grid_to_tsv(text):
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        g = _grid_at(lines, i)
+        if g is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        n, rows = g
+        cells = [[c.strip(" ") for c in r] for r in rows]
+        if any("\t" in c for r in cells for c in r):
+            out.extend(lines[i:i + n])  # a tab inside a cell would be ambiguous in TSV: keep this grid as it is
+        else:
+            out.extend("\t".join(r) for r in cells)
+        i += n
+    return "\n".join(out)
+
+
+def grid_oracle(x, e):
+    """Independent oracle: find grids with one regex built from the border's column widths, then check that the encoded
+    text holds, line for line, the same text and each grid as its trimmed cells joined by tabs."""
+    xs, el = x.split("\n"), e.split("\n")
+    at, pos, i = 0, 0, 0
+    while i < len(xs):
+        got = None
+        if _BORDER.match(xs[i]):
+            ws = [len(s) for s in xs[i][1:-1].split("+")]
+            row = r"\|" + r"\|".join(rf"([^\n]{{{w}}})" for w in ws) + r"\|"
+            border = re.escape(xs[i])
+            pat = re.compile(rf"{border}\n{row}\n{border}\n(?:{row}\n)*{border}(?:\n|\Z)")
+            m = pat.match("\n".join(xs[i:]) + "\n")
+            if m:
+                block = m.group(0).rstrip("\n").split("\n")
+                rows = [[c.strip(" ") for c in re.fullmatch(row, ln).groups()] for ln in block if ln.startswith("|")]
+                got = (len(block), rows)
+        if got is None:
+            if at >= len(el) or el[at] != xs[i]:
+                return False
+            at, i = at + 1, i + 1
+            continue
+        n, rows = got
+        if any("\t" in c for r in rows for c in r):
+            want = xs[i:i + n]
+        else:
+            want = ["\t".join(r) for r in rows]
+        if el[at:at + len(want)] != want:
+            return False
+        at, i = at + len(want), i + n
+    return at == len(el)
+
+
+SPARK_ROWS = [("Alice", 30, "NY", 1200.5), ("Bob", 25, "SF", 980.0), ("Carolina", 41, "LA", 15000.25), ("Dmitri", 37, "NY", 40.0),
+              ("Eve", 29, "SEA", 7.75), ("Frank", 52, "NY", 310.1), ("Grace", 33, "LA", 2200.0), ("Heidi", 45, "SF", 870.9)]
+_w = [max(len(h), *(len(str(r[j])) for r in SPARK_ROWS)) for j, h in enumerate(("name", "age", "city", "balance"))]
+_b = "+" + "+".join("-" * w for w in _w) + "+"
+SPARK = "\n".join([_b, "|" + "|".join(h.rjust(w) for h, w in zip(("name", "age", "city", "balance"), _w)) + "|", _b,
+                   *("|" + "|".join(str(c).rjust(w) for c, w in zip(r, _w)) + "|" for r in SPARK_ROWS), _b]) + "\nonly showing top 8 rows\n\n"
+MYSQL_ROWS = [(1, "alice", "alice@example.com", "2024-05-01 10:00:00", None), (2, "bob smith", "bob@example.com", "2024-05-02 11:30:00", "a|b"),
+              (3, "carol", "", "2024-05-03 09:15:00", "x  y"), (4, "dave", "dave@example.com", "2024-05-04 18:45:00", None), (5, "erin", "erin@example.com", "2024-05-05 07:05:00", "ok")]
+_h = ("id", "name", "email", "created_at", "note")
+_cells = [[("NULL" if c is None else str(c)) for c in r] for r in MYSQL_ROWS]
+_mw = [max(len(h), *(len(r[j]) for r in _cells)) for j, h in enumerate(_h)]
+_mb = "+" + "+".join("-" * (w + 2) for w in _mw) + "+"
+_num = {0}
+MYSQL = "mysql> select * from users;\n" + "\n".join([_mb, "| " + " | ".join(h.ljust(w) for h, w in zip(_h, _mw)) + " |", _mb,
+                                                       *("| " + " | ".join((c.rjust(w) if j in _num else c.ljust(w)) for j, (c, w) in enumerate(zip(r, _mw))) + " |" for r in _cells), _mb]) + "\n5 rows in set (0.00 sec)\n"
+TWO_GRIDS = "+---+---+\n| a | b |\n+---+---+\n| 1 | 2 |\n+---+---+\n+---+\n| c |\n+---+\n| 3 |\n| 4 |\n+---+\n"
+
+case(
+    412,
+    claim="A +---+ border grid (header, rule, rows, closing rule) as printed by Spark show(), mysql and beeline becomes one tab-separated line per row with the space padding trimmed; the cells are unchanged, and a grid whose cells contain a tab, a grid that is not clean, and everything outside grids stay as they were.",
+    loses="space padding and alignment inside cells (so leading or trailing spaces that were part of a value), and the border and rule lines",
+    encode=lambda t: guarded(t, grid_to_tsv),
+    equivalent=grid_oracle,
+    fixtures=[
+        Fixture("Spark show() with right-aligned cells", SPARK, True),
+        Fixture("mysql client output with NULLs and a | inside a cell", MYSQL, True),
+        Fixture("two grids back to back", TWO_GRIDS, True),
+        Fixture("markdown table", "| a | b |\n|---|---|\n| 1 | 2 |\n", False),
+        Fixture("box-drawing table", "┌───┬───┐\n│ a │ b │\n├───┼───┤\n│ 1 │ 2 │\n└───┴───┘\n", False),
+        Fixture("ASCII art and diff lines", "+-----+\n| hi  |\n+-----+ x\n+++ b/file.py\n+x = 1\n", False),
+        Fixture("grid without its closing rule (truncated)", SPARK.split("\nonly")[0].rsplit("\n", 1)[0] + "\n", False),
+        Fixture("ragged row", "+---+---+\n| a | b |\n+---+---+\n| 1 | 2 | 3 |\n+---+---+\n", False),
+        Fixture("CRLF output", SPARK.replace("\n", "\r\n"), False),
+        Fixture("a cell holding a tab", "+----+----+\n| a  | b  |\n+----+----+\n| x\ty | z  |\n+----+----+\n", None),
+        Fixture("header only (empty result)", "+----+----+\n| id | nm |\n+----+----+\n+----+----+\n", None),
+        Fixture("empty cells, wide characters", "+----+------+\n| a  | b    |\n+----+------+\n|    | 日本 |\n| 1  |      |\n+----+------+\n", None),
+        Fixture("grid in the middle of other text", "before\n" + MYSQL + "after\n", True),
+    ],
+    min_gain=0.1,
 )
 
 # @@END@@

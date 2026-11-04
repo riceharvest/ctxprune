@@ -1249,3 +1249,1003 @@ case(
     ],
     min_gain=0.05,
 )
+
+# ---------------------------------------------------------------------------------------------------------------
+# #517 Replace tree rails with indentation. A run of 3+ `tree` entry lines whose rails are exactly what the depths imply
+# (so parent-of, depth and last-child are all still recoverable) becomes two-space indentation; anything else is left alone.
+# Also, in perf call-graph output, drop the pure decoration lines ('#' alone, the '# ........' underline row, '|'-only
+# connector lines). perf's information-bearing '#' header lines (Samples, Event count, column titles) are KEPT: dropping
+# them would lose the event name and the meaning of the columns.
+
+_ENTRY = re.compile(r"^((?:│   |│\u00a0\u00a0 |    )*)(├── |└── )(\S.*)$")
+_PERF_EDGE = re.compile(r"--\d+(?:\.\d+)?%--")
+
+
+def _canonical_run(entries) -> bool:
+    """entries: [(depth, prefix, connector)]. True when every rail cell and connector is what the depth profile requires."""
+    n = len(entries)
+    depth = [e[0] for e in entries]
+    if depth[0] != 1 or any(depth[i] > depth[i - 1] + 1 for i in range(1, n)):
+        return False
+    last = []
+    for i in range(n):
+        j = i + 1
+        while j < n and depth[j] > depth[i]:
+            j += 1
+        last.append(j >= n or depth[j] < depth[i])
+    nbsp = any("\u00a0" in e[1] for e in entries)
+    bar = "│\u00a0\u00a0 " if nbsp else "│   "
+    anc: dict[int, int] = {}
+    for i, (d, prefix, conn) in enumerate(entries):
+        anc[d] = i
+        want = "".join(("    " if last[anc[l]] else bar) for l in range(1, d))
+        if prefix != want or conn != ("└── " if last[i] else "├── "):
+            return False
+    return True
+
+
+def _perf_noise(l: str) -> bool:
+    s = l.strip()
+    return s == "#" or re.fullmatch(r"#[ .]*\.[ .]*", s) is not None or (s != "" and set(s) <= {"|", " "})
+
+
+def tree_rails_to_indent(text: str) -> str:
+    lines = text.split("\n")
+    if any(_PERF_EDGE.search(l) for l in lines):  # perf call graph: decoration-only lines carry nothing
+        lines = [l for l in lines if not _perf_noise(l)]
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        j = i
+        while j < len(lines) and _ENTRY.match(lines[j]):
+            j += 1
+        if j - i >= 3:
+            ents = [_ENTRY.match(l).groups() for l in lines[i:j]]
+            ents = [(len(p) // 4 + 1, p, c, nm) for p, c, nm in ents]
+            if _canonical_run([e[:3] for e in ents]):
+                out += ["  " * d + nm for d, _p, _c, nm in ents]
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def _render_tree(ents: list[tuple[int, str]], nbsp: bool) -> list[str]:
+    """Oracle: build the tree explicitly and print it the way `tree` does (recursion instead of a depth/last-child table)."""
+    root: dict = {"kids": []}
+    stack = [(0, root)]
+    for d, name in ents:
+        while stack[-1][0] >= d:
+            stack.pop()
+        node = {"name": name, "kids": []}
+        stack[-1][1]["kids"].append(node)
+        stack.append((d, node))
+    lines: list[str] = []
+
+    def walk(node, prefix):
+        for k, child in enumerate(node["kids"]):
+            last = k == len(node["kids"]) - 1
+            lines.append(prefix + ("└── " if last else "├── ") + child["name"])
+            walk(child, prefix + ("    " if last else ("│\u00a0\u00a0 " if nbsp else "│   ")))
+
+    walk(root, "")
+    return lines
+
+
+def _perf_deco(l: str) -> bool:
+    """Oracle's own notion of a decoration-only line: '#' alone, '# ....' underline rows, or pipes and spaces only."""
+    s = l.strip()
+    if s == "#":
+        return True
+    if s.startswith("#") and "." in s and not s[1:].replace(".", "").replace(" ", ""):
+        return True
+    return "|" in s and not s.replace("|", "").replace(" ", "")
+
+
+def _oracle_517(x: str, e: str) -> bool:
+    xl = x.split("\n")
+    if re.search(r"\d%--", x):
+        xl = [l for l in xl if not _perf_deco(l)]
+    el = e.split("\n")
+    if len(xl) != len(el):
+        return False
+    k = 0
+    while k < len(xl):
+        if xl[k] == el[k]:
+            k += 1
+            continue
+        m = k
+        while m < len(xl) and xl[m] != el[m]:  # a maximal run of changed lines must be one whole canonical tree body
+            m += 1
+        ents = []
+        for l in el[k:m]:
+            body = l.lstrip(" ")
+            if (len(l) - len(body)) % 2 or not body or len(l) == len(body):
+                return False
+            ents.append(((len(l) - len(body)) // 2, body))
+        nbsp = "\u00a0" in "".join(xl[k:m])
+        if _render_tree(ents, nbsp) != xl[k:m] or len(ents) < 3:
+            return False
+        if any(g in "".join(el[k:m]) for g in "├└│"):  # no rail glyph may remain in the converted lines
+            if not any(g in n for _d, n in ents for g in "├└│"):
+                return False
+        k = m
+    return True
+
+
+def _tree_text(nbsp: bool, files: dict) -> str:
+    bar = "│\u00a0\u00a0 " if nbsp else "│   "
+    out = ["."]
+
+    def walk(d, prefix):
+        items = list(d.items())
+        for i, (name, sub) in enumerate(items):
+            last = i == len(items) - 1
+            out.append(prefix + ("└── " if last else "├── ") + name)
+            if isinstance(sub, dict):
+                walk(sub, prefix + ("    " if last else bar))
+
+    walk(files, "")
+    return "\n".join(out) + "\n\n3 directories, 14 files\n"
+
+
+_PROJECT = {"Cargo.lock": 0, "Cargo.toml": 0, "src": {"api": {"mod.rs": 0, "routes.rs": 0, "handlers": {"orders.rs": 0, "users.rs": 0}},
+            "config.rs": 0, "lib.rs": 0, "main.rs": 0}, "tests": {"fixtures": {"orders.json": 0}, "smoke.rs": 0}, "docs": {"design notes.md": 0}, "README.md": 0}
+_PERF = """# To display the perf.data header info, please use --header/--header-only options.
+#
+# Total Lost Samples: 0
+#
+# Samples: 12K of event 'cycles'
+# Event count (approx.): 3150000000
+#
+# Children      Self  Command  Shared Object  Symbol
+# ........  ........  .......  .............  ......
+#
+    45.67%     0.00%  prog     prog           [.] main
+            |
+            ---main
+               |
+               |--30.12%--compute
+               |          |
+               |          |--20.00%--inner_loop
+               |          |
+               |           --10.12%--helper
+               |
+                --15.55%--io_wait
+                          |
+                          |--9.10%--read
+                          |
+                           --6.45%--poll
+
+    21.30%    21.30%  prog     libc.so.6      [.] memcpy
+            |
+            ---memcpy
+               compute
+               main
+"""
+_BAD_TREE = "src\n├── a.rs\n└── b.rs\n├── c.rs\n└── d.rs\n"  # b claims to be the last child, but c and d follow
+
+case(
+    517,
+    claim="A run of 3+ `tree` entry lines whose rails match what the depths imply becomes two-space indentation (parent-of, depth and last-child stay derivable); non-canonical trees are left alone; in perf call graphs only decoration lines ('#', '# ......', '|') are dropped.",
+    loses="the rail glyphs themselves (re-derivable from depth order, including the NBSP padding variant, which must be restored by the reader), and perf's decoration-only lines; perf's Samples/Event-count/column-title header lines are kept on purpose",
+    encode=tree_rails_to_indent,
+    equivalent=_oracle_517,
+    fixtures=[
+        Fixture("tree of a rust project, plain spaces", _tree_text(False, _PROJECT), True),
+        Fixture("same tree with NBSP rail padding (GNU tree)", _tree_text(True, _PROJECT), True),
+        Fixture("perf report -g --stdio call graph", _PERF, True),
+        Fixture("non-canonical tree: wrong glyphs, stray rail", _BAD_TREE, False),
+        Fixture("script comments and pipes without perf markers", "# banner\n#\n# ........\n|\n|\ncat file | grep x\n", False),
+        Fixture("depth jump, name starting with a space, two-entry run", "r\n├── a\n│   │   └── jump\n└──  spaced\n\n├── x\n└── y\n", None),
+        Fixture("mixed NBSP and plain rails", "d\n├── a\n│   ├── b\n│\u00a0\u00a0 └── c\n└── e\n", None),
+    ],
+    min_gain=0.1,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #17 Dedupe repeated failure blocks. (A) jest/vitest print every failure in the body and again, byte for byte, under "Summary of
+# all failing tests": the second copy becomes one marker line. (B) pytest repeats only a message: "FAILED id - <msg>" in the short
+# summary where the block above has the same text on its first E line. Exact roundtrip behind a header line; the encoder checks its
+# own decode and hands the input back if the check fails (so a block that is not provably identical is never folded).
+
+_F_HDR = "[repeats folded, see text above]\n"
+_F_RAW = "[text follows unchanged]\n"
+_BLOCK_HEAD = re.compile(r"^(?P<ind> *)(?:(?P<jest>● .+)|(?P<py>_{3,} (?P<pyname>.+?) _{3,}))$")
+_MARK_A = re.compile(r"^( *)\[same as the failure block above: (.+)\]$")
+_MARK_B = re.compile(r"^(FAILED|ERROR) (\S+) - \[same as the E line above\]$")
+_SUMMARY = re.compile(r"^(FAILED|ERROR) (\S+) - (.+)$")
+
+
+def _blocks(lines: list[str]):
+    """-> [(start, end, header_stripped, pytest_name|None)] ; trailing blank lines are not part of a block."""
+    heads = [(i, m) for i, l in enumerate(lines) if (m := _BLOCK_HEAD.match(l)) or _MARK_A.match(l)]
+    res = []
+    for n, (i, m) in enumerate(heads):
+        if m is None:
+            continue
+        ind = len(m.group("ind"))
+        j = i + 1
+        while j < len(lines) and not (n + 1 < len(heads) and j == heads[n + 1][0]):
+            l = lines[j]
+            if re.match(r"={3,}", l) or (m.group("jest") and l.strip() and len(l) - len(l.lstrip(" ")) <= ind):
+                break
+            j += 1
+        while j > i + 1 and not lines[j - 1].strip():
+            j -= 1
+        res.append((i, j, lines[i].strip(), m.group("pyname")))
+    return res
+
+
+def _first_e(lines: list[str], start: int, end: int):
+    for l in lines[start:end]:
+        if (m := re.match(r"^E {1,}(\S.*)$", l)):
+            return m.group(1)
+    return None
+
+
+def _decode_failures(text: str) -> str:
+    if text.startswith(_F_RAW):
+        return text[len(_F_RAW):]
+    if not text.startswith(_F_HDR):
+        return text
+    out: list[str] = []
+    for l in text[len(_F_HDR):].split("\n"):
+        ma, mb = _MARK_A.match(l), _MARK_B.match(l)
+        if ma:
+            hit = [b for b in _blocks(out) if b[2] == ma.group(2)]
+            if hit:
+                out += out[hit[-1][0]:hit[-1][1]]
+                continue
+        elif mb:
+            name = ".".join(mb.group(2).split("::")[1:])
+            hit = [b for b in _blocks(out) if b[3] == name]
+            msg = _first_e(out, hit[-1][0], hit[-1][1]) if hit else None
+            if msg is not None:
+                out.append(f"{mb.group(1)} {mb.group(2)} - {msg}")
+                continue
+        out.append(l)
+    return "\n".join(out)
+
+
+def fold_failures(text: str) -> str:
+    if text.startswith(_F_HDR) or text.startswith(_F_RAW):
+        return _F_RAW + text  # grows by design: otherwise decode could not tell this from an encoded text
+    lines = text.split("\n")
+    blocks = _blocks(lines)
+    replace: dict[int, tuple[int, str]] = {}
+    for k, (s, e, head, _name) in enumerate(blocks):
+        if e - s < 3 or sum(map(len, lines[s:e])) < 90:
+            continue
+        prev = [b for b in blocks[:k] if b[2] == head]
+        if prev and lines[prev[-1][0]:prev[-1][1]] == lines[s:e]:
+            ind = lines[s][: len(lines[s]) - len(lines[s].lstrip(" "))]
+            replace[s] = (e, f"{ind}[same as the failure block above: {head}]")
+    out, i = [], 0
+    while i < len(lines):
+        if i in replace:
+            out.append(replace[i][1])
+            i = replace[i][0]
+            continue
+        m = _SUMMARY.match(lines[i])
+        if m and len(m.group(3)) > 30:
+            name = ".".join(m.group(2).split("::")[1:])
+            hit = [b for b in blocks if b[3] == name and b[0] < i]
+            if hit and _first_e(lines, hit[-1][0], hit[-1][1]) == m.group(3):
+                out.append(f"{m.group(1)} {m.group(2)} - [same as the E line above]")
+                i += 1
+                continue
+        out.append(lines[i])
+        i += 1
+    res = _F_HDR + "\n".join(out)
+    if len(res) >= len(text) or _decode_failures(res) != text:
+        return text
+    return res
+
+
+_JEST_BLOCK = """  ● Cart › applies a percentage coupon
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 90
+    Received: 100
+
+      21 |     cart.add({ sku: 'A-1', price: 100 });
+      22 |     cart.applyCoupon('TEN_PERCENT');
+    > 23 |     expect(cart.total()).toBe(90);
+         |                          ^
+      24 |   });
+
+      at Object.<anonymous> (src/cart.test.js:23:26)
+"""
+_JEST_BLOCK2 = _JEST_BLOCK.replace("applies a percentage coupon", "rejects an expired coupon").replace("Expected: 90", "Expected: 100").replace("Received: 100", "Received: 80").replace("toBe(90)", "toBe(100)")
+
+
+def _jest_run() -> str:
+    body = "FAIL src/cart.test.js\n" + _JEST_BLOCK + "\n" + _JEST_BLOCK2 + "\nFAIL src/user.test.js\n" + _JEST_BLOCK.replace("Cart", "User") + "\n"
+    summary = "Summary of all failing tests\nFAIL src/cart.test.js\n" + _JEST_BLOCK + "\n" + _JEST_BLOCK2 + "\nFAIL src/user.test.js\n" + _JEST_BLOCK.replace("Cart", "User") + "\n"
+    return body + "Test Suites: 2 failed, 2 total\nTests:       3 failed, 9 passed, 12 total\n\n" + summary + "Test Suites: 2 failed, 2 total\n"
+
+
+def _pytest_run() -> str:
+    blocks, summ = [], []
+    cases = [("test_create_order", "test_create_order", "AssertionError: unexpected status: {'detail': 'quantity must be positive', 'field': 'items[0].qty'}"),
+             ("TestOrders.test_cancel", "TestOrders::test_cancel", "assert {'status': 'shipped', 'id': 41} == {'status': 'cancelled', 'id': 41}"),
+             ("test_refund[partial-0.5]", "test_refund[partial-0.5]", "ValueError: refund of 0.5 exceeds the remaining balance of 0.25 for order 7")]
+    cases += [(f"test_ship[{i}]", f"test_ship[{i}]", f"KeyError: 'warehouse-{i}' is not in the inventory snapshot taken at 2026-11-0{i} 10:00:00") for i in range(1, 6)]
+    for name, ident, msg in cases:
+        blocks.append(f"{'_' * 20} {name} {'_' * 20}\n\n    def check():\n>       do_the_thing()\nE       {msg}\nE       assert 1 == 2\n\ntests/test_api.py:21: AssertionError\n")
+        summ.append(f"FAILED tests/test_api.py::{ident} - {msg}")
+    return ("============ test session starts ============\ncollected 12 items\n\ntests/test_api.py .F.F.   [100%]\n\n============ FAILURES ============\n" + "\n".join(blocks) +
+            "============ short test summary info ============\n" + "\n".join(summ) + "\n============ 8 failed, 4 passed in 0.41s ============\n")
+
+
+_NO_REPEAT = ("FAIL src/a.test.js\n" + _JEST_BLOCK + "\nFAIL src/b.test.js\n" + _JEST_BLOCK2 + "\nTests: 2 failed\n")
+_SAME_HEADER_DIFFERENT_BODY = "  ● Cart › x\n    one\n    two\n    three\n    four five six seven eight nine ten eleven twelve thirteen\n\nsummary\n  ● Cart › x\n    one\n    two\n    three\n    four five six seven eight nine ten eleven twelve THIRTEEN\n"
+_TRUNCATED_SUMMARY = ("____ test_a ____\n\n>   boom()\nE   RuntimeError: a very long message that pytest cuts in the short summary because it is wide\n\nt.py:3: RuntimeError\n"
+                      "==== short test summary info ====\nFAILED t.py::test_a - RuntimeError: a very long message that pytest cuts in the short summ...\n")
+
+case(
+    17,
+    claim="A failure block repeated byte-for-byte later in the same output (jest summary) becomes one marker line, and a pytest summary message identical to the first E line above becomes a marker; the exact original is restored from the text above, and anything not provably identical is left in place.",
+    encode=fold_failures,
+    decode=_decode_failures,
+    fixtures=[
+        Fixture("jest run with a summary section repeating three failures", _jest_run(), True),
+        Fixture("pytest summary messages equal to the E lines", _pytest_run(), True),
+        Fixture("failures that appear only once", _NO_REPEAT, False),
+        Fixture("same header, different body", _SAME_HEADER_DIFFERENT_BODY, False),
+        Fixture("pytest summary truncated with ...", _TRUNCATED_SUMMARY, False),
+        Fixture("input that starts like the folded header", _F_HDR + _jest_run(), None),
+        Fixture("input that starts with the escape", _F_RAW + _jest_run(), None),
+        Fixture("input that already contains marker lines next to a real repeat", _jest_run() + "  [same as the failure block above: ● Cart › applies a percentage coupon]\nFAILED t.py::test_x - [same as the E line above]\n", None),
+    ],
+    min_gain=0.1,
+    idempotent=False,  # an encoded text starts with the header, so encoding it again must escape it
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #14 Whitespace tokenization study (eval idea): a sim that measures, on built-in samples, which whitespace transforms change the
+# token count (harness.tokens: o200k when tiktoken loads, else the word-piece proxy, which counts every whitespace run as one
+# token and so sees no difference), and proves each candidate is fidelity-safe: every candidate has an independent oracle, and a
+# guard that returns the sample untouched where the transform would be unsafe (empty table cells, TSV, Makefile recipes).
+
+def _t_strip_trailing(s: str) -> str:
+    return s if _is_diff(s) else "\n".join(l.rstrip(" \t") for l in _lines(s))
+
+
+def _clean_table(s: str) -> bool:
+    rows = [l.split() for l in _lines(s) if l.strip()]
+    return len(rows) >= 3 and len({len(r) for r in rows}) == 1 and "\t" not in s
+
+
+def _squeeze(sep: str, minrun: int):
+    pat = re.compile(r"(?<=\S) {%d,}(?=\S)" % minrun)
+    return lambda s: "\n".join(pat.sub(sep, l) for l in _lines(s)) if _clean_table(s) else s
+
+
+def _indent_spaces_ok(s: str) -> bool:
+    ind = [len(l) - len(l.lstrip(" ")) for l in _lines(s) if l.strip()]
+    return any(ind) and all(i % 4 == 0 for i in ind) and not any(l.startswith("\t") for l in _lines(s))
+
+
+def _t_indent_4_to_2(s: str) -> str:
+    return "\n".join(re.sub(r"^( +)", lambda m: " " * (len(m.group(1)) // 2), l) for l in _lines(s)) if _indent_spaces_ok(s) else s
+
+
+def _t_spaces_to_tabs(s: str) -> str:
+    return "\n".join(re.sub(r"^( +)", lambda m: "\t" * (len(m.group(1)) // 4), l) for l in _lines(s)) if _indent_spaces_ok(s) else s
+
+
+def _makefile_like(s: str) -> bool:
+    ls = _lines(s)
+    return any(re.match(r"[\w./%$()-]+(?: [\w./%$()-]+)*:(?:[^=]|$)", l) and i + 1 < len(ls) and ls[i + 1].startswith("\t") for i, l in enumerate(ls))
+
+
+def _t_tabs_to_spaces(s: str) -> str:
+    ls = _lines(s)
+    lead_tabs = [len(l) - len(l.lstrip("\t")) for l in ls]
+    if not any(lead_tabs) or _makefile_like(s) or any(l.startswith((" ", "\t ")) for l in ls):
+        return s
+    return "\n".join("    " * k + l[k:] for l, k in zip(ls, lead_tabs))
+
+
+_CANDIDATES_14 = {
+    "strip_trailing": _t_strip_trailing,
+    "table_gap_to_1_space": _squeeze(" ", 2),
+    "table_gap_to_2_spaces": _squeeze("  ", 3),
+    "table_gap_to_tab": _squeeze("\t", 2),
+    "indent_4_to_2_spaces": _t_indent_4_to_2,
+    "indent_4_spaces_to_tab": _t_spaces_to_tabs,
+    "indent_tab_to_4_spaces": _t_tabs_to_spaces,
+}
+
+
+def _samples_14() -> dict[str, str]:
+    w = [10, 6, 6, 6, 9, 8, 6, 6, 8, 7, 0]
+    rows = [("USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", "COMMAND")]
+    for i in range(14):
+        rows.append((("root", "www", "postgres")[i % 3], str(100 + i * 37), f"{i * 0.7:.1f}", f"{i * 0.3:.1f}", str(169436 + i * 811), str(11704 + i * 97), "?", "Ss", "Oct12", f"0:{i:02d}", f"/usr/sbin/svc{i}"))
+    ps = "\n".join("".join(c.ljust(n) if n else c for c, n in zip(r, w)) for r in rows) + "\n"
+    docker = ("CONTAINER ID   IMAGE        STATUS         PORTS                  NAMES\n"
+              "3f2a9c0d17b8   nginx:1.25   Up 3 hours     0.0.0.0:80->80/tcp     web\n"
+              "9be1d7c4a002   redis:7      Up 3 hours                            cache\n"
+              "c41f0e5d9a77   postgres:16  Up 2 hours     5432/tcp               db\n"
+              "77aa31b9c0de   busybox      Exited (0)                            job\n")
+    nested = "".join("    " * (i % 5) + f"key_{i}: value {i}\n" for i in range(40))
+    go = "func main() {\n" + "".join("\t" * (1 + i % 3) + f"step{i}()\n" for i in range(30)) + "}\n"
+    make = "build: deps\n\tcc -o app main.c\n\t./app --check\n\nclean:\n\trm -f app\n"
+    tsv = "".join(f"{i}\talpha beta\tgamma\t{i * 3}\n" for i in range(30))
+    padded = "".join(f"{'line ' + str(i):<80}\n" for i in range(20))
+    return {"ps_table": ps, "docker_ps_empty_cells": docker, "nested_4_space": nested, "go_tab_indent": go, "makefile_tabs": make, "tsv": tsv, "padded_80_columns": padded}
+
+
+def _fields_equal(a: str, b: str) -> bool:
+    """Oracle for alignment transforms: same number of lines, and per line the same indentation and the same whitespace-separated fields."""
+    la, lb = _lines(a), _lines(b)
+    return len(la) == len(lb) and all(x.split() == y.split() and x[: len(x) - len(x.lstrip())] == y[: len(y) - len(y.lstrip())] for x, y in zip(la, lb))
+
+
+def _indent_levels(s: str, unit: str) -> list[tuple[int, str]]:
+    out = []
+    for l in _lines(s):
+        body = l.lstrip(" \t")
+        ws = l[: len(l) - len(body)]
+        assert ws.count(unit) * len(unit) == len(ws), f"indent {ws!r} is not made of {unit!r}"
+        out.append((len(ws) // len(unit), body))
+    return out
+
+
+_ORACLES_14 = {
+    "strip_trailing": lambda a, b: len(_lines(a)) == len(_lines(b)) and all(x.startswith(y) and not x[len(y):].strip(" \t") for x, y in zip(_lines(a), _lines(b))),
+    "table_gap_to_1_space": _fields_equal,
+    "table_gap_to_2_spaces": _fields_equal,
+    "table_gap_to_tab": _fields_equal,
+    "indent_4_to_2_spaces": lambda a, b: _indent_levels(a, "    ") == _indent_levels(b, "  "),
+    "indent_4_spaces_to_tab": lambda a, b: _indent_levels(a, "    ") == _indent_levels(b, "\t"),
+    "indent_tab_to_4_spaces": lambda a, b: _indent_levels(a, "\t") == _indent_levels(b, "    "),
+}
+
+
+def measure_14(samples: dict[str, str]) -> dict[tuple[str, str], tuple[int, int, int, int]]:
+    """(sample, transform) -> (tokens before, tokens after, chars before, chars after). Pure: no state is kept between calls."""
+    res = {}
+    for sname, text in samples.items():
+        tb = harness.tokens(text)
+        for tname, fn in _CANDIDATES_14.items():
+            out = fn(text)
+            res[(sname, tname)] = (tb, harness.tokens(out), len(text), len(out))
+    return res
+
+
+def sim_whitespace_study() -> dict:
+    samples = _samples_14()
+    first = measure_14(samples)
+    assert measure_14(dict(reversed(list(samples.items())))) == first, "measurement depends on sample order (hidden state)"
+    assert measure_14(samples) == first, "measurement is not deterministic"
+    assert all(harness.tokens(t) == harness.tokens(t) for t in samples.values())
+    changed = {}
+    for (sname, tname), (tb, ta, cb, ca) in first.items():
+        out = _CANDIDATES_14[tname](samples[sname])
+        changed[(sname, tname)] = out != samples[sname]
+        assert _CANDIDATES_14[tname](out) == out, f"{tname} on {sname} is not idempotent"
+        assert ca <= cb or tname == "indent_tab_to_4_spaces", f"{tname} grew {sname} in characters"
+        if out != samples[sname]:  # fidelity-safe: the independent oracle for this transform holds on the transformed sample
+            assert _ORACLES_14[tname](samples[sname], out), f"fidelity: {tname} changed information in {sname}"
+    # guards: where the transform would be unsafe the sample comes back byte-identical
+    for sname, tname in [("docker_ps_empty_cells", "table_gap_to_1_space"), ("docker_ps_empty_cells", "table_gap_to_tab"), ("tsv", "table_gap_to_tab"),
+                         ("tsv", "table_gap_to_1_space"), ("makefile_tabs", "indent_tab_to_4_spaces"), ("go_tab_indent", "indent_4_to_2_spaces"),
+                         ("ps_table", "indent_4_to_2_spaces"), ("ps_table", "indent_tab_to_4_spaces")]:
+        assert not changed[(sname, tname)], f"guard failed: {tname} touched {sname}"
+    for sname, tname in [("ps_table", "table_gap_to_1_space"), ("padded_80_columns", "strip_trailing"), ("nested_4_space", "indent_4_to_2_spaces"),
+                         ("nested_4_space", "indent_4_spaces_to_tab"), ("go_tab_indent", "indent_tab_to_4_spaces")]:
+        assert changed[(sname, tname)], f"{tname} should apply to {sname}"
+    # the study's findings. The proxy tokenizer cannot see whitespace, so tokenizer-specific claims are made only for o200k.
+    saved = lambda s, t: first[(s, t)][0] - first[(s, t)][1]  # noqa: E731
+    assert saved("ps_table", "table_gap_to_1_space") >= 0 and saved("nested_4_space", "indent_4_spaces_to_tab") >= 0
+    assert saved("go_tab_indent", "indent_tab_to_4_spaces") <= 0, "tabs to spaces must not help"
+    if harness.TOKENIZER == "o200k":
+        tb = first[("ps_table", "table_gap_to_1_space")][0]
+        assert saved("ps_table", "table_gap_to_1_space") >= 0.15 * tb, "a single space between columns should clearly beat padding"
+        assert saved("ps_table", "table_gap_to_2_spaces") <= 0.02 * tb, "two spaces cost as much as the padding they replace"
+        assert saved("padded_80_columns", "strip_trailing") >= 10, "long trailing padding costs about a token per line"
+        assert saved("nested_4_space", "indent_4_to_2_spaces") == 0, "indent width is free"
+    return {"tokenizer_is_o200k": int(harness.TOKENIZER == "o200k"),
+            "ps_gap_to_1_space_tokens_saved": saved("ps_table", "table_gap_to_1_space"), "ps_gap_to_2_spaces_tokens_saved": saved("ps_table", "table_gap_to_2_spaces"),
+            "ps_gap_to_tab_tokens_saved": saved("ps_table", "table_gap_to_tab"), "padded80_strip_tokens_saved": saved("padded_80_columns", "strip_trailing"),
+            "indent_4_to_2_tokens_saved": saved("nested_4_space", "indent_4_to_2_spaces"), "indent_to_tab_tokens_saved": saved("nested_4_space", "indent_4_spaces_to_tab"),
+            "tabs_to_spaces_tokens_saved": saved("go_tab_indent", "indent_tab_to_4_spaces"),
+            "guarded_unsafe_pairs": 8, "pairs_measured": len(first)}
+
+
+case(
+    14,
+    claim="Seven whitespace transforms (strip trailing blanks, collapse table gaps to 1 space / 2 spaces / a tab, halve indentation, spaces to tabs, tabs to spaces) are measured on built-in samples with harness.tokens, the measurement is deterministic and order-independent, every transform is checked by an independent oracle, and each declines the samples where it would be unsafe.",
+    sim=sim_whitespace_study,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #16 Drop stdout/stderr duplicates (hook level). Bash tool_response is {"stdout", "stderr", ...}. When stderr is byte-for-byte the
+# whole of stdout, or a block of whole lines of it (`make | tee /dev/stderr`), stderr becomes a one-line pointer into stdout.
+
+_PTR16 = re.compile(r"^\[stderr = stdout lines (\d+)-(\d+)(, no final newline)?\]$")
+_RAW16 = "[stderr verbatim]\n"
+
+
+def dedupe_streams(event: dict) -> dict:
+    """PostToolUse-style rewrite. Returns the same object when nothing applies; never raises (fails open)."""
+    try:
+        if event.get("tool_name") != "Bash":
+            return event
+        resp = event.get("tool_response")
+        out, err = resp.get("stdout"), resp.get("stderr")
+        if not isinstance(out, str) or not isinstance(err, str):
+            return event
+        if _PTR16.match(err) or err.startswith(_RAW16):
+            new_err = _RAW16 + err  # a stderr that already looks like our pointer must stay distinguishable
+        else:
+            nl = err.endswith("\n")
+            errl = (err[:-1] if nl else err).split("\n")
+            outl = out.split("\n")
+            new_err = None
+            for i in range(len(outl) - len(errl) + 1):
+                if outl[i:i + len(errl)] == errl:
+                    ptr = f"[stderr = stdout lines {i + 1}-{i + len(errl)}{'' if nl else ', no final newline'}]"
+                    new_err = ptr if len(ptr) < len(err) and len(err) >= 120 else None
+                    break
+            if new_err is None:
+                return event
+        new = dict(event)
+        new["tool_response"] = {**resp, "stderr": new_err}
+        return new
+    except Exception:  # noqa: BLE001  fail open: the model gets the original output
+        return event
+
+
+def reader_view_16(event: dict) -> dict:
+    """What a reader can reconstruct from the rewritten response (the pointer is resolved against stdout)."""
+    resp = event["tool_response"]
+    err = resp.get("stderr")
+    if isinstance(err, str):
+        if err.startswith(_RAW16):
+            err = err[len(_RAW16):]
+        elif (m := _PTR16.match(err)):
+            lo, hi = int(m.group(1)), int(m.group(2))
+            err = "\n".join(resp["stdout"].split("\n")[lo - 1:hi]) + ("" if m.group(3) else "\n")
+    return {**event, "tool_response": {**resp, "stderr": err}}
+
+
+def sim_stream_dedupe() -> dict:
+    log = "".join(f"[{i:02d}/24] compiling module_{i}.c\n" + (f"module_{i}.c:{i + 3}: warning: unused variable 'tmp{i}'\n" if i % 3 == 0 else "") for i in range(1, 25))
+    ev = lambda out, err, tool="Bash": {"tool_name": tool, "tool_input": {"command": "make | tee /dev/stderr"}, "tool_response": {"stdout": out, "stderr": err, "interrupted": False}}  # noqa: E731
+    saved = 0
+    # (a) the saving, and (b) the reader view restores the exact original response
+    cases = {
+        "whole duplicate (tee /dev/stderr)": ev(log, log),
+        "stderr is a block inside stdout": ev("== build ==\n" + log + "== done ==\n", "".join(log.splitlines(True)[10:30])),
+        "no final newline on either side": ev(log.rstrip("\n"), log.rstrip("\n")),
+        "stderr without final newline inside stdout": ev(log, "".join(log.splitlines(True)[4:20]).rstrip("\n")),
+    }
+    for name, e in cases.items():
+        d = dedupe_streams(e)
+        assert d is not e and len(d["tool_response"]["stderr"]) < 80, f"{name}: should have been deduplicated"
+        assert reader_view_16(d) == e, f"{name}: reader view differs from the original"
+        assert reader_view_16(reader_view_16(dedupe_streams(d))) == e, f"{name}: a second pass over the hook's own output must stay recoverable"
+        saved += len(e["tool_response"]["stderr"]) - len(d["tool_response"]["stderr"])
+    assert saved > 2000, saved
+    # (c) must not apply
+    keep = {
+        "one character differs": ev(log, log.replace("unused", "unusad", 1)),
+        "extra line at the end": ev(log, log + "extra\n"),
+        "CRLF versus LF": ev(log, log.replace("\n", "\r\n")),
+        "stderr empty": ev(log, ""),
+        "tiny duplicate": ev("ok\n", "ok\n"),
+        "different tool with the same keys": ev(log, log, tool="mcp__build__run"),
+        "stderr not a block of whole lines": ev(log, log[5:400]),
+        "lines out of order": ev(log, "".join(reversed(log.splitlines(True)[:6]))),
+    }
+    for name, e in keep.items():
+        assert dedupe_streams(e) is e, f"{name}: must be left alone"
+    # an unrelated stderr that already looks like the pointer or the escape stays distinguishable
+    for odd in ("[stderr = stdout lines 1-2]", _RAW16 + "x", "[stderr = stdout lines 3-9, no final newline]"):
+        e = ev(log, odd)
+        d = dedupe_streams(e)
+        assert reader_view_16(d) == e and d["tool_response"]["stderr"] != odd
+    # (d) fail open on malformed events
+    for bad in (None, 7, "x", {}, {"tool_name": "Bash"}, {"tool_name": "Bash", "tool_response": None}, {"tool_name": "Bash", "tool_response": {"stdout": None, "stderr": "a" * 300}},
+                {"tool_name": "Bash", "tool_response": {"stdout": ["a"], "stderr": ["a"]}}, {"tool_name": "Bash", "tool_response": "text"}):
+        assert dedupe_streams(bad) is bad
+    # fuzz: any stderr taken from mutants of stdout round-trips, and anything not an exact block is untouched
+    n = 0
+    for m in harness.mutants(log, 60, seed=16):
+        for e in (ev(log, m), ev(m, log), ev(m, m)):
+            d = dedupe_streams(e)
+            assert reader_view_16(d) == e, f"round trip failed for {m[:60]!r}"
+            n += 1
+    return {"stderr_chars_saved_in_4_scenarios": saved, "fuzz_pairs_roundtripped": n, "tokens_saved_whole_duplicate": harness.tokens(log) - harness.tokens(dedupe_streams(cases["whole duplicate (tee /dev/stderr)"])["tool_response"]["stderr"])}
+
+
+case(
+    16,
+    claim="In a Bash tool_response whose stderr equals stdout or a block of whole lines of it, stderr becomes '[stderr = stdout lines i-j]'; a reader resolves the pointer to the exact original, and mismatching, tiny, other-tool or malformed responses pass through untouched.",
+    sim=sim_stream_dedupe,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #614 Same-length ASCII for progress bars, sparklines and braille meters. One glyph becomes one ASCII character, so run lengths
+# are kept exactly and the saving is in bytes (3 per glyph) and tokens, never in characters: run through `_run_bytes_gate`.
+#   block bar   (no lower-block glyph in the run):  FULL # | light shade . | medium shade : | dark shade = | left 1/8..7/8 -> 1..7
+#   sparkline   (run has a lower-block glyph)     :  lower 1/8..8/8 (full block = 8/8) -> 1..8
+#   braille run (3+ cells, at least one dot)      :  blank . | all eight dots # | n dots -> n (1..7)
+
+_BLOCKS = re.compile("[▁-▏░-▓]{3,}")
+_BRAILLE = re.compile("[⠀-⣿]{3,}")
+_LEFT_ASCII = {0x258F: "1", 0x258E: "2", 0x258D: "3", 0x258C: "4", 0x258B: "5", 0x258A: "6", 0x2589: "7"}
+
+
+def _block_run(m: re.Match) -> str:
+    run = m.group(0)
+    spark = any("▁" <= c <= "▇" for c in run)
+    out = []
+    for c in run:
+        o = ord(c)
+        if 0x2581 <= o <= 0x2588 and (spark or o != 0x2588):
+            out.append(str(o - 0x2580))  # lower n/8 block -> n; the full block is 8 in a sparkline
+        elif o == 0x2588:
+            out.append("#")
+        elif o in _LEFT_ASCII:
+            out.append(_LEFT_ASCII[o])
+        else:
+            out.append({0x2591: ".", 0x2592: ":", 0x2593: "="}[o])
+    return "".join(out)
+
+
+def _braille_run(m: re.Match) -> str:
+    run = m.group(0)
+    if all(c == "⠀" for c in run):
+        return run  # invisible padding, not a meter
+    return "".join("." if c == "⠀" else "#" if ord(c) == 0x28FF else str(bin(ord(c) - 0x2800).count("1")) for c in run)
+
+
+def ascii_bars(text: str) -> str:
+    out = _BRAILLE.sub(_braille_run, _BLOCKS.sub(_block_run, text))
+    return out if len(out.encode()) < len(text.encode()) else text
+
+
+_ORD = {("ONE", "EIGHTH"): 1, ("ONE", "QUARTER"): 2, ("THREE", "EIGHTHS"): 3, ("HALF",): 4, ("FIVE", "EIGHTHS"): 5, ("THREE", "QUARTERS"): 6, ("SEVEN", "EIGHTHS"): 7}
+
+
+def _glyph(ch: str):
+    """Oracle: classify from the Unicode name. -> (family, kind, value) or None."""
+    n = unicodedata.name(ch, "")
+    w = n.split()
+    if n == "FULL BLOCK":
+        return ("block", "full", 8)
+    if w[-1:] == ["SHADE"]:
+        return ("block", "shade", {"LIGHT": ".", "MEDIUM": ":", "DARK": "="}[w[0]])
+    if w[:1] in (["LOWER"], ["LEFT"]) and w[-1:] == ["BLOCK"] and tuple(w[1:-1]) in _ORD:
+        return ("block", w[0].lower(), _ORD[tuple(w[1:-1])])
+    if n.startswith("BRAILLE PATTERN"):
+        return ("braille", "cell", 0 if n.endswith("BLANK") else len(w[-1].split("-")[1]))
+    return None
+
+
+def _expected_614(x: str) -> str:
+    out, i = [], 0
+    while i < len(x):
+        g = _glyph(x[i])
+        if g is None:
+            out.append(x[i])
+            i += 1
+            continue
+        j = i
+        while j < len(x) and (g2 := _glyph(x[j])) is not None and g2[0] == g[0]:
+            j += 1
+        run = [_glyph(c) for c in x[i:j]]
+        if j - i < 3 or (g[0] == "braille" and not any(r[2] for r in run)):
+            out.append(x[i:j])
+        elif g[0] == "braille":
+            out.append("".join("." if v == 0 else "#" if v == 8 else str(v) for _f, _k, v in run))
+        else:
+            spark = any(k == "lower" for _f, k, _v in run)
+            out.append("".join(str(v) if k in ("lower", "left") or (k == "full" and spark) else "#" if k == "full" else v for _f, k, v in run))
+        i = j
+    return "".join(out)
+
+
+def _oracle_614(x: str, e: str) -> bool:
+    return e == x or (len(e) == len(x) and e == _expected_614(x))  # same length, level for level
+
+
+def _bars_text() -> str:
+    tq = "".join(f"{p:3d}%|{'█' * (p // 5)}{'▏▎▍▌▋▊▉'[p % 7] if p % 5 else ''}{' ' * (20 - p // 5 - 1)}| {p}/100 [00:{p // 4:02d}<00:{(100 - p) // 4:02d}, 12.{p % 10}it/s]\n" for p in range(5, 100, 9))
+    shade = "".join(f"build {'▓' * k}{'▒' if k < 9 else ''}{'░' * (9 - k)} {k * 11}%\n" for k in range(0, 10, 2))
+    spark = "cpu  ▁▂▃▅▇█▇▅▃▂▁▁▂▄▆█▆▄▂\nmem  ▄▄▅▅▆▆▇▇▇▇\nnet  ▁▁▁▂▁▁▁█▁▁▁▁\n"
+    braille = "cpu0 ⣀⣀⣤⣤⣶⣶⣿⣿⣿⣷⣶⣤⣀⡀\nmem  ⠀⠀⠀⢀⣀⣤⣴⣶⣿⣿⣿⣿\nblank ⠀⠀⠀⠀ then ⠁⠃⠇⡇⣇⣧⣷⣿\n"
+    return tq + shade + spark + braille
+
+
+def sim_ascii_bars() -> dict:
+    return _run_bytes_gate(
+        "#614", ascii_bars, _oracle_614,
+        [
+            Fixture("tqdm bars, shade bars, sparklines, braille meters", _bars_text(), True),
+            Fixture("short runs, a lone cursor block, a spinner, box drawing, emoji bar, invisible braille padding",
+                    "██ two only\n█ cursor\n⠋ Loading\n┌──┐\n🟩🟩🟩⬜⬜\nx⠀⠀⠀⠀y\n▀▀▀▀ upper\n", False),
+            Fixture("run of exactly three, mixed families, digits next to a bar", "███ ▁▂▃ ⠁⠃⠇ ███⠿⠿⠿ 45%|██▌|3\n▏▎▍\n░▒▓\n▇▇█", None),
+        ],
+        min_gain=0.2,
+        seed=614,
+    )
+
+
+case(
+    614,
+    claim="Runs of 3+ block glyphs and braille cells become same-length ASCII (bar # . : =, sparkline levels 1-8, braille dot count 0-8 as . 1-7 #); the level of every glyph is kept, short runs, spinners and invisible padding are left alone, and the size saving is in bytes and tokens.",
+    sim=sim_ascii_bars,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #989 Fold Arabic-Indic, Devanagari, Thai (any Nd) digits to ASCII with int()/unicodedata.decimal. One digit stays one character.
+# A token that also contains an ASCII letter (an identifier such as var١ or COVID-١٩) is left alone: Python and most languages treat
+# the two digit forms as different identifiers. Saving is in bytes and tokens only, so this runs through `_run_bytes_gate`.
+
+def fold_digits(text: str) -> str:
+    if text.isascii():
+        return text
+    parts = re.split(r"(\s+)", text)
+    for i in range(0, len(parts), 2):
+        tok = parts[i]
+        if not tok.isascii() and not re.search(r"[A-Za-z]", tok):
+            parts[i] = "".join(str(unicodedata.decimal(c)) if unicodedata.category(c) == "Nd" and not c.isascii() else c for c in tok)
+    return "".join(parts)
+
+
+def _oracle_989(x: str, e: str) -> bool:
+    if len(x) != len(e):
+        return False
+    start = 0
+    for tok in re.split(r"(\s+)", x):
+        mixed = re.search(r"[A-Za-z]", tok) is not None  # identifier-like: must be untouched
+        for k, c in enumerate(tok):
+            d = e[start + k]
+            if unicodedata.category(c) == "Nd" and not c.isascii() and not mixed:
+                if d != str(int(c)):  # int() parses every Nd digit: the folded character must be that value
+                    return False
+            elif d != c:
+                return False
+        start += len(tok)
+    return True
+
+
+def _load_atoms():
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(harness.HERE))), "ctxprune", "atoms.py")
+    import sys
+    name = "ctxprune_atoms_for_989"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # @dataclass looks its module up in sys.modules while the class body runs
+    try:
+        spec.loader.exec_module(mod)  # atoms.py is stdlib-only: importing it by path avoids the model dependencies of the package
+    finally:
+        sys.modules.pop(name, None)
+    return mod
+
+
+_NUMBERS_989 = "\n".join([
+    "تم نسخ ٣٤٢ ملفا\u064b في ١٢٫٥ ثانية، الحجم ١٢٣٤٥٦٧٨٩٠ بايت",
+    "زمان اجرا: ۱۴۰۳/۰۸/۱۲ ساعت ۱۰:۳۵ شماره ۴۵۶۷۸۹",
+    "क\u0941ल १२३४ फ\u093c\u093eइल\u0947\u0902, ७८ त\u094dर\u0941ट\u093fय\u093e\u0901, समय ०.५ स\u0947क\u0902ड",
+    "พบ ๑๒๓ ไฟล\u0e4c ใช\u0e49เวลา ๔.๕ ว\u0e34นาท\u0e35 รห\u0e31ส ๖๗๘๙๐",
+    "port ８０８０ and \U0001d7d0\U0001d7d1\U0001d7d2 and var١ and COVID-١٩ and x_٢",
+]) + "\n"
+
+_INTS_989 = "".join(f"{a} {b} {c}\n" for a, b, c in zip(["١٢٣٤٥٦٧٨", "۱۲۳۴۵۶", "१२३४५६७"] * 6,
+                                                          ["๑๒๓๔", "٠١٢", "३४५"] * 6, ["٩٨٧٦", "۹۸۷", "๙๘"] * 6))
+
+
+def sim_digit_fold() -> dict:
+    atoms = _load_atoms()
+    # is_protected must still flag every folded number (it already flags the original digits, so nothing is un-protected)
+    folded = fold_digits(_NUMBERS_989 + _INTS_989)
+    n_prot = 0
+    for tok in folded.split():
+        if any(c.isdigit() and c.isascii() for c in tok):
+            assert atoms.is_protected(tok), f"is_protected lost {tok!r}"
+            n_prot += 1
+    for ch in "٣۴१๑":
+        assert atoms.is_protected(ch + "2") and atoms.is_protected(str(unicodedata.decimal(ch)) + "2")
+    # int() equality for every Nd digit of the script blocks the idea names, plus a few astral ones
+    for cp in itertools.chain(range(0x0660, 0x066A), range(0x06F0, 0x06FA), range(0x0966, 0x0970), range(0x0E50, 0x0E5A), range(0xFF10, 0xFF1A), range(0x1D7CE, 0x1D800)):
+        c = chr(cp)
+        assert fold_digits(c) == str(int(c)) == str(unicodedata.decimal(c)), hex(cp)
+    stats = _run_bytes_gate(
+        "#989", fold_digits, _oracle_989,
+        [
+            Fixture("numbers in Arabic, Persian, Hindi, Thai, fullwidth and math digits", _NUMBERS_989, True),
+            Fixture("integer columns in five scripts", _INTS_989, True),
+            Fixture("ASCII digits, Arabic words without digits, identifiers with ASCII letters", "total 12345 files\nملفات بدون أرقام\nvar١ x٢_y COVID-١٩ abc१\n", False),
+            Fixture("digits with marks, separators, a lone digit, superscripts (not Nd)", "١٬٢٣٤٫٥ ٣\u0301 ١ x² ⑧ ๑\u200d๒ ٣%\n", None),
+        ],
+        min_gain=0.15,
+        seed=989,
+    )
+    stats["protected_numbers_checked"] = n_prot
+    stats["tokens_before"] = harness.tokens(_NUMBERS_989)
+    stats["tokens_after"] = harness.tokens(fold_digits(_NUMBERS_989))
+    assert stats["tokens_after"] < stats["tokens_before"], "folding should lower the token count"
+    return stats
+
+
+case(
+    989,
+    claim="Every non-ASCII decimal digit (Arabic-Indic, Persian, Devanagari, Thai, fullwidth, math) in a token without ASCII letters becomes the ASCII digit with the same int() value, one character for one character; identifier-like tokens are untouched and is_protected still flags the folded numbers.",
+    sim=sim_digit_fold,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1035 Merge adjacent text blocks inside one request message (proxy-level payload rewrite). Adjacent {"type": "text"} blocks that
+# carry nothing but type/text/cache_control are joined with a newline; a block with cache_control closes its group, so no merge ever
+# crosses a cache breakpoint. `respect_cc=False` is the alternative that ignores breakpoints and re-attaches the marker to the merged
+# block; the sim shows why that one is the byte-stable choice when a breakpoint can sit mid-message.
+
+_MERGEABLE_KEYS = {"type", "text", "cache_control"}
+
+
+def merge_text_blocks(messages, respect_cc: bool = True):
+    """Returns a new list (inputs are never mutated) or the very same object when nothing changed. Fails open on any error."""
+    try:
+        out, changed = [], False
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                out.append(msg)
+                continue
+            blocks, group = [], []
+
+            def flush():
+                nonlocal changed
+                if len(group) > 1:
+                    changed = True
+                    merged = {"type": "text", "text": "\n".join(b["text"] for b in group)}
+                    cc = next((b["cache_control"] for b in reversed(group) if "cache_control" in b), None)
+                    if cc is not None:
+                        merged["cache_control"] = cc
+                    blocks.append(merged)
+                else:
+                    blocks.extend(group)
+                group.clear()
+
+            for b in content:
+                ok = isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str) and set(b) <= _MERGEABLE_KEYS
+                if not ok:
+                    flush()
+                    blocks.append(b)
+                    continue
+                group.append(b)
+                if respect_cc and "cache_control" in b:
+                    flush()  # the breakpoint sits after this block: nothing after it may join it
+            flush()
+            out.append({**msg, "content": blocks})
+        return out if changed else messages
+    except Exception:  # noqa: BLE001
+        return messages
+
+
+def reader_view_1035(messages) -> list:
+    """What the model reads, per message: a list of segments; consecutive text blocks are one segment joined by a newline,
+    every other block (tool_result, tool_use, image, ...) is its own segment compared by value."""
+    view = []
+    for msg in messages:
+        segs, run = [], []
+        content = msg["content"]
+        if isinstance(content, str):
+            view.append((msg["role"], [("text", content)]))
+            continue
+        for b in content:
+            if b.get("type") == "text":
+                run.append(b["text"])
+            else:
+                if run:
+                    segs.append(("text", "\n".join(run)))
+                    run = []
+                segs.append((b.get("type"), json.dumps({k: v for k, v in b.items() if k != "cache_control"}, sort_keys=True)))
+        if run:
+            segs.append(("text", "\n".join(run)))
+        view.append((msg["role"], segs))
+    return view
+
+
+def _history(turns: int, cc_policy: str) -> list[list[dict]]:
+    """The request sent at each turn k (k = 1..turns). cc_policy: 'last' puts one breakpoint on the last block of the last message
+    (Claude Code), 'mid' puts it on the first reminder block of the last user message (a client that marks a non-final block)."""
+    reqs = []
+    for k in range(1, turns + 1):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "Fix the failing test in cart.py"}]}]
+        for t in range(1, k):
+            msgs.append({"role": "assistant", "content": [{"type": "text", "text": f"Running tests, step {t}."}, {"type": "tool_use", "id": f"toolu_{t:02d}", "name": "Bash", "input": {"command": f"pytest -x -k case{t}"}}]})
+            msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"toolu_{t:02d}", "content": f"case{t}: 1 failed, 4 passed"},
+                                                      {"type": "text", "text": "<system-reminder>\nTodo list is empty.\n</system-reminder>"},
+                                                      {"type": "text", "text": f"<system-reminder>\nToday is 2026-11-04, turn {t}.\n</system-reminder>"}]})
+        last = msgs[-1]["content"]
+        if cc_policy == "last":
+            last[-1] = {**last[-1], "cache_control": {"type": "ephemeral"}}
+        elif len(last) > 1:
+            last[-2 if len(last) > 2 else 0] = {**last[-2 if len(last) > 2 else 0], "cache_control": {"type": "ephemeral"}}
+        reqs.append(msgs)
+    return reqs
+
+
+def _dump(msgs) -> str:
+    return json.dumps(msgs, sort_keys=True, separators=(",", ":"))
+
+
+def _prefix_stable(reqs, respect_cc: bool, ignore_cc_marker: bool = True) -> bool:
+    """Is the serialized form of every message that was already sent identical on the next turn? (Only then does the cached prefix stay valid.)
+    The breakpoint marker itself moves every turn by design, so it is not part of the comparison."""
+    strip = lambda ms: [{**m, "content": [{k: v for k, v in b.items() if k != "cache_control"} if ignore_cc_marker and isinstance(b, dict) else b for b in m["content"]]} for m in ms]  # noqa: E731
+    prev = None
+    for r in reqs:
+        cur = strip(merge_text_blocks(r, respect_cc))
+        if prev is not None and _dump(prev) != _dump(cur[: len(prev)]):
+            return False
+        prev = cur
+    return True
+
+
+def sim_merge_text_blocks() -> dict:
+    reqs = _history(30, "last")
+    final = reqs[-1]
+    merged = merge_text_blocks(final)
+    # (a) the saving: one boundary per user turn, counted in blocks and in serialized bytes
+    nblocks = lambda ms: sum(len(m["content"]) for m in ms if isinstance(m["content"], list))  # noqa: E731
+    boundaries = nblocks(final) - nblocks(merged)
+    saved_bytes = len(_dump(final)) - len(_dump(merged))
+    assert boundaries == 29 and saved_bytes > 29 * 20, (boundaries, saved_bytes)
+    assert merged is not final and len(final[-1]["content"]) == 3, "the input must not be mutated"
+    # (b) reader view: the model reads the same segments, tool_use/tool_result ids in the same order
+    assert reader_view_1035(merged) == reader_view_1035(final)
+    ids = lambda ms: [b.get("id") or b.get("tool_use_id") for m in ms for b in m["content"] if b.get("type") in ("tool_use", "tool_result")]  # noqa: E731
+    assert ids(merged) == ids(final) and len(ids(final)) == 58
+    assert merged[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}, "the breakpoint rides on the merged block"
+    assert merge_text_blocks(merged) is merged, "merging twice changes nothing"
+    # (c) where it must not apply
+    tr = {"type": "tool_result", "tool_use_id": "t1", "content": "x"}
+    a, b, c = ({"type": "text", "text": s} for s in "abc")
+    img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    def one(blocks, **kw):
+        return merge_text_blocks([{"role": "user", "content": blocks}], **kw)[0]["content"]
+    assert one([a, tr, b]) == [a, tr, b], "a tool_result between two text blocks"
+    assert one([a, img, b]) == [a, img, b]
+    assert one([{**a, "cache_control": {"type": "ephemeral"}}, b]) == [{**a, "cache_control": {"type": "ephemeral"}}, b], "never across a breakpoint"
+    assert one([a, {**b, "cache_control": {"type": "ephemeral"}}]) == [{"type": "text", "text": "a\nb", "cache_control": {"type": "ephemeral"}}]
+    cit = {"type": "text", "text": "q", "citations": [{"type": "char_location"}]}
+    assert one([a, cit, b]) == [a, cit, b], "a block with citations carries metadata that cannot be joined"
+    assert one([{"type": "thinking", "thinking": "hm", "signature": "sig"}, a, b]) == [{"type": "thinking", "thinking": "hm", "signature": "sig"}, {"type": "text", "text": "a\nb"}]
+    only_str = [{"role": "user", "content": "plain string content"}]
+    assert merge_text_blocks(only_str) is only_str
+    single = [{"role": "user", "content": [a]}]
+    assert merge_text_blocks(single) is single, "one block: nothing to merge, same object back"
+    # (d) fail open: malformed payloads are returned as they came, never raised
+    class Boom(dict):
+        def get(self, *a):
+            raise RuntimeError("poisoned")
+    for bad in (None, 5, "x", [None], [{"role": "user"}], [{"role": "user", "content": [None, 3]}], [{"role": "user", "content": [{"type": "text", "text": 5}, {"type": "text", "text": "a"}]}],
+                [Boom(role="user", content=[a, b])]):
+        r = merge_text_blocks(bad)
+        assert r is bad or r == bad, bad
+    # (e) byte-stable prefixes across 30 turns, and the hazard the idea has to avoid
+    assert _prefix_stable(_history(30, "last"), respect_cc=True), "with the breakpoint on a message's last block the prefix stays identical"
+    assert not _prefix_stable(_history(30, "mid"), respect_cc=True), "respect_cc with a mid-message breakpoint flips a message between merged and unmerged"
+    assert _prefix_stable(_history(30, "mid"), respect_cc=False), "ignoring the breakpoint position keeps every earlier message byte-identical"
+    return {"turns": 30, "boundaries_merged": boundaries, "json_bytes_saved": saved_bytes, "bytes_saved_per_boundary": round(saved_bytes / boundaries, 1),
+            "blocks_before": nblocks(final), "blocks_after": nblocks(merged), "stable_when_cc_on_last_block": 1, "unstable_when_cc_mid_message_and_respected": 1}
+
+
+case(
+    1035,
+    claim="Adjacent plain text blocks in one message are joined with a newline unless a cache_control breakpoint sits between them, the reader sees the same segments and tool ids, blocks with other keys, other block types and malformed payloads are left alone, and the merged prefix is byte-identical across turns while the breakpoint sits on a message's last block.",
+    sim=sim_merge_text_blocks,
+)
