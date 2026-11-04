@@ -1182,4 +1182,837 @@ case(
     sim=sim_entity_cache,
 )
 
+# ---------------------------------------------------------------------------------------------------------------
+# #36 Strip comments and blank lines in YAML / TOML / INI
+
+_FAIL = object()
+_BLOCK = re.compile(r"[|>](?:[+-]?\d?|\d[+-])\Z")
+_DQ = re.compile(r'"(?:[^"\\]|\\.)*"')
+_SQ = re.compile(r"'(?:[^']|'')*'")
+_YKEY = re.compile(r"([A-Za-z0-9_.-]+):(?: +(.*))?\Z")
+
+
+def _indent(ln):
+    return len(ln) - len(ln.lstrip(" "))
+
+
+class YamlSubsetError(ValueError):
+    pass
+
+
+def _y_value(rest):
+    """Scalar text of a value part with its comment removed; raises outside the supported subset."""
+    s = rest.strip()
+    if s[:1] in ('"', "'"):
+        m = (_DQ if s[0] == '"' else _SQ).match(s)
+        if not m:
+            raise YamlSubsetError("unterminated or multi-line quoted scalar")
+        tail = s[m.end():]
+        if tail.strip() and not (tail[0] == " " and tail.strip().startswith("#")):
+            raise YamlSubsetError("text after a quoted scalar")
+        return s[: m.end()]
+    m = re.search(r"(?:^|\s)#", s)
+    return (s[: m.start()] if m else s).rstrip()
+
+
+def yaml_load(text):
+    """Loader for the YAML subset the fixtures use: block maps and sequences, plain/quoted scalars, | and > block scalars,
+    comments. Anything else raises, so unsupported documents are never claimed safe. Scalars keep their quoting style."""
+    if "\t" in text or "\r" in text:
+        raise YamlSubsetError("tabs or CR")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    at = [0]
+
+    def sig(i):
+        while i < len(lines):
+            st = lines[i].strip()
+            if st and not st.startswith("#"):
+                return i
+            i += 1
+        return None
+
+    def scalar(rest):
+        v = _y_value(rest)
+        if v == "":
+            return None
+        return ("dq" if v[0] == '"' else "sq" if v[0] == "'" else "p", v)
+
+    def block_scalar(header, parent):
+        body, i = [], at[0]
+        while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > parent):
+            body.append(lines[i])
+            i += 1
+        at[0] = i
+        nonblank = [ln for ln in body if ln.strip()]
+        bi = _indent(nonblank[0]) if nonblank else 0
+        out = []
+        for ln in body:
+            if ln.strip():
+                if _indent(ln) < bi:
+                    raise YamlSubsetError("under-indented block scalar line")
+                out.append(ln[bi:])
+            elif ln != "":
+                raise YamlSubsetError("whitespace-only line inside a block scalar")
+            else:
+                out.append("")
+        if "+" not in header:
+            while out and out[-1] == "":
+                out.pop()
+        return ("B", header, tuple(out))
+
+    def parse_block(ind):
+        i = sig(at[0])
+        if i is None:
+            return None
+        st = lines[i][ind:]
+        return parse_seq(ind) if st.startswith("- ") or st == "-" else parse_map(ind)
+
+    def nested(ind):
+        j = sig(at[0])
+        if j is not None and (_indent(lines[j]) > ind or (_indent(lines[j]) == ind and lines[j][ind:].startswith("- "))):
+            return parse_block(_indent(lines[j]))
+        return None
+
+    def parse_map(ind):
+        d = {}
+        while True:
+            i = sig(at[0])
+            if i is None or _indent(lines[i]) < ind:
+                return d
+            if _indent(lines[i]) > ind:
+                raise YamlSubsetError("unexpected indent")
+            body = lines[i][ind:]
+            if body.startswith("- ") or body == "-":
+                return d
+            m = _YKEY.match(body)
+            if not m or m.group(1) in d:
+                raise YamlSubsetError(f"not a key line: {body!r}")
+            key, rest = m.group(1), _y_value(m.group(2) or "")
+            at[0] = i + 1
+            if rest == "":
+                d[key] = nested(ind)
+            elif _BLOCK.match(rest):
+                d[key] = block_scalar(rest, ind)
+            else:
+                d[key] = scalar(rest)
+
+    def parse_seq(ind):
+        out = []
+        while True:
+            i = sig(at[0])
+            if i is None or _indent(lines[i]) != ind or not (lines[i][ind:].startswith("- ") or lines[i][ind:] == "-"):
+                if i is not None and _indent(lines[i]) > ind:
+                    raise YamlSubsetError("unexpected indent")
+                return out
+            body = lines[i][ind + 1:].lstrip(" ")
+            if body == "":
+                at[0] = i + 1
+                out.append(nested(ind))
+            elif _YKEY.match(body):
+                lines[i] = " " * (ind + 2) + body
+                out.append(parse_map(ind + 2))
+            else:
+                at[0] = i + 1
+                out.append(scalar(body))
+
+    i = sig(0)
+    if i is None:
+        return None
+    v = parse_block(_indent(lines[i]))
+    if sig(at[0]) is not None:
+        raise YamlSubsetError("trailing content")
+    return v
+
+
+def _toml_p(t):
+    try:
+        return repr(tomllib.loads(t))
+    except Exception:  # noqa: BLE001
+        return _FAIL
+
+
+def _ini_p(t):
+    try:
+        cp = configparser.ConfigParser(interpolation=None, strict=False)  # default: '#' and ';' full-line comments only
+        cp.optionxform = str
+        cp.read_string(t)
+        return repr(({s: dict(cp.items(s)) for s in cp.sections()}, dict(cp.defaults())))
+    except Exception:  # noqa: BLE001
+        return _FAIL
+
+
+def _yaml_p(t):
+    try:
+        return repr(yaml_load(t))
+    except Exception:  # noqa: BLE001
+        return _FAIL
+
+
+def _toml_scan(line, ml):
+    """(index of a comment start or -1, multi-line string state at end of line) for one TOML line."""
+    i, n, state = 0, len(line), ml
+    while i < n:
+        c = line[i]
+        if state == '"""':
+            if c == "\\":
+                i += 2
+            elif line.startswith('"""', i):
+                while i < n and line[i] == '"':
+                    i += 1
+                state = None
+            else:
+                i += 1
+        elif state == "'''":
+            if line.startswith("'''", i):
+                while i < n and line[i] == "'":
+                    i += 1
+                state = None
+            else:
+                i += 1
+        elif c == "#":
+            return i, state
+        elif line.startswith('"""', i):
+            state, i = '"""', i + 3
+        elif line.startswith("'''", i):
+            state, i = "'''", i + 3
+        elif c == '"':
+            i += 1
+            while i < n and line[i] != '"':
+                i += 2 if line[i] == "\\" else 1
+            i += 1
+        elif c == "'":
+            j = line.find("'", i + 1)
+            i = n if j < 0 else j + 1
+        else:
+            i += 1
+    return -1, state
+
+
+def _y_inline(line):
+    """(line without its trailing comment, block-scalar header or None) for one YAML line."""
+    m = re.match(r"^(\s*(?:- +)*[A-Za-z0-9_.-]+:)((?: +.*)?)$", line) or re.match(r"^(\s*- +)(.*)$", line)
+    if not m:
+        return line, None
+    head, value = m.group(1), m.group(2)
+    s = value.lstrip(" ")
+    lead = value[: len(value) - len(s)]
+    if s[:1] in ('"', "'"):
+        q = (_DQ if s[0] == '"' else _SQ).match(s)
+        tail = q.end() if q else None
+        if q and s[tail:].startswith(" ") and s[tail:].lstrip(" ").startswith("#"):
+            value = lead + s[:tail]
+    else:
+        c = re.search(r"(?:^|\s)#", s)
+        if c:
+            value = (lead + s[: c.start()]).rstrip()
+    v = value.strip()
+    return head + value, (v if _BLOCK.match(v) else None)
+
+
+def strip_config(text):
+    if "\r" in text:
+        return text
+    toml, ini = _toml_p(text) is not _FAIL, _ini_p(text) is not _FAIL
+    mode = "toml-ini" if toml and ini else "toml" if toml else "ini" if ini else "yaml" if _yaml_p(text) is not _FAIL else None
+    if mode is None:
+        return text
+    had_nl = text.endswith("\n")
+    lines = text.split("\n")
+    if had_nl:
+        lines.pop()
+    out: list[tuple[str, str, int]] = []  # (L line | B blank candidate | V verbatim, text, index of the original line)
+    if mode in ("toml", "toml-ini"):
+        ml = None
+        for n, ln in enumerate(lines):
+            start, (idx, ml) = ml, _toml_scan(ln, ml)
+            if start is not None:  # inside a multi-line string: only a comment after the closing quotes may go
+                out.append(("V", ln[:idx].rstrip() if idx >= 0 and mode == "toml" else ln, n))
+            elif idx >= 0 and not ln[:idx].strip():
+                continue  # full-line comment
+            else:
+                ln = ln[:idx].rstrip() if idx >= 0 and mode == "toml" else ln
+                out.append(("B" if not ln.strip() else "L", ln, n))
+    elif mode == "ini":
+        for n, ln in enumerate(lines):
+            if ln.strip().startswith(("#", ";")):
+                continue
+            out.append(("B" if not ln.strip() else "L", ln, n))
+    else:
+        parent, keep_tail, pending = None, False, []
+        for n, ln in enumerate(lines):
+            if parent is not None:
+                if not ln.strip():
+                    pending.append((ln, n))
+                    continue
+                if _indent(ln) > parent:
+                    out.extend(("V", p, k) for p, k in pending)
+                    out.append(("V", ln, n))
+                    pending = []
+                    continue
+                out.extend(("V" if keep_tail else "B", p, k) for p, k in pending)  # trailing blanks after the block
+                pending, parent = [], None
+            if not ln.strip():
+                out.append(("B", ln, n))
+            elif ln.strip().startswith("#"):
+                continue
+            else:
+                new, hdr = _y_inline(ln)
+                out.append(("L", new, n))
+                if hdr:
+                    parent, keep_tail = _indent(ln), "+" in hdr
+        out.extend(("V" if keep_tail and parent is not None else "B", p, k) for p, k in pending)
+    res, i = [], 0
+    while i < len(out):
+        if out[i][0] != "B":
+            res.append(out[i])
+            i += 1
+            continue
+        j = i
+        while j < len(out) and out[j][0] == "B":
+            j += 1
+        if j < len(out) and _indent(out[j][1]) > 0:  # next line is indented: it may continue a multi-line value
+            res.extend(out[i:j])
+        i = j
+    # a final line without newline stays without one only if that very line survived; if it was dropped, the line
+    # before it was newline-terminated in the original (this matters for |+ blocks, which count trailing newlines)
+    end_nl = had_nl or (bool(res) and res[-1][2] != len(lines) - 1)
+    return "\n".join(t for _k, t, _n in res) + ("\n" if end_nl and res else "")
+
+
+def oracle36(x, e):
+    """Every parser that accepts x (tomllib, configparser, the YAML-subset loader) must accept e and read the same thing."""
+    if e == x:
+        return True
+    accepted = False
+    for parse in (_toml_p, _ini_p, _yaml_p):
+        a = parse(x)
+        if a is _FAIL:
+            continue
+        accepted = True
+        if parse(e) != a:
+            return False
+    return accepted
+
+
+TOML_DOC = '''# Project configuration
+# generated by hand, do not edit
+
+[package]
+name = "widgets"          # the published name
+version = "2.1.0"
+homepage = "https://example.com/widgets#readme"   # a fragment is part of the URL
+tagline = "C# is not a comment # really"
+pattern = 'a#b'           # literal string with a hash
+
+description = """
+Line one # inside a multi-line string
+# this looks like a comment but is text
+
+after a blank line
+"""    # trailing comment after the closing quotes
+
+keywords = [
+    "a",      # first
+    # a full-line comment inside the array
+    "b",
+]
+
+
+[dependencies]
+requests = ">=2.0"   # pinned loosely
+click = "^8.1"
+
+# optional extras
+[extras]
+yaml = { version = "6", optional = true }   # only for config loading
+'''
+
+INI_DOC = """; global settings
+# also a comment style
+
+[metadata]
+name = widgets
+url = https://example.com/page#section   ; the INI parser keeps this as part of the value
+long_description =
+    First line of the description
+
+    third line after a blank line
+    # a comment line inside a value is skipped by the parser
+
+[options]
+install_requires =
+    requests
+    # dev only
+    click
+
+; trailing comment
+"""
+
+AMBIGUOUS = """# build settings
+[build]
+target = "x86_64"   # TOML: a comment. INI: part of the value, so it must stay
+opt = 3
+
+# tests
+[test]
+retries = 2
+"""
+
+YAML_DOC = """# docker-compose for the demo stack
+version: "3.8"      # compose file format
+
+services:
+  web:
+    image: nginx:1.25   # pinned
+    ports:
+      - "8080:80"       # host:container
+      - '9090:90'
+    environment:
+      - LOG_LEVEL=debug # a comment
+      - COLOR="#ff0000"
+      - HOME_URL=http://example.com/#top
+    healthcheck:
+      test: curl -f http://localhost:80/#health || exit 1
+    command: |
+      #!/bin/sh
+      # start the server
+      echo "starting"
+
+      exec nginx -g 'daemon off;'
+    labels:
+      note: "a # b"
+      other: 'it''s # fine'   # trailing
+
+  db:
+    image: postgres:16
+
+# trailing section
+volumes:
+  data:
+"""
+
+case(
+    36,
+    claim="Full-line comments, trailing comments (TOML and YAML only) and blank lines are removed from TOML, INI and YAML; a # inside a quoted string, a URL fragment, a multi-line string or a block scalar is never touched, and every parser that reads the original (tomllib, configparser, a YAML-subset loader) reads the result identically.",
+    loses="comments, blank lines (before a line that starts at column 0) and spaces before a trailing comment; INI trailing comments are not comments to configparser, so they stay",
+    encode=lambda t: guarded(t, strip_config),
+    equivalent=oracle36,
+    fixtures=[
+        Fixture("TOML with strings, arrays and multi-line strings", TOML_DOC, True),
+        Fixture("INI with ; and # comments and a multi-line value", INI_DOC, True),
+        Fixture("valid as both TOML and INI: inline comments stay", AMBIGUOUS, True),
+        Fixture("YAML compose file with a block scalar", YAML_DOC, True),
+        Fixture("YAML without comments or blank lines", "a: 1\nb:\n  - x\n  - y\nc: \"#not a comment\"\n", False),
+        Fixture("TOML without comments or blank lines", 'a = 1\n[t]\nb = "x # y"\n', False),
+        Fixture("Python source", "# header\nimport os\n\n\ndef f(a):\n    # note\n    return a  # trailing\n", False),
+        Fixture("Markdown with # headings", "# Title\n\nSome text.\n\n## Section\n\n- item\n", False),
+        Fixture(".env file", "# secrets\nAPI_KEY=abc123   # not a comment in dotenv\n\nDEBUG=1\n", False),
+        Fixture("shell script", "#!/bin/sh\n# run\n\necho hi # say hi\n", False),
+        Fixture("YAML outside the supported subset (multi-line plain scalar)", "description: this is a long\n  text with # inside\n\n# real comment\nb: 1\n", False),
+        Fixture("YAML with CRLF", YAML_DOC.replace("\n", "\r\n"), False),
+        Fixture("keep-chomped block scalar and folded scalar", "a: |+\n  text # not a comment\n\n\n# comment\nb: >\n  folded # text\n\n  more\n\nc: 1  # x\n", None),
+        Fixture("TOML ml strings, 4 closing quotes, literal ml", 'a = """x # y\n\nz""""  # c\nb = \'\'\'\n# lit\n\n\'\'\'\n\n# end\n', None),
+        Fixture("INI with DEFAULT, indented comment, # inside a value", "[DEFAULT]\nk = v # kept\n\n  # indented comment\n[s]\nx = a;b\n\n\ny = 1\n", None),
+        Fixture("comment-only file", "# only a comment\n\n; and another\n", None),
+        Fixture("blank line before indented content stays", "a:\n\n  b: 1\n\n\nc: 2\n", None),
+    ],
+    min_gain=0.1,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #37 Fixed-width table padding to single separators (exact, via a geometry header)
+
+TBL = "§tbl "
+
+
+def _table_enc(text):
+    if "\t" in text or "\r" in text:
+        return text
+    had_nl = text.endswith("\n")
+    lines = text.split("\n")
+    if had_nl:
+        lines.pop()
+    if len(lines) < 3 or any(not ln or ln != ln.rstrip(" ") for ln in lines):
+        return text
+    width = max(len(ln) for ln in lines)
+    gut = [all(len(ln) <= p or ln[p] == " " for ln in lines) for p in range(width)]
+    regions, seps, p = [], [], 0
+    while p < width:
+        q = p
+        while q < width and gut[q] == gut[p]:
+            q += 1
+        (seps if gut[p] else regions).append((p, q))
+        p = q
+    s0 = seps[0][1] if seps and seps[0][0] == 0 else 0
+    if s0:
+        seps = seps[1:]
+    if len(regions) < 2 or len(seps) != len(regions) - 1:
+        return text
+    spec, cols = [str(s0)], []
+    for j, (a, b) in enumerate(regions):
+        cells = [ln[a:b] for ln in lines]
+        w = b - a
+        if all(c == c.strip(" ").ljust(w) or (c == c.strip(" ") and len(c) < w) for c in cells):
+            al = "L"
+        elif all(c == "" or c == c.strip(" ").rjust(w) for c in cells):
+            al = "R"
+        else:
+            return text
+        cols.append([c.strip(" ") for c in cells])
+        spec.append(f"{w}{al}")
+        if j < len(seps):
+            spec.append(str(seps[j][1] - seps[j][0]))
+    rows = []
+    for r in range(len(lines)):
+        fields = [col[r] for col in cols]
+        while fields and fields[-1] == "":
+            fields.pop()
+        rows.append("\t".join(fields))
+    out = TBL + " ".join(spec) + "\n" + "\n".join(rows) + ("\n" if had_nl else "")
+    return out if _table_dec(out) == text else text  # exactness guard: anything the geometry cannot express stays as it was
+
+
+def _table_dec(text):
+    head, _, body = text.partition("\n")
+    items = head[len(TBL):].split(" ")
+    s0 = int(items[0])
+    regs = [(int(t[:-1]), t[-1]) for t in items[1::2]]
+    seps = [int(t) for t in items[2::2]]
+    had_nl = body.endswith("\n")
+    out = []
+    for row in (body[:-1] if had_nl else body).split("\n"):
+        fields = row.split("\t")
+        parts = [" " * s0]
+        for j, f in enumerate(fields):
+            w, al = regs[j]
+            last = j == len(fields) - 1
+            parts.append(f.rjust(w) if al == "R" else f if last else f.ljust(w))
+            if not last:
+                parts.append(" " * seps[j])
+        out.append("".join(parts))
+    return "\n".join(out) + ("\n" if had_nl else "")
+
+
+enc37, dec37 = make_codec(TBL, _table_enc, _table_dec)
+
+KUBECTL = """NAME                                READY   STATUS             RESTARTS      AGE
+api-7d9f8b6c5-abcde                 1/1     Running            0             3d4h
+api-7d9f8b6c5-fghij                 1/1     Running            0             3d4h
+worker-5c6d7f8b9-xyz12              0/1     CrashLoopBackOff   12 (3m ago)   2h17m
+cron-nightly-28591440-qrstu         0/1     Completed          0             9h
+ingress-nginx-controller-6f8d9-k2   1/1     Running            2 (1d ago)    41d
+"""
+DOCKER_PS = """CONTAINER ID   IMAGE                    COMMAND                  CREATED          STATUS                     PORTS                  NAMES
+a1b2c3d4e5f6   nginx:1.25               "/docker-entrypoint.…"   2 hours ago      Up 2 hours                 0.0.0.0:80->80/tcp     web
+b2c3d4e5f6a1   postgres:16              "docker-entrypoint.s…"   2 hours ago      Up 2 hours                 5432/tcp               db
+c3d4e5f6a1b2   redis:7-alpine           "docker-entrypoint.s…"   3 days ago       Exited (0) 3 days ago                             cache
+d4e5f6a1b2c3   ghcr.io/acme/api:v2.1    "/app/server --port …"   About a minute   Up About a minute (healthy)  0.0.0.0:8080->8080/tcp   api
+"""
+PS_AUX = """USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.1 168936 11824 ?        Ss   Oct28   0:03 /sbin/init splash
+root           2  0.0  0.0      0     0 ?        S    Oct28   0:00 [kthreadd]
+www-data    1042  1.2  2.4 812340 98432 ?        Sl   09:12   0:41 nginx: worker process
+postgres    2210 10.5 11.3 2203112 454012 ?      Ss   09:13   3:02 postgres: main checkpointer
+alice       4711  0.0  0.1  15432  5120 pts/0    R+   10:01   0:00 ps aux
+"""
+DF_H = """Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        50G   32G   16G  67% /
+tmpfs           3.9G     0  3.9G   0% /dev/shm
+/dev/sdb1       916G  312G  558G  36% /mnt/data
+overlay          50G   32G   16G  67% /var/lib/docker/overlay2/abc123/merged
+"""
+NOTES = """NAME     STATUS    NOTE
+alpha    ok
+beta     failed    disk full on node 3
+gamma    ok
+delta    pending   waiting for quota
+"""
+
+case(
+    37,
+    claim="A fixed-width text table is stored as one geometry header (leading gap, per-column width and L/R alignment, gap widths) plus tab-separated trimmed cells; decoding re-pads every line to the identical bytes, and any table the geometry cannot express exactly is left untouched.",
+    encode=enc37,
+    decode=dec37,
+    fixtures=[
+        Fixture("kubectl get pods", KUBECTL, True),
+        Fixture("docker ps with empty PORTS cells", DOCKER_PS, True),
+        Fixture("ps aux with right-aligned numbers", PS_AUX, True),
+        Fixture("df -h", DF_H, True),
+        Fixture("last column empty on some rows", NOTES, True),
+        Fixture("prose", "The quick brown fox jumps over the lazy dog.\nA second line, a little longer than the first one.\nShort.\n", False),
+        Fixture("single column", "alpha\nbeta\ngamma\ndelta\n", False),
+        Fixture("table with a tab", KUBECTL.replace("Running", "Run\ting", 1), False),
+        Fixture("blank line inside the table", KUBECTL.replace("\ncron", "\n\ncron"), False),
+        Fixture("trailing spaces on a line", KUBECTL.replace("9h\n", "9h  \n"), False),
+        Fixture("CRLF output", KUBECTL.replace("\n", "\r\n"), False),
+        Fixture("table without a final newline", KUBECTL.rstrip("\n"), True),
+        Fixture("header-looking text from the encoder", "§tbl 0 4L 1 3L\nab\tcd\nef\tgh\n", None),
+        Fixture("sigil inside a cell, wide characters", KUBECTL.replace("Running", "Run§ing", 1).replace("fghij ", "日本語 ", 1), None),
+        Fixture("every cell right-aligned, indented", "".join(f"  {a:>6}{b:>8}{c:>5}\n" for a, b, c in [("id", "size", "n"), ("1", "20480", "3"), ("22", "5", "17"), ("333", "1", "2")]), True),
+    ],
+    min_gain=0.1,
+    idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #38 Markdown table padding and separator rows
+
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def _md_cells(row):
+    """Raw cells of a row that starts with '|' and ends with an unescaped '|' (trailing blanks allowed), else None."""
+    cells, cur, i, n = [], [], 1, len(row)
+    while i < n:
+        c = row[i]
+        if c == "\\" and i + 1 < n:
+            cur.append(row[i:i + 2])
+            i += 2
+        elif c == "|":
+            cells.append("".join(cur))
+            cur = []
+            i += 1
+        else:
+            cur.append(c)
+            i += 1
+    return None if "".join(cur).strip(" \t") else cells
+
+
+def _md_delim(cell):
+    return re.fullmatch(r":?-+:?", cell.strip(" \t")) is not None
+
+
+def _md_align(cell):
+    c = cell.strip(" \t")
+    return (":" if c.startswith(":") else "") + "-" + (":" if c.endswith(":") else "")
+
+
+def minimal_md_tables(text):
+    if "\r" in text:
+        return text
+    lines = text.split("\n")
+    out, i, fence = [], 0, None
+    while i < len(lines):
+        ln = lines[i]
+        m = _FENCE.match(ln)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and not ln.strip(" `~"):
+                fence = None
+            out.append(ln)
+            i += 1
+            continue
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            out.append(ln)
+            i += 1
+            continue
+        head = _md_cells(ln) if ln.startswith("|") else None
+        sep = _md_cells(lines[i + 1]) if head is not None and i + 1 < len(lines) and lines[i + 1].startswith("|") else None
+        if head is None or sep is None or len(sep) != len(head) or not all(_md_delim(c) for c in sep):
+            out.append(ln)
+            i += 1
+            continue
+        j, body = i + 2, []
+        while j < len(lines) and lines[j].startswith("|") and _md_cells(lines[j]) is not None:
+            body.append(_md_cells(lines[j]))
+            j += 1
+        if any(len(r) != len(head) for r in body):
+            out.extend(lines[i:j])  # ragged rows: GFM pads or truncates them, so do not touch the table
+        else:
+            def trim(c):
+                c = c.strip(" \t")
+                return c + " " if len(c) - len(c.rstrip("\\")) % 2 else c  # "a\\" + "|" would read as an escaped pipe
+
+            fmt = lambda cells: "|" + "|".join(trim(c) for c in cells) + "|"  # noqa: E731
+            out.append(fmt(head))
+            out.append("|" + "|".join(_md_align(c) for c in sep) + "|")
+            out.extend(fmt(r) for r in body)
+        i = j
+    return "\n".join(out)
+
+
+def md_model(text):
+    """Oracle view built differently (regex cell split, own fence tracking): [("line", s) | ("table", head, aligns, rows)]."""
+    cellre = re.compile(r"((?:\\.|[^|\\])*)\|")
+
+    def cells(row):
+        if not row.startswith("|"):
+            return None
+        body = row[1:]
+        got = cellre.findall(body)
+        used = sum(len(c) + 1 for c in got)
+        return [c.strip(" \t") for c in got] if not body[used:].strip(" \t") else None
+
+    lines, model, k, fence = text.split("\n"), [], 0, ""
+    while k < len(lines):
+        ln = lines[k]
+        f = re.match(r"^ {0,3}([`~])\1{2,}", ln)
+        if fence:
+            if f and ln.strip().startswith(fence) and set(ln.strip()) <= set(fence):
+                fence = ""
+            model.append(("line", ln))
+            k += 1
+        elif f:
+            fence = re.match(r"^ {0,3}([`~]+)", ln).group(1)
+            model.append(("line", ln))
+            k += 1
+        else:
+            h = cells(ln)
+            s = cells(lines[k + 1]) if h is not None and k + 1 < len(lines) else None
+            if h is not None and s is not None and len(h) == len(s) and all(re.fullmatch(r":?-+:?", c) for c in s):
+                rows, k = [], k + 2
+                while k < len(lines) and cells(lines[k]) is not None:
+                    rows.append(cells(lines[k]))
+                    k += 1
+                model.append(("table", h, [(c[0] == ":", c[-1] == ":") for c in s], rows))
+            else:
+                model.append(("line", ln))
+                k += 1
+    return model
+
+
+PR_TABLE = """## Review status
+
+| Check            | Result  | Duration | Notes                  |
+|:-----------------|:-------:|---------:|------------------------|
+| lint             | pass    |     12 s | none                   |
+| unit tests       | pass    |  4 m 10s | 2 skipped              |
+| integration      | fail    |  9 m 41s | see job 4411           |
+| docs build       | pass    |     58 s |                        |
+
+Merge when green.
+
+| Owner  | Area      |
+| ------ | --------- |
+| alice  | backend   |
+| bob    | frontend  |
+"""
+FENCED = PR_TABLE + "\nExample of the syntax:\n\n```markdown\n| a   | b   |\n|-----|-----|\n| 1   | 2   |\n```\n\n~~~\n| x   | y   |\n|-----|-----|\n~~~\n"
+
+case(
+    38,
+    claim="GFM pipe tables lose their cell padding and become |a|b| rows with a minimal :-: / -: / :- delimiter row; cell text (trimmed), column count and alignment are kept, and fenced code, text with pipes that is not a table, tables without outer pipes and ragged tables are left as they were.",
+    loses="whitespace around cell text and the number of dashes in the delimiter row",
+    encode=lambda t: guarded(t, minimal_md_tables),
+    equivalent=lambda x, e: md_model(x) == md_model(e),
+    fixtures=[
+        Fixture("padded status tables with alignment", PR_TABLE, True),
+        Fixture("tables inside code fences stay verbatim", FENCED, True),
+        Fixture("already minimal", "|a|b|\n|-|:-:|\n|1|2|\n", False),
+        Fixture("shell pipelines and bars that are not tables", "cat a.log | grep ERR | wc -l\n| not a table, no delimiter row |\n| still not |\n", False),
+        Fixture("table without outer pipes", "a   | b\n----|----\n1   | 2\n", False),
+        Fixture("ragged body row", "| a   | b   |\n|-----|-----|\n| 1   | 2   | 3 |\n| 4   |\n", False),
+        Fixture("header and delimiter disagree", "| a   | b   |\n|-----|-----|-----|\n| 1   | 2   |\n", False),
+        Fixture("escaped pipes and code spans", "| cmd             | meaning        |\n|-----------------|----------------|\n| `a \\| b`        | pipe in cell   |\n| `x`  y          | two  spaces    |\n", None),
+        Fixture("empty cells, unicode, trailing backslash", "| é  |    |  日本  |\n|----|----|-------|\n|    | a\\ | ✓     |\n", None),
+        Fixture("CRLF text", PR_TABLE.replace("\n", "\r\n"), None),
+        Fixture("table with trailing spaces and no final newline", "|  a  |  b  |   \n|:---|---:|\n|  1  |  2  |    ", None),
+        Fixture("table directly followed by text", "| a   | b   |\n|-----|-----|\n| 1   | 2   |\nlazy continuation line\n", None),
+    ],
+    min_gain=0.1,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #228 Join byte-separated hex runs: hexdump -C, xxd, od -x, openssl, ssh-keygen
+
+HEX = "§hex\n"
+_HEXRUN = re.compile(
+    r"(?<![0-9A-Fa-f])(?:(?P<sp>[0-9A-Fa-f]{2}(?: [0-9A-Fa-f]{2}){5,})|(?P<co>[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){7,})"
+    r"|(?P<wd>[0-9A-Fa-f]{4}(?: [0-9A-Fa-f]{4}){3,}))(?![0-9A-Fa-f])")
+_JOINED = re.compile(r"§(:|w)?((?:[0-9A-Fa-f]{2})+)")
+
+
+def _join_hex(text):
+    if SIG in text:
+        return text  # the joined runs are marked with the sigil, so a sigil already in the text would be ambiguous
+
+    def rep(m):
+        kind = m.lastgroup
+        run = m.group(kind)
+        toks = run.split(":" if kind == "co" else " ")
+        if not re.search("[A-Fa-f]", run) and set(toks) != {"00"}:
+            return run  # a run of plain decimal numbers (ids, counts) is not hex data
+        return SIG + {"sp": "", "co": ":", "wd": "w"}[kind] + "".join(toks)
+
+    body = _HEXRUN.sub(rep, text)
+    return HEX + body if body != text else text
+
+
+def _split_hex(text):
+    def un(m):
+        k, h = m.group(1), m.group(2)
+        step = 4 if k == "w" else 2
+        return (":" if k == ":" else " ").join(h[i:i + step] for i in range(0, len(h), step))
+
+    return _JOINED.sub(un, text[len(HEX):])
+
+
+enc228, dec228 = make_codec(HEX, _join_hex, _split_hex)
+
+
+def _chunks(data, n):
+    return [data[i:i + n] for i in range(0, len(data), n)]
+
+
+def hexdump_c(data):
+    out = []
+    for off, ch in zip(range(0, len(data), 16), _chunks(data, 16)):
+        a, b = " ".join(f"{x:02x}" for x in ch[:8]), " ".join(f"{x:02x}" for x in ch[8:])
+        out.append(f"{off:08x}  {a:<23}  {b:<23}  |{''.join(chr(x) if 32 <= x < 127 else '.' for x in ch)}|")
+    return "\n".join(out) + f"\n{len(data):08x}\n"
+
+
+def xxd(data):
+    out = []
+    for off, ch in zip(range(0, len(data), 16), _chunks(data, 16)):
+        g = " ".join(c.hex() for c in _chunks(ch, 2))
+        out.append(f"{off:08x}: {g:<39}  {''.join(chr(x) if 32 <= x < 127 else '.' for x in ch)}")
+    return "\n".join(out) + "\n"
+
+
+def od_x(data):
+    out = []
+    for off, ch in zip(range(0, len(data), 16), _chunks(data, 16)):
+        ch = ch + b"\0" * (len(ch) % 2)
+        out.append(f"{off:07o} " + " ".join(f"{ch[i + 1]:02x}{ch[i]:02x}" for i in range(0, len(ch), 2)))
+    return "\n".join(out) + f"\n{len(data):07o}\n"
+
+
+def colon_block(data, indent, per=15):
+    return "".join(" " * indent + ":".join(f"{x:02x}" for x in ch) + (":" if i + per < len(data) else "") + "\n"
+                   for i, ch in zip(range(0, len(data), per), _chunks(data, per)))
+
+
+_DATA = random.Random(228).randbytes(160)
+OPENSSL = ("Certificate:\n    Data:\n        Version: 3 (0x2)\n        Serial Number:\n" + colon_block(_DATA[:11], 12)
+           + "        Signature Algorithm: sha256WithRSAEncryption\n        Issuer: C = US, O = Example CA\n"
+           "        Subject Public Key Info:\n            Public-Key: (2048 bit)\n            Modulus:\n" + colon_block(_DATA[11:131], 20)
+           + "            Exponent: 65537 (0x10001)\n    Signature Algorithm: sha256WithRSAEncryption\n" + colon_block(_DATA[131:], 9))
+SSH_MD5 = "256 MD5:" + ":".join(f"{x:02x}" for x in _DATA[:16]) + " alice@laptop (ED25519)\n"
+
+case(
+    228,
+    claim="Runs of byte tokens separated by single spaces (hexdump -C, 2-digit), single colons (openssl, ssh-keygen -E md5) or 4-digit words (xxd, od -x) are joined into one marked run; decoding splits each run back at the recorded width and separator, so the original text is restored exactly.",
+    encode=enc228,
+    decode=dec228,
+    fixtures=[
+        Fixture("hexdump -C of 256 bytes", hexdump_c(random.Random(1).randbytes(256)), True),
+        Fixture("xxd of 192 bytes", xxd(random.Random(2).randbytes(192)), True),
+        Fixture("od -x of 128 bytes", od_x(random.Random(3).randbytes(128)), True),
+        Fixture("openssl x509 -text", OPENSSL, True),
+        Fixture("ssh-keygen -E md5 -lf", SSH_MD5 * 3, True),
+        Fixture("prose, git sha, short hex lists", "commit 3f2a9c4e1b7d8a60f5c2e9b3a1d4c7e8f0a2b6c9\nthe be ad fa ce de words, and #ff00aa colours\nde ad be ef\n", False),
+        Fixture("MAC, IPv6, UUID", "link/ether 00:1a:2b:3c:4d:5e\ninet6 2001:db8::ff00:42:8329\nid 550e8400-e29b-41d4-a716-446655440000\n", False),
+        Fixture("decimal numbers that happen to be two digits", "ids: 10 20 30 40 50 60 70 80 90\ncounts: 11 12 13 14 15 16 17 18\n", False),
+        Fixture("text with the sigil", "price 5§ " + hexdump_c(random.Random(4).randbytes(48)), None),
+        Fixture("text that starts like encoder output", "§hex\n§48656c6c6f20776f\nnot encoded\n", None),
+        Fixture("upper and mixed case, run at EOF, glued neighbours", "DE AD BE EF 00 11 22 33\nzzaa bb cc dd ee ff gg\nAa Bb cC Dd eE Ff 1234\n0A 0B 0C 0D 0E 0F", None),
+        Fixture("zero fill and a repeated-line star", "00000000  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|\n*\n00001000\n", None),
+    ],
+    min_gain=0.1,
+    idempotent=False,
+)
+
 # @@END@@

@@ -792,7 +792,7 @@ case(
         Fixture("rejected push: hints explain the failure", _PUSH_REJECTED, False),
         Fixture("status of a clean tree", "On branch main\nnothing to commit, working tree clean\n", False),
         Fixture("directions, names with spaces and quotes", _CRLF_MIXED, None),
-        Fixture("advice-shaped text without the leading indent", 'use "git add" now\n(use "git add" now)\n (use "git x" y\n\t(use "git z")\n', None),
+        Fixture("advice-shaped lines: only the indented complete one goes", 'use "git add" now\n(use "git add" now)\n (use "git x" y\n\t(use "git z")\n', None),
         Fixture("fold line already present", "warning: LF will be replaced by CRLF the next time Git touches it (working copy of: 'a' 'b')\nx\n", None),
         Fixture("CRLF line endings", _STATUS.replace("\n", "\r\n"), None),
     ],
@@ -886,4 +886,731 @@ case(
     + sigil_fixtures(BLAME_MAGIC, _blame(6, 40)),
     min_gain=0.3,
     idempotent=False,
+)
+
+# ===============================================================================================================
+# #410 Key-value metric lines with stable keys -> template once, then value rows. Roundtrip.
+# A run of 3+ iterations (k = 1..3 lines each) whose text is identical once every number is replaced by '¤' becomes
+# '§N k', the k template lines, then N rows of comma-separated values. Covers HF Trainer dict reprs, Keras epoch blocks
+# (k=2: 'Epoch i/n' + metrics line) and logfmt. A template must contain two or more 'key: ¤' / 'key=¤' pairs.
+# Off-schema lines (eval dicts, summaries) stay inline; the number text is kept exactly ('5e-05', '0.10', '-0.5').
+
+NUM = re.compile(r"(?<![\w.])-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+KVP = re.compile(r"[A-Za-z_][\w./-]*['\"]?\s*[:=]\s*¤")
+KV_MAGIC = "§kv (§N k: k template lines where ¤ is a value; each of the next N rows holds one iteration's values, comma-separated)\n"
+
+
+def _template(line: str) -> tuple[str, list[str]]:
+    vals: list[str] = []
+
+    def sub(m):
+        vals.append(m.group(0))
+        return "¤"
+
+    return NUM.sub(sub, line), vals
+
+
+def kv_core(text: str):
+    if "¤" in text:
+        return None
+    lines = text.split("\n")
+    tm = [_template(l) for l in lines]
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        best = None
+        for k in (1, 2, 3):
+            if i + k > n:
+                break
+            tpl = tuple(tm[i + t][0] for t in range(k))
+            joined = "\n".join(tpl)
+            if joined.count("¤") < 2 or len(KVP.findall(joined)) < 2:
+                continue
+            reps = 1
+            while i + (reps + 1) * k <= n and tuple(tm[i + reps * k + t][0] for t in range(k)) == tpl:
+                reps += 1
+            if reps < 3:
+                continue
+            rows = [",".join(v for t in range(k) for v in tm[i + r * k + t][1]) for r in range(reps)]
+            before = sum(len(lines[i + r * k + t]) + 1 for r in range(reps) for t in range(k))
+            after = len(f"§{reps} {k}") + 1 + sum(len(x) + 1 for x in tpl) + sum(len(r) + 1 for r in rows)
+            if after < before and (best is None or before - after > best[0]):
+                best = (before - after, k, reps, tpl, rows)
+        if best:
+            _, k, reps, tpl, rows = best
+            out += [f"§{reps} {k}", *tpl, *rows]
+            i += k * reps
+        else:
+            if lines[i].startswith(SIG):
+                return None
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def kv_decode(body: str) -> str:
+    lines, out, i = body.split("\n"), [], 0
+    while i < len(lines):
+        if lines[i].startswith(SIG):
+            reps, k = (int(x) for x in lines[i][1:].split(" "))
+            parts = "\n".join(lines[i + 1 : i + 1 + k]).split("¤")
+            for row in lines[i + 1 + k : i + 1 + k + reps]:
+                out += (parts[0] + "".join(v + p for v, p in zip(row.split(","), parts[1:]))).split("\n")
+            i += 1 + k + reps
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+kv_encode, kv_unencode = framed(KV_MAGIC, kv_core, kv_decode)
+
+
+def _hf_trainer(seed: int = 410, n: int = 24) -> str:
+    rng = random.Random(seed)
+    out = ["***** Running training *****", "  Num examples = 7000", "  Total optimization steps = 2625"]
+    loss = 2.5
+    for step in range(n):
+        loss = max(0.2, loss - rng.random() * 0.12)
+        lr = 5e-05 * (1 - step / (n + 5))
+        out.append("{'loss': %s, 'grad_norm': %s, 'learning_rate': %s, 'epoch': %s}" % (round(loss, 4), round(rng.random() * 2, 4), repr(lr), round((step + 1) / 8, 2)))
+        if step == n // 2:
+            out.append("{'eval_loss': 1.2231, 'eval_runtime': 12.4, 'eval_samples_per_second': 80.6, 'eval_steps_per_second': 10.1, 'epoch': 1.5}")
+    out.append("{'train_runtime': 412.6, 'train_samples_per_second': 50.9, 'train_steps_per_second': 6.36, 'train_loss': 1.1042, 'epoch': 3.0}")
+    return "\n".join(out) + "\n"
+
+
+def _keras(seed: int = 411, epochs: int = 8) -> str:
+    rng = random.Random(seed)
+    out = []
+    for e in range(1, epochs + 1):
+        out.append(f"Epoch {e}/{epochs}")
+        out.append(f"469/469 ━━━━━━━━━━━━━━━━━━━━ {rng.randint(3, 12)}s {rng.randint(5, 30)}ms/step - accuracy: {rng.random():.4f} - loss: {rng.random():.4f} - val_accuracy: {rng.random():.4f} - val_loss: {rng.random():.4f}")
+    return "\n".join(out) + "\n"
+
+
+def _logfmt(seed: int = 412, n: int = 20) -> str:
+    rng = random.Random(seed)
+    return "".join(f'level=info msg="request done" status={rng.choice([200, 200, 404])} latency_ms={rng.randint(2, 400)} bytes={rng.randint(100, 90000)}\n' for _ in range(n))
+
+
+_DISTINCT_KEYS = "".join("{" + ", ".join(f"'k{(i * j) % 7}': {i + j}" for j in range(3)) + "}\n" for i in range(1, 12))
+
+case(
+    410,
+    claim="Runs of 3+ iterations (1-3 lines each) that match once every number becomes '¤' are written as a template plus comma-separated value rows with the number text kept exactly; other lines stay inline and decode restores the exact bytes.",
+    encode=kv_encode,
+    decode=kv_unencode,
+    fixtures=[
+        Fixture("HF Trainer dict repr with an eval line", _hf_trainer(), True),
+        Fixture("Keras epoch blocks (2 lines per iteration)", _keras(), True),
+        Fixture("logfmt request lines", _logfmt(), True),
+        Fixture("every line has different keys", _DISTINCT_KEYS, False),
+        Fixture("numbered steps are not metrics", "".join(f"step {i} of 40 finished in {i * 3} seconds\n" for i in range(1, 41)), False),
+        Fixture("only two matching lines", "{'loss': 1.5, 'epoch': 1}\n{'loss': 1.4, 'epoch': 2}\n", False),
+        Fixture("number formats: exponent, sign, nan, ints", _hf_trainer() + "".join(f"{{'loss': {v}, 'x': {w}}}\n" for v, w in [("1E5", "-0"), ("-1e-3", "007"), ("nan", "1"), ("2", "inf"), ("1.", ".5")]), None),
+        Fixture("text already containing the slot char", _hf_trainer() + "{'loss': 1, 'a': ¤}\n", None),
+        Fixture("unblocked line starting with the sigil", _hf_trainer() + "§3 1\n", None),
+        Fixture("CRLF metric lines", _hf_trainer().replace("\n", "\r\n"), None),
+        Fixture("no trailing newline", _logfmt().rstrip("\n"), None),
+    ]
+    + sigil_fixtures(KV_MAGIC, _hf_trainer(3, 12)),
+    min_gain=0.25,
+    idempotent=False,
+)
+
+# ===============================================================================================================
+# #423 Folded-stack profiles ('a;b;c 17') as an order-preserving prefix tree. Roundtrip. Each line keeps only the frames not
+# shared with the line above, indented by the shared count. A true trie would merge non-adjacent equal prefixes and so
+# reorder lines; stackcollapse output is sorted, so adjacency gives the same print, and unsorted py-spy --raw still decodes.
+
+_STACK = re.compile(r"(.+) ([0-9]+)")
+FOLD_MAGIC = "§fold (n leading spaces = keep the first n ';'-frames of the line above)\n"
+
+
+def fold_core(text: str):
+    lines, nl = split_nl(text)
+    if not lines:
+        return None
+    out, prev = [], []
+    for l in lines:
+        m = _STACK.fullmatch(l)
+        if not m:
+            return None
+        frames = m.group(1).split(";")
+        if any(not f or f[0].isspace() for f in frames):
+            return None
+        c = 0
+        while c < min(len(prev), len(frames) - 1) and prev[c] == frames[c]:
+            c += 1
+        out.append(" " * c + ";".join(frames[c:]) + " " + m.group(2))
+        prev = frames
+    return join_nl(out, nl)
+
+
+def fold_decode(body: str) -> str:
+    lines, nl = split_nl(body)
+    out, prev = [], []
+    for l in lines:
+        c = len(l) - len(l.lstrip(" "))
+        stack, _, n = l[c:].rpartition(" ")
+        prev = prev[:c] + stack.split(";")
+        out.append(";".join(prev) + " " + n)
+    return join_nl(out, nl)
+
+
+fold_encode, fold_unencode = framed(FOLD_MAGIC, fold_core, fold_decode)
+
+
+def _folded(seed: int = 423, n: int = 40, shuffle: bool = False) -> str:
+    rng = random.Random(seed)
+    root = ["<module> (app/main.py:88)", "main (app/main.py:61)", "serve_forever (app/server.py:204)"]
+    mid = ["handle_get (app/routes.py:41)", "handle_post (app/routes.py:88)", "handle_ws (app/ws.py:12)"]
+    sub = ["render (app/views.py:77)", "query (app/db.py:120)", "validate (app/schema.py:33)", "auth (app/auth.py:19)"]
+    leaf = ["dumps (json/__init__.py:231)", "execute (sqlite3/dbapi2.py:0)", "sha256 (hashlib.py:11)", "sleep (time.py:0)", "match (re/__init__.py:166)"]
+    stacks = set()
+    while len(stacks) < n:
+        parts = root + [rng.choice(mid), rng.choice(sub)] + ([rng.choice(leaf)] if rng.random() < 0.8 else [])
+        stacks.add(";".join(parts))
+    rows = [f"{s} {rng.randint(1, 300)}" for s in sorted(stacks)]
+    if shuffle:
+        rng.shuffle(rows)
+    return "\n".join(rows) + "\n"
+
+
+_NO_SHARED = "".join(f"worker{i} (w.py:{i});run (w.py:9) {i + 3}\n" for i in range(25))
+_PERF_SCRIPT = "python 1234 [001] 55.1: cycles:\n\t7f1 PyEval_EvalFrame (/usr/lib/libpython3.so)\n\t7f2 _start (/usr/bin/python)\n\n" * 6
+
+case(
+    423,
+    claim="Folded-stack lines 'a;b;c N' are written with only the frames not shared with the previous line, indented by the shared-frame count; order, counts (as text) and frame text are restored exactly.",
+    encode=fold_encode,
+    decode=fold_unencode,
+    fixtures=[
+        Fixture("sorted py-spy/stackcollapse output", _folded(), True),
+        Fixture("no frame shared between lines", _NO_SHARED, False),
+        Fixture("perf script output is not folded", _PERF_SCRIPT, False),
+        Fixture("folded-looking text without counts", "a;b;c\nd;e;f\n" * 10, False),
+        Fixture("unsorted stacks (shared prefixes recur)", _folded(5, 30, True), None),
+        Fixture("prefix relations, duplicates, zero-padded counts", _folded() + "a;b 5\na;b;c 3\na;b 007\na 1\na;b;c;d 99999999999999999999\na;b;c;d 1\n", None),
+        Fixture("frames with spaces and a lone-frame stack", _folded() + "f (a b.py:1);g 2\nf (a b.py:1);g;h  3\nsolo 4\n", None),
+        Fixture("empty frame or leading space (refused)", _folded() + "a;;b 3\n", None),
+        Fixture("no trailing newline", _folded().rstrip("\n"), None),
+    ]
+    + sigil_fixtures(FOLD_MAGIC, _folded(7, 20)),
+    min_gain=0.35,
+    idempotent=False,
+)
+
+# ===============================================================================================================
+# #516 sysctl -a: fold per-interface / per-CPU key families. Equivalent: 'P.{i1,i2,..}.S = v' lists every instance that
+# has that suffix and value; the multiset of 'key = value' lines is unchanged, their order is not (a folded family sits
+# at its first member). Input containing braces in a key is left alone (they would read as a fold).
+
+
+def sysctl_fold(text: str) -> str:
+    lines = text.split("\n")
+    parsed: list[tuple[str, str] | None] = []
+    for l in lines:
+        k, sep, v = l.partition(" = ")
+        if sep and k:
+            if "{" in k or "}" in k:
+                return text
+            parsed.append((k, v))
+        else:
+            parsed.append(None)
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    cands: dict[int, list[tuple]] = {}
+    for idx, kv in enumerate(parsed):
+        if kv is None:
+            continue
+        parts = kv[0].split(".")
+        cands[idx] = []
+        for j in range(1, len(parts) - 1):
+            if parts[j] and "," not in parts[j]:
+                sig = (tuple(parts[:j]), tuple(parts[j + 1 :]), kv[1])
+                cands[idx].append(sig)
+                groups[sig].append(idx)
+    chosen: dict[tuple, list[int]] = defaultdict(list)
+    for idx, sl in cands.items():
+        if sl:
+            best = max(sl, key=lambda s: (len(groups[s]), len(s[0])))
+            if len(groups[best]) >= 3:
+                chosen[best].append(idx)
+    member = {ix: sig for sig, idxs in chosen.items() if len(idxs) >= 3 for ix in idxs}
+    out, done = [], set()
+    for idx, l in enumerate(lines):
+        sig = member.get(idx)
+        if sig is None:
+            out.append(l)
+        elif sig not in done:
+            done.add(sig)
+            P, S, v = sig
+            inst = [parsed[ix][0].split(".")[len(P)] for ix in chosen[sig]]
+            out.append(".".join(P) + ".{" + ",".join(inst) + "}." + ".".join(S) + " = " + v)
+    enc = "\n".join(out)
+    return enc if len(enc) < len(text) else text
+
+
+def sysctl_expand(text: str) -> list[str]:
+    out = []
+    for l in text.split("\n"):
+        k, sep, v = l.partition(" = ")
+        m = re.fullmatch(r"(.+?)\.\{([^{}]*)\}\.(.+)", k) if sep and "{" in k else None
+        if m:
+            out += [f"{m.group(1)}.{i}.{m.group(3)} = {v}" for i in m.group(2).split(",")]
+        else:
+            out.append(l)
+    return out
+
+
+def sysctl_equivalent(x: str, e: str) -> bool:
+    if e == x:
+        return True
+    xl = x.split("\n")
+    if Counter(sysctl_expand(e)) != Counter(xl):  # every key = value line, with multiplicity
+        return False
+    plain = [l for l in e.split("\n") if "{" not in l.partition(" = ")[0]]
+    it = iter(xl)
+    return all(any(p == o for o in it) for p in plain)  # lines that were not folded keep their relative order
+
+
+_CONF_KEYS = ["accept_local", "accept_redirects", "accept_source_route", "arp_accept", "arp_announce", "arp_filter", "arp_ignore", "bc_forwarding", "bootp_relay", "forwarding", "log_martians", "medium_id", "promote_secondaries", "proxy_arp", "route_localnet", "rp_filter", "secure_redirects", "send_redirects", "shared_media", "tag"]
+_CONF_VAL = {"accept_redirects": "1", "forwarding": "1", "secure_redirects": "1", "send_redirects": "1", "shared_media": "1", "rp_filter": "2"}
+
+
+def _sysctl() -> str:
+    out = ["kernel.hostname = ci-runner-07", "kernel.osrelease = 6.8.0-45-generic"]
+    ifaces = ["all", "default", "lo", "eth0", "docker0", "br-3f2a1c9d4e7b"]
+    for ifc in ifaces:
+        for k in _CONF_KEYS:
+            v = _CONF_VAL.get(k, "0")
+            if (ifc, k) in {("all", "rp_filter"), ("lo", "rp_filter"), ("docker0", "send_redirects")}:
+                v = "0" if k == "rp_filter" else "1"
+            if ifc == "lo" and k == "forwarding":
+                v = "0"
+            out.append(f"net.ipv4.conf.{ifc}.{k} = {v}")
+    for ifc in ["default", "eth0", "lo"]:
+        out += [f"net.ipv4.neigh.{ifc}.gc_stale_time = 60", f"net.ipv4.neigh.{ifc}.base_reachable_time_ms = 30000", f"net.ipv4.neigh.{ifc}.retrans_time_ms = 1000"]
+    out += ["net.ipv4.tcp_rmem = 4096\t131072\t6291456", "vm.swappiness = 60"]
+    return "\n".join(out) + "\n"
+
+
+case(
+    516,
+    claim="Lines 'P.I.S = v' with the same prefix P, suffix S and value v across 3+ instance names I (interfaces, CPUs) become one 'P.{I1,I2,..}.S = v'; expanding them yields exactly the original multiset of lines.",
+    loses="the order of lines: a folded family is listed once, at the position of its first member",
+    encode=sysctl_fold,
+    equivalent=sysctl_equivalent,
+    fixtures=[
+        Fixture("sysctl -a with six interfaces", _sysctl(), True),
+        Fixture("per-CPU keys with identical values", "".join(f"kernel.sched_domain.cpu{c}.domain{d}.busy_factor = {32 if d == 0 else 4}\n" for c in range(8) for d in range(2)), True),
+        Fixture("scalars only", "".join(f"kernel.key{i} = {i}\n" for i in range(30)), False),
+        Fixture("per-CPU keys with distinct values", "".join(f"kernel.sched_domain.cpu{c}.domain0.max_newidle_lb_cost = {1000 + 37 * c}\n" for c in range(16)), False),
+        Fixture("braces already in a key (refused)", _sysctl() + "net.{a,b}.x = 1\n", None),
+        Fixture("comma in an instance name, ' = ' inside a value", _sysctl() + "net.x.a,b.k = 1\nnet.x.c.k = 1\nnet.x.d.k = 1\nnet.x.e.k = 1\nnet.z.m.n = a = b\nnet.z.o.n = a = b\nnet.z.p.n = a = b\n", None),
+        Fixture("duplicate lines and diagnostics", _sysctl() + "sysctl: permission denied on key 'fs.protected_hardlinks'\n" + "net.ipv4.conf.eth0.tag = 0\n" * 2, None),
+        Fixture("no trailing newline", _sysctl().rstrip("\n"), None),
+    ],
+    min_gain=0.3,
+)
+
+# ===============================================================================================================
+# #888 Fold layer-index families in parameter listings. Roundtrip. A run of 3+ consecutive layers (index +1 each) that
+# print the same lines apart from the index is written once: '§model.layers.{0..31} 9' + the 9 lines without their prefix.
+# Layers that differ stay listed whole. Dotted-name listings only (state_dict, named_parameters, gguf-dump); Keras
+# summary tables do not carry the index in a dotted name and are not covered.
+
+_LAYER = re.compile(r"(\S*?\.)(0|[1-9][0-9]*)(\..*)")
+LAYERS_MAGIC = "§fold (§pre{a..b} k: the next k lines, once per index a..b, each with pre+index in front)\n"
+
+
+def layers_core(text: str):
+    lines, nl = split_nl(text)
+    ms = [_LAYER.fullmatch(l) for l in lines]
+    # blocks: maximal runs of consecutive lines sharing (pre, index)
+    blocks: list[tuple[int, int, str, int, list[str]]] = []
+    i = 0
+    while i < len(lines):
+        if ms[i] is None:
+            i += 1
+            continue
+        pre, idx = ms[i].group(1), int(ms[i].group(2))
+        j = i
+        while j + 1 < len(lines) and ms[j + 1] and ms[j + 1].group(1) == pre and int(ms[j + 1].group(2)) == idx:
+            j += 1
+        blocks.append((i, j + 1, pre, idx, [ms[t].group(3) for t in range(i, j + 1)]))
+        i = j + 1
+    fold_at: dict[int, tuple[int, int, str, int, list[str]]] = {}  # start line -> (end line, first idx, pre, last idx, posts)
+    b = 0
+    while b < len(blocks):
+        s, e, pre, idx, posts = blocks[b]
+        r = b
+        while r + 1 < len(blocks) and blocks[r + 1][0] == blocks[r][1] and blocks[r + 1][2] == pre and blocks[r + 1][3] == blocks[r][3] + 1 and blocks[r + 1][4] == posts:
+            r += 1
+        end = blocks[r][1]
+        if r - b + 1 >= 3:
+            orig = sum(len(l) + 1 for l in lines[s:end])
+            new = len(f"§{pre}{{{idx}..{blocks[r][3]}}} {len(posts)}") + 1 + sum(len(p) + 1 for p in posts)
+            if new < orig:
+                fold_at[s] = (end, idx, pre, blocks[r][3], posts)
+                b = r + 1
+                continue
+        b += 1
+    out, i = [], 0
+    while i < len(lines):
+        if i in fold_at:
+            end, a, pre, z, posts = fold_at[i]
+            out += [f"§{pre}{{{a}..{z}}} {len(posts)}", *posts]
+            i = end
+        else:
+            if lines[i].startswith(SIG):
+                return None
+            out.append(lines[i])
+            i += 1
+    return join_nl(out, nl)
+
+
+def layers_decode(body: str) -> str:
+    lines, nl = split_nl(body)
+    out, i = [], 0
+    while i < len(lines):
+        m = re.fullmatch(r"§(.*)\{([0-9]+)\.\.([0-9]+)\} ([0-9]+)", lines[i]) if lines[i].startswith(SIG) else None
+        if m:
+            k = int(m.group(4))
+            posts = lines[i + 1 : i + 1 + k]
+            for idx in range(int(m.group(2)), int(m.group(3)) + 1):
+                out += [f"{m.group(1)}{idx}{p}" for p in posts]
+            i += 1 + k
+        else:
+            out.append(lines[i])
+            i += 1
+    return join_nl(out, nl)
+
+
+layers_encode, layers_unencode = framed(LAYERS_MAGIC, layers_core, layers_decode)
+
+_PER_LAYER = [("self_attn.q_proj.weight", "[4096, 4096]"), ("self_attn.k_proj.weight", "[1024, 4096]"), ("self_attn.v_proj.weight", "[1024, 4096]"), ("self_attn.o_proj.weight", "[4096, 4096]"), ("mlp.gate_proj.weight", "[11008, 4096]"), ("mlp.up_proj.weight", "[11008, 4096]"), ("mlp.down_proj.weight", "[4096, 11008]"), ("input_layernorm.weight", "[4096]"), ("post_attention_layernorm.weight", "[4096]")]
+
+
+def _state_dict(layers: int = 8, odd: dict | None = None, extra: dict | None = None) -> str:
+    odd, extra = odd or {}, extra or {}
+    out = ["model.embed_tokens.weight torch.Size([32000, 4096])"]
+    for i in range(layers):
+        for name, shape in _PER_LAYER:
+            out.append(f"model.layers.{i}.{name} torch.Size({odd.get((i, name), shape)})")
+        out += [f"model.layers.{i}.{x}" for x in extra.get(i, [])]
+    out += ["model.norm.weight torch.Size([4096])", "lm_head.weight torch.Size([32000, 4096])"]
+    return "\n".join(out) + "\n"
+
+
+case(
+    888,
+    claim="3+ consecutive layers whose lines are identical apart from the index fold to '§prefix{a..b} k' plus the k lines once; layers that differ stay listed whole and decode restores the exact bytes.",
+    encode=layers_encode,
+    decode=layers_unencode,
+    fixtures=[
+        Fixture("8-layer state_dict, all layers alike", _state_dict(), True),
+        Fixture("outlier layers stay listed", _state_dict(12, odd={(5, "self_attn.k_proj.weight"): "[512, 4096]"}, extra={0: ["extra_bias torch.Size([4096])"]}), True),
+        Fixture("every layer has a different shape", "".join(f"model.layers.{i}.mlp.up_proj.weight torch.Size([{1000 + i}, 64])\n" for i in range(20)), False),
+        Fixture("only two layers", _state_dict(2), False),
+        Fixture("no layer index at all", "".join(f"encoder.block_{i}.weight torch.Size([8, 8])\n" for i in range(20)), False),
+        Fixture("non-canonical and non-consecutive indices", _state_dict(4) + "".join(f"x.layers.{i}.w [1]\n" for i in (0, 1, 2, 4, 5, 6, 7, 8)) + "y.layers.01.w [1]\ny.layers.02.w [1]\ny.layers.03.w [1]\n", None),
+        Fixture("nested indices", "".join(f"blocks.{i}.sub.{j}.w [2, 2]\n" for i in range(5) for j in range(2)), None),
+        Fixture("line starting with the sigil (refused)", _state_dict() + "§3 x\n", None),
+        Fixture("no trailing newline", _state_dict().rstrip("\n"), None),
+    ]
+    + sigil_fixtures(LAYERS_MAGIC, _state_dict(6)),
+    min_gain=0.4,
+    idempotent=False,
+)
+
+# ===============================================================================================================
+# #976 /proc/cpuinfo: fold the per-core stanzas. Roundtrip. When every stanza has the same keys in the same order, print
+# one template stanza (common lines verbatim, differing values as '¤') and one tab-separated row of differing values per
+# stanza. lscpu's summary is a single block with nothing per core to fold; only the stanza format is covered here.
+
+CPU_MAGIC = "§cpuinfo (template stanza; each ¤ takes the next tab-separated value of a row below the blank line, one row per stanza)\n"
+
+
+def cpu_core(text: str):
+    if "¤" in text or not text.endswith("\n\n"):
+        return None
+    stanzas = [s.split("\n") for s in text[:-2].split("\n\n")]
+    if len(stanzas) < 2:
+        return None
+    keys = None
+    for s in stanzas:
+        ks = []
+        for l in s:
+            k, sep, _ = l.partition(":")
+            if not sep:
+                return None
+            ks.append(k)
+        if keys is None:
+            keys = ks
+        elif ks != keys:
+            return None
+    vals = [[l.partition(":")[2] for l in s] for s in stanzas]
+    vary = [p for p in range(len(keys)) if len({v[p] for v in vals}) > 1]
+    if not vary or any("\t" in v[p] for v in vals for p in vary):
+        return None
+    tpl = [f"{keys[p]}:¤" if p in vary else stanzas[0][p] for p in range(len(keys))]
+    return "\n".join(tpl) + "\n\n" + "\n".join("\t".join(v[p] for p in vary) for v in vals) + "\n"
+
+
+def cpu_decode(body: str) -> str:
+    tpl, _, rows = body.partition("\n\n")
+    stanzas = []
+    for row in rows[:-1].split("\n"):
+        vals = iter(row.split("\t"))
+        stanzas.append("\n".join(l[:-1] + next(vals) if l.endswith("¤") else l for l in tpl.split("\n")))
+    return "\n\n".join(stanzas) + "\n\n"
+
+
+cpu_encode, cpu_unencode = framed(CPU_MAGIC, cpu_core, cpu_decode)
+
+_FLAGS = "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap clflushopt avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves arat avx512_vnni md_clear flush_l1d arch_capabilities"
+
+
+def _cpuinfo(cores: int = 4, hybrid: bool = False, seed: int = 976) -> str:
+    rng = random.Random(seed)
+    out = []
+    for i in range(cores):
+        e = hybrid and i % 2 == 1
+        flags = _FLAGS.replace(" avx512f avx512dq", "").replace(" avx512cd avx512bw avx512vl", "") if e else _FLAGS
+        out.append(
+            f"processor\t: {i}\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: {151 if e else 85}\nmodel name\t: Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz\n"
+            f"stepping\t: 7\nmicrocode\t: 0x5003604\ncpu MHz\t\t: {3000 + rng.randint(0, 99999) / 1000:.3f}\ncache size\t: 36608 KB\nphysical id\t: 0\nsiblings\t: {cores}\n"
+            f"core id\t\t: {i // 2}\ncpu cores\t: {cores // 2}\napicid\t\t: {i}\ninitial apicid\t: {i}\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 13\nwp\t\t: yes\n"
+            f"flags\t\t: {flags}\nbugs\t\t: spectre_v1 spectre_v2 spec_store_bypass swapgs taa itlb_multihit mmio_stale_data retbleed\nbogomips\t: 6000.00\n"
+            f"clflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 48 bits virtual\npower management:\n\n"
+        )
+    return "".join(out)
+
+
+def _one_vary() -> str:
+    common = "".join(f"key{i}\t: {'value' * 5}{i}\n" for i in range(12))
+    return "".join(f"a\t:{v}\n{common}\n" for v in [" 1", " 2", "", " 4"])
+
+
+case(
+    976,
+    claim="When every cpuinfo stanza has the same keys in order, the common lines are printed once in a template stanza and each stanza contributes one tab-separated row of its differing values; decode restores the exact bytes.",
+    encode=cpu_encode,
+    decode=cpu_unencode,
+    fixtures=[
+        Fixture("4 logical CPUs", _cpuinfo(), True),
+        Fixture("hybrid cores: flags differ between core types", _cpuinfo(4, True), True),
+        Fixture("single stanza (one core)", _cpuinfo(1), False),
+        Fixture("lscpu summary", "Architecture:            x86_64\n  CPU op-mode(s):        32-bit, 64-bit\nCPU(s):                  8\nModel name:              Intel(R) Xeon(R) Platinum 8275CL CPU @ 3.00GHz\nCaches (sum of all):\n  L1d:                   256 KiB (8 instances)\n", False),
+        Fixture("stanzas with different key sets", _cpuinfo(2) + _cpuinfo(1).replace("fpu\t\t: yes\n", ""), False),
+        Fixture("truncated tail (no closing blank line)", _cpuinfo(4) + "x", None),
+        Fixture("varying value containing a tab (refused)", _cpuinfo(4).replace("processor\t: 2", "processor\t: 2\tx"), None),
+        Fixture("slot char in the text (refused)", _cpuinfo(4).replace("0x5003604", "¤"), None),
+        Fixture("empty value in one stanza", _cpuinfo(4).replace("physical id\t: 0", "physical id\t:", 1), None),
+        Fixture("one varying key, empty value in one stanza", _one_vary(), None),
+    ]
+    + sigil_fixtures(CPU_MAGIC, _cpuinfo(3)),
+    min_gain=0.3,
+    idempotent=False,
+)
+
+# ===============================================================================================================
+# #799 Unwrap docker json-file and CRI log envelopes and join partial chunks. Equivalent, not roundtrip: the clock is kept to
+# the millisecond (the date goes to '§date' lines) and a line split into chunks keeps its FIRST chunk's time. Format:
+# 'hh:mm:ss.mmm' + one marker char (' ' stdout, '!' stderr, '~'/'?' stdout/stderr line cut off before its final chunk) + text.
+# Every line must be an envelope with UTC 'Z' time, else the input is left alone (a mixed log would be ambiguous).
+
+_CRI = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z (stdout|stderr) ([PF])(?: (.*))?")
+_ISO = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z")
+_MARK = {("stdout", True): " ", ("stderr", True): "!", ("stdout", False): "~", ("stderr", False): "?"}
+
+
+def _envelope(l: str):
+    m = _CRI.fullmatch(l)
+    if m:
+        return m.group(1), m.group(2) + "." + (m.group(3) or "").ljust(3, "0")[:3], m.group(4), m.group(5) == "F", m.group(6) or ""
+    if l.startswith("{"):
+        try:
+            o = json.loads(l)
+        except (ValueError, RecursionError):
+            return None
+        if not (isinstance(o, dict) and isinstance(o.get("log"), str) and o.get("stream") in ("stdout", "stderr") and isinstance(o.get("time"), str)):
+            return None
+        t = _ISO.fullmatch(o["time"])
+        full = o["log"].endswith("\n")
+        msg = o["log"][:-1] if full else o["log"]
+        if not t or "\n" in msg:
+            return None
+        return t.group(1), t.group(2) + "." + (t.group(3) or "").ljust(3, "0")[:3], o["stream"], full, msg
+    return None
+
+
+def unwrap_logs(text: str) -> str:
+    lines, nl = split_nl(text)
+    if not lines:
+        return text
+    out: list[str] = []
+    date = None
+    pend: dict[str, list] = {}
+
+    def emit(d, tm, stream, msg, full):
+        nonlocal date
+        if d != date:
+            out.append(f"§date {d}")
+            date = d
+        out.append(f"{tm}{_MARK[(stream, full)]}{msg}")
+
+    for l in lines:
+        r = _envelope(l)
+        if r is None:
+            return text
+        d, tm, stream, full, msg = r
+        buf = pend.setdefault(stream, [d, tm, []])
+        buf[2].append(msg)
+        if full:
+            emit(buf[0], buf[1], stream, "".join(buf[2]), True)
+            del pend[stream]
+    for stream, buf in pend.items():
+        emit(buf[0], buf[1], stream, "".join(buf[2]), False)
+    enc = join_nl(out, nl)
+    return enc if len(enc) < len(text) else text
+
+
+def _iso_parts(ts: str):
+    """(date, clock, frac) from an RFC 3339 UTC time, without regexes; None if it is not one."""
+    dig = "0123456789"
+    if len(ts) < 20 or ts[10] != "T" or ts[-1] != "Z":
+        return None
+    date, clock, tail = ts[:10], ts[11:19], ts[19:-1]
+    if not (all(c in dig for c in date[:4] + date[5:7] + date[8:]) and date[4] == date[7] == "-"):
+        return None
+    if not (all(c in dig for c in clock[:2] + clock[3:5] + clock[6:]) and clock[2] == clock[5] == ":"):
+        return None
+    if tail and not (tail[0] == "." and 1 <= len(tail) - 1 <= 9 and all(c in dig for c in tail[1:])):
+        return None
+    return date, clock, tail[1:]
+
+
+def _raw_records(text: str):
+    """Independent reading of the raw envelopes: completed lines in completion order, then still-open lines."""
+    lines = text.split("\n")
+    nl = text.endswith("\n")
+    if nl:
+        lines.pop()
+    recs, open_ = [], []
+    for l in lines:
+        if l.startswith("{"):
+            try:
+                o = json.loads(l)
+            except (ValueError, RecursionError):
+                return None
+            if not isinstance(o, dict) or not isinstance(o.get("log"), str) or not isinstance(o.get("time"), str):
+                return None
+            stream, ts, log = o.get("stream"), o["time"], o["log"]
+            full = log.endswith("\n")
+            msg = log[:-1] if full else log
+        else:
+            ts, _, rest = l.partition(" ")
+            stream, _, rest = rest.partition(" ")
+            tag, _, msg = rest.partition(" ")
+            if tag not in ("P", "F"):
+                return None
+            full = tag == "F"
+        parts = _iso_parts(ts)
+        if parts is None or stream not in ("stdout", "stderr") or "\n" in msg:
+            return None
+        date, clock, frac = parts
+        buf = next((b for b in open_ if b[0] == stream), None)
+        if buf is None:
+            buf = [stream, date, clock + "." + frac.ljust(3, "0")[:3], []]
+            open_.append(buf)
+        buf[3].append(msg)
+        if full:
+            open_.remove(buf)
+            recs.append((buf[1], buf[2], stream, True, "".join(buf[3])))
+    recs += [(b[1], b[2], b[0], False, "".join(b[3])) for b in open_]
+    return recs, nl
+
+
+def _enc_records(e: str):
+    lines = e.split("\n")
+    nl = e.endswith("\n")
+    if nl:
+        lines.pop()
+    recs, date = [], None
+    who = {" ": ("stdout", True), "!": ("stderr", True), "~": ("stdout", False), "?": ("stderr", False)}
+    for l in lines:
+        if l.startswith("§date "):
+            date = l[6:]
+        else:
+            stream, full = who[l[12]]
+            recs.append((date, l[:12], stream, full, l[13:]))
+    return recs, nl
+
+
+def unwrap_equivalent(x: str, e: str) -> bool:
+    if e == x:
+        return True
+    raw = _raw_records(x)
+    return raw is not None and raw == _enc_records(e)
+
+
+def _cri_line(ts_frac: str, stream: str, tag: str, msg: str, d: str = "2026-11-04", clock: str = "09:15:03") -> str:
+    return f"{d}T{clock}{ts_frac}Z {stream} {tag} {msg}"
+
+
+def _cri_log(seed: int = 799, n: int = 36) -> str:
+    rng = random.Random(seed)
+    out = []
+    for i in range(n):
+        frac = rng.choice(["." + "".join(rng.choice("0123456789") for _ in range(rng.randint(1, 9))), ""])
+        clock = f"09:15:{i % 60:02d}"
+        msg = '{"level":"info","msg":"request done","status":%d,"ms":%d}' % (rng.choice([200, 200, 500]), rng.randint(1, 400))
+        out.append(_cri_line(frac, "stdout", "F", msg, clock=clock))
+        if i == 9:  # a line split in three chunks, with a stderr line arriving in the middle
+            out += [_cri_line(".5", "stdout", "P", "start of a long line: "), _cri_line(".6", "stderr", "F", "warning: slow disk"), _cri_line(".7", "stdout", "P", "middle, "), _cri_line(".8", "stdout", "F", "end")]
+        if i == 20:
+            out.append(_cri_line(".123456789", "stderr", "F", ""))
+    return "\n".join(out) + "\n"
+
+
+def _docker_log(seed: int = 800, n: int = 24) -> str:
+    rng = random.Random(seed)
+    out = []
+    for i in range(n):
+        ts = f"2026-11-04T09:15:{i % 60:02d}.{rng.randint(0, 999999999):09d}Z"
+        msg = rng.choice(['GET /api/items?q="a b" 200', "caf\u00e9 \u2713 handled", "\x1b[31merror\x1b[0m: tab\there", "path C:\\temp\\x <ok> & done"]) + f" #{i}"
+        out.append(json.dumps({"log": msg + "\n", "stream": rng.choice(["stdout", "stdout", "stderr"]), "time": ts}, separators=(",", ":")))
+        if i == 7:  # partial chunk: no trailing newline in "log"
+            out.append(json.dumps({"log": "chunk one, ", "stream": "stdout", "time": ts}, separators=(",", ":")))
+            out.append(json.dumps({"log": "chunk two\n", "stream": "stdout", "time": ts}, separators=(",", ":")))
+    return "\n".join(out) + "\n"
+
+
+def _big_line() -> str:
+    rng = random.Random(16384)
+    big = "".join(rng.choice("abcdefghij klmnop,.") for _ in range(20000))
+    return "\n".join([_cri_line(".001", "stdout", "F", "before"), _cri_line(".002", "stdout", "P", big[:16384]), _cri_line(".003", "stdout", "F", big[16384:]), _cri_line(".004", "stdout", "F", "after")]) + "\n"
+
+
+case(
+    799,
+    claim="CRI and docker json-file envelopes are stripped to 'hh:mm:ss.mmm<marker>text' (date on '§date' lines, stderr and cut-off lines marked), and P chunks are rejoined with the first chunk's time; the oracle re-reads both forms independently and compares (date, time, stream, text).",
+    loses="nanosecond digits beyond milliseconds, the per-chunk timestamps of a split line (the first chunk's time is kept), the envelope text itself",
+    encode=unwrap_logs,
+    equivalent=unwrap_equivalent,
+    fixtures=[
+        Fixture("CRI lines with a 3-chunk line and mixed streams", _cri_log(), True),
+        Fixture("docker json-file with escapes and a partial", _docker_log(), True),
+        Fixture("plain application log", "".join(f"2026-11-04 09:15:{i:02d} INFO request {i} done\n" for i in range(30)), False),
+        Fixture("kubectl logs --timestamps (time prefix, no stream/tag)", "".join(f"2026-11-04T09:15:{i:02d}.123456789Z request {i} done\n" for i in range(30)), False),
+        Fixture("mixed: one non-envelope line", _cri_log() + "panic: out of memory\n", None),
+        Fixture("non-UTC offset (refused)", _cri_log().replace("Z stdout F", "+01:00 stdout F", 1), None),
+        Fixture("line over 16 KB split into P + F chunks", _big_line(), None),
+        Fixture("stream cut off in the middle of a line", _cri_log() + _cri_line(".9", "stdout", "P", "never finished"), None),
+        Fixture("midnight rollover and empty message", _cri_log() + _cri_line(".1", "stdout", "F", "next day", d="2026-11-05", clock="00:00:00") + "2026-11-05T00:00:01Z stdout F\n", None),
+        Fixture("no trailing newline", _cri_log().rstrip("\n"), None),
+    ],
+    min_gain=0.15,
 )

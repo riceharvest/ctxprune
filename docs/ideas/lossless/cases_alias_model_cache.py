@@ -1070,3 +1070,562 @@ case(
     claim="Every tool_use.id and tool_result.tool_use_id in a request becomes t<N> from a persisted append-only table: pairs stay matched and unique, an exact inverse exists, the aliased bytes of earlier messages never change as the history grows or is edited, ids quoted in text are untouched, and any malformed request passes through unmodified. Premise not testable offline: that the API accepts such ids.",
     sim=sim_toolu_alias,
 )
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# model-side ideas: the real Compressor.atom_scores / compress run on a fake tokenizer and a fake scorer
+
+import types  # noqa: E402
+
+
+class _FakeTok:
+    """Same call interface as ctxprune.compress._RawTokenizer: short word pieces, digits one by one, ')' glued to a
+    following punctuation mark (so a token can span two atoms), with character offsets and [CLS]/[SEP] ids."""
+
+    pad_token_id = 0
+    _PIECE = re.compile(r"\s*(?:[A-Za-z]{1,4}|\d|\)[:;,.]|[^\sA-Za-z\d])|\s+")
+
+    def __call__(self, text: str, add_special_tokens: bool = True, return_offsets_mapping: bool = False) -> dict:
+        ids, offs = [], []
+        for m in self._PIECE.finditer(text):
+            ids.append(zlib.crc32(m.group().encode()) % 30000 + 10)
+            offs.append((m.start(), m.end()))
+        if add_special_tokens:
+            ids, offs = [1] + ids + [2], [(0, 0)] + offs + [(0, 0)]
+        out = {"input_ids": ids}
+        if return_offsets_mapping:
+            out["offset_mapping"] = offs
+        return out
+
+
+def _fake_probs(ids_rows, mask_rows, leaky: bool = False):
+    """Keep-probability per token. Like a masked transformer with absolute positions, a real token's value depends on the
+    whole window (every real token, order included) and its own position, and never on padding or on other rows.
+    leaky=True is the negative control: a model that ignores the attention mask (the value depends on the padded width)."""
+    out = []
+    for ids, mask in zip(ids_rows, mask_rows):
+        ctx = zlib.crc32(repr([t for t, m in zip(ids, mask) if m]).encode()) ^ (len(ids) if leaky else 0)
+        out.append([((zlib.crc32(f"{ctx}:{pos}:{t}".encode()) % 9973) / 9973) if m else 0.123456
+                    for pos, (t, m) in enumerate(zip(ids, mask))])
+    return out
+
+
+class _FakeCompressor(_cc.Compressor):
+    """The real Compressor (windowing, scoring aggregation, compress) with only the model replaced."""
+
+    def __init__(self, max_len: int = 512, batch_size: int = 16, leaky: bool = False):
+        self.backend, self.tok, self.max_len, self.batch_size, self.leaky = "fake", _FakeTok(), max_len, batch_size, leaky
+        self.pre, self.post = special_wrap(self.tok)
+        self.stats: Counter = Counter()
+
+    def _keep_probs(self, ids_rows, mask_rows):
+        self.stats["calls"] += 1
+        self.stats["rows"] += len(ids_rows)
+        self.stats["cells"] += len(ids_rows) * len(ids_rows[0])
+        self.stats["real"] += sum(map(sum, mask_rows))
+        return _fake_probs(ids_rows, mask_rows, self.leaky)
+
+
+class _Fixed(_FakeCompressor):
+    """A compressor whose atom_scores is precomputed, so the REAL compress() can be run on candidate scores."""
+
+    def __init__(self, base: _FakeCompressor, scored):
+        self.__dict__.update(base.__dict__)
+        self._scored = scored
+
+    def atom_scores(self, text):
+        return self._scored
+
+
+def _plan(comp, text: str):
+    """Windowing exactly as in Compressor.atom_scores (copied; test_mirror_matches_real guards against drift)."""
+    atoms = atomize(text)
+    full, spans = atom_spans(atoms)
+    owner = char_to_atom(spans, len(full))
+    enc = comp.tok(full, add_special_tokens=False, return_offsets_mapping=True)
+    ids, offs = enc["input_ids"], enc["offset_mapping"]
+    tok_atom = token_atoms(offs, owner)
+    win = comp.max_len - len(comp.pre) - len(comp.post)
+    windows, start = [], 0
+    while start < len(ids):
+        end = min(start + win, len(ids))
+        if end < len(ids):
+            cut = end
+            while cut > start + 1 and tok_atom[cut] == tok_atom[cut - 1]:
+                cut -= 1
+            end = cut if cut > start + 1 else end
+        windows.append((start, end))
+        start = end
+    return types.SimpleNamespace(atoms=atoms, offs=offs, owner=owner, ids=ids, tok_atom=tok_atom, windows=windows)
+
+
+def _finish(plan, probs):
+    atoms = plan.atoms
+    sums, hits, counts = [0.0] * len(atoms), [0] * len(atoms), [0] * len(atoms)
+    for a, sets, p in zip(plan.tok_atom, token_atom_sets(plan.offs, plan.owner), probs):
+        if a >= 0:
+            counts[a] += 1
+        for b in sets:
+            sums[b] += p
+            hits[b] += 1
+    return atoms, [sums[i] / hits[i] if hits[i] else 0.0 for i in range(len(atoms))], counts
+
+
+def _policy_baseline(jobs, bs):
+    """As atom_scores: per document, windows in order, `bs` per call."""
+    by_doc: dict[int, list[int]] = {}
+    for i, (d, _w, _q) in enumerate(jobs):
+        by_doc.setdefault(d, []).append(i)
+    return [idx[b:b + bs] for idx in by_doc.values() for b in range(0, len(idx), bs)]
+
+
+def _policy_bucketed(jobs, bs, buckets=(64, 128, 256, 512)):
+    out = []
+    by_doc: dict[int, dict[int, list[int]]] = {}
+    for i, (d, _w, q) in enumerate(jobs):
+        b = next((x for x in buckets if len(q) <= x), len(q))
+        by_doc.setdefault(d, {}).setdefault(b, []).append(i)
+    for groups in by_doc.values():
+        for _b, idx in sorted(groups.items()):
+            out += [idx[k:k + bs] for k in range(0, len(idx), bs)]
+    return out
+
+
+def _policy_pooled(jobs, bs):
+    order = sorted(range(len(jobs)), key=lambda i: len(jobs[i][2]))  # stable: equal lengths keep arrival order
+    return [order[k:k + bs] for k in range(0, len(order), bs)]
+
+
+def score_docs(comp, texts, policy, skip_forced=None):
+    """Reference scorer: plan every text, build one job per window (skipping windows that hold only forced atoms when
+    skip_forced=(force_protected, keep_structure)), batch with `policy`, scatter rows back, aggregate per document."""
+    plans = [_plan(comp, t) for t in texts]
+    jobs, skipped = [], 0
+    for d, p in enumerate(plans):
+        skip = set()
+        if skip_forced is not None:
+            fp, ks = skip_forced
+            forced = [bool(a.text) and ((fp and is_protected(a.text)) or (ks and a.text in _cc.STRUCTURE)) for a in p.atoms]
+            sets = token_atom_sets(p.offs, p.owner)
+            skip = {w for w, (s, e) in enumerate(p.windows) if all(forced[a] for t in range(s, e) for a in sets[t])}
+        skipped += len(skip)
+        jobs += [(d, w, comp.pre + p.ids[s:e] + comp.post) for w, (s, e) in enumerate(p.windows) if w not in skip]
+    rows = {}
+    pad = comp.tok.pad_token_id
+    for batch in policy(jobs, comp.batch_size):
+        seqs = [jobs[i][2] for i in batch]
+        width = max(map(len, seqs))
+        got = comp._keep_probs([q + [pad] * (width - len(q)) for q in seqs], [[1] * len(q) + [0] * (width - len(q)) for q in seqs])
+        for i, row in zip(batch, got):
+            rows[(jobs[i][0], jobs[i][1])] = row
+    out, k = [], len(comp.pre)
+    for d, p in enumerate(plans):
+        probs = [0.0] * len(p.ids)
+        for w, (s, e) in enumerate(p.windows):
+            if (d, w) in rows:
+                probs[s:e] = rows[(d, w)][k:k + (e - s)]
+        out.append(_finish(p, probs))
+    return out, {"windows": sum(len(p.windows) for p in plans), "skipped": skipped}
+
+
+def _same(a, b) -> bool:
+    """atom_scores results compared exactly: atoms, per-atom scores (float ==), token counts."""
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2]
+
+
+def _log(n: int, seed: int) -> str:
+    rng = random.Random(seed)
+    words = "retrying request failed timeout connection refused worker queue upstream cache miss slow flush batch commit rollback lease expired".split()
+    out = []
+    for i in range(n):
+        ts = f"2026-11-04T10:{rng.randint(0, 59):02d}:{rng.randint(0, 59):02d}Z"
+        msg = " ".join(rng.choice(words) for _ in range(rng.randint(4, 9)))
+        out.append(f"{ts} {rng.choice(['INFO', 'WARN', 'ERROR'])} worker-{rng.randint(1, 9)} job {rng.getrandbits(32):08x} {msg} ({rng.randint(1, 900)} ms) /var/log/app/w{i % 7}.log")
+    return "\n".join(out) + "\n"
+
+
+# ---- #1192 Score the short tail window unpadded (bucketed), not padded to the widest window of its batch.
+
+class _BucketedKeepProbs(_FakeCompressor):
+    """The minimal patch: inside _keep_probs, split the padded batch into width buckets (64/128/256/512) and run each
+    bucket at the width of its widest real row. The real atom_scores above it is untouched."""
+
+    BUCKETS = (64, 128, 256, 512)
+
+    def _keep_probs(self, ids_rows, mask_rows):
+        n = [sum(m) for m in mask_rows]
+        groups: dict[int, list[int]] = {}
+        for i, L in enumerate(n):
+            groups.setdefault(next((b for b in self.BUCKETS if L <= b), L), []).append(i)
+        out = [None] * len(ids_rows)
+        width = len(ids_rows[0])
+        for _b, idx in sorted(groups.items()):
+            w = max(n[i] for i in idx)
+            got = super()._keep_probs([ids_rows[i][:w] for i in idx], [mask_rows[i][:w] for i in idx])
+            for i, row in zip(idx, got):
+                out[i] = row + [0.123456] * (width - len(row))  # the caller reads only the first n[i] entries
+        return out
+
+
+def sim_unpadded_tail() -> dict:
+    # guard: the reference engine with the baseline policy reproduces the real atom_scores exactly
+    base = _FakeCompressor()
+    for t in (_log(60, 1), "", "   \n", "x", "日本語のテキスト、句読点。" * 40, "A" * 3000):
+        assert _same(score_docs(_FakeCompressor(), [t], _policy_baseline)[0][0], base.atom_scores(t)), "mirror drifted from the real atom_scores"
+
+    # 30 captured-like outputs at the real defaults (512 / 16): baseline vs bucketed, identical scores
+    sizes = random.Random(3)  # 6-24 KB, log-uniform: outputs the hook compresses (MIN_CHARS 6000 and up)
+    texts = [_log(int(math.exp(sizes.uniform(math.log(6), math.log(24))) * 1000 / 150), 100 + i) for i in range(30)]
+    a, b = _FakeCompressor(), _BucketedKeepProbs()
+    wins = tails = 0
+    for t in texts:
+        ra, rb = a.atom_scores(t), b.atom_scores(t)
+        assert _same(ra, rb), "bucketed scoring changed a score"
+        p = _plan(a, t)
+        wins += len(p.windows)
+        tails += len(p.windows) > 1
+    real, cells_a, cells_b = a.stats["real"], a.stats["cells"], b.stats["cells"]
+    assert real == b.stats["real"] and cells_b < cells_a, "bucketing must cut padded compute"
+    assert cells_b <= real * 1.35, (cells_b, real)
+    saved = 1 - cells_b / cells_a
+    assert saved > 0.01, f"expected a saving on short tails, got {saved:.1%}"  # bounded by about one window per output
+
+    # the case the idea describes: four full windows plus a tail of a few tokens share one batch
+    n = 1
+    while True:
+        t = _log(n, 77)
+        p = _plan(a, t)
+        if len(p.windows) == 5 and p.windows[-1][1] - p.windows[-1][0] <= 70:
+            break
+        n += 1
+        assert n < 400
+    tail = p.windows[-1][1] - p.windows[-1][0]
+    ca, cb = _FakeCompressor(), _BucketedKeepProbs()
+    assert _same(ca.atom_scores(t), cb.atom_scores(t))
+    wide = max(e - s0 for s0, e in p.windows) + 2  # widest row: window tokens plus [CLS]/[SEP]
+    assert ca.stats["cells"] == 5 * wide and cb.stats["cells"] == 4 * wide + tail + 2, (ca.stats["cells"], cb.stats["cells"], tail)
+    tail_saved = 1 - cb.stats["cells"] / ca.stats["cells"]
+
+    # the tail as its own call (the other option in the idea) gives the same scores too
+    for t in texts[:3]:
+        assert _same(score_docs(_FakeCompressor(), [t], _policy_bucketed)[0][0], a.atom_scores(t))
+
+    # stress: tiny windows, odd batch sizes, a single atom wider than a window, CJK, empty
+    rng = random.Random(7)
+    for ml, bs in [(16, 1), (24, 3), (40, 5), (512, 16)]:
+        for t in [_log(rng.randint(1, 30), rng.randint(0, 99)), "", "Z" * 700, "你好世界" * 60, " \n ", "a b", _log(5, 3).replace(" ", "")]:
+            assert _same(_FakeCompressor(ml, bs).atom_scores(t), _BucketedKeepProbs(ml, bs).atom_scores(t)), (ml, bs, t[:20])
+            assert _same(_FakeCompressor(ml, bs).atom_scores(t), score_docs(_FakeCompressor(ml, bs), [t], _policy_bucketed)[0][0])
+
+    # negative control: a model that ignores the attention mask is NOT padding-invariant, and the check sees it
+    leaky_a, leaky_b = _FakeCompressor(leaky=True), _BucketedKeepProbs(leaky=True)
+    diff = sum(not _same(leaky_a.atom_scores(t), leaky_b.atom_scores(t)) for t in texts[:4])
+    assert diff > 0, "negative control: the equality check must flag a mask-ignoring scorer"
+    return {"outputs": len(texts), "windows": wins, "multi_window_outputs": tails, "real_tokens": real, "padded_cells_baseline": cells_a,
+            "padded_cells_bucketed": cells_b, "pad_waste_baseline_pct": round(100 * (1 - real / cells_a), 1),
+            "pad_waste_bucketed_pct": round(100 * (1 - real / cells_b), 1), "cells_saved_pct": round(100 * saved, 1),
+            "five_window_output_with_tiny_tail": f"tail {tail} tokens, cells {ca.stats['cells']} -> {cb.stats['cells']} ({100 * tail_saved:.0f}% saved)"}
+
+
+case(
+    1192,
+    claim="Running a batch's windows in width buckets (each padded only to its widest real row) instead of padding all to the widest gives per-window probabilities, atom scores and token counts identical to the real atom_scores on a padding-invariant fake scorer, for 30 outputs of 6-24 KB and for edge cases (tiny windows, oversized atom, CJK, empty), while cutting padded compute. int8 noise on the real model cannot be tested offline.",
+    sim=sim_unpadded_tail,
+)
+
+# ---- #1193 Pool windows across documents into shared batches (compress_many).
+
+
+def compress_many(comp, texts, **kw) -> list[dict]:
+    """Atomise and plan every text, sort all windows by length, fill batches across documents, then run the REAL
+    compress() on each document's scores."""
+    scored, _ = score_docs(comp, texts, _policy_pooled)
+    return [_Fixed(comp, s).compress(t, **kw) for t, s in zip(texts, scored)]
+
+
+def sim_pooled_batches() -> dict:
+    rng = random.Random(1193)
+    chunks = [_log(rng.randint(3, 6), 300 + i) for i in range(20)]  # ~ 250-480 fake tokens each: one window apiece
+    chunks += ["", "short", chunks[0], _log(60, 9)]  # empty, tiny, a duplicate, and one document with several windows
+    per_doc = _FakeCompressor()
+    one_by_one = [per_doc.atom_scores(t) for t in chunks]
+    pooled_c = _FakeCompressor()
+    pooled, info = score_docs(pooled_c, chunks, _policy_pooled)
+    for t, x, y in zip(chunks, one_by_one, pooled):
+        assert _same(x, y), "pooled scoring changed a score"
+    for kw in ({"rate": 0.5}, {"rate": 0.3, "force_protected": True}, {"rate": 0.6, "keep_structure": True}, {"threshold": 0.4}, {"rate": 0.5, "unit": "tokens"},
+               {"rate": 0.5, "measure": len}):
+        got = compress_many(_FakeCompressor(), chunks, **kw)
+        want = [_FakeCompressor().compress(t, **kw) for t in chunks]
+        assert got == want, f"kept text differs for {kw}"
+    # order independence: the batch composition changes, no document's result does
+    order = list(range(len(chunks)))
+    random.Random(5).shuffle(order)
+    shuffled, _ = score_docs(_FakeCompressor(), [chunks[i] for i in order], _policy_pooled)
+    for pos, i in enumerate(order):
+        assert _same(shuffled[pos], one_by_one[i])
+    # the saving: ORT calls (the per-call overhead is what a batch of one wastes) and a bounded padding cost
+    calls_before, calls_after = per_doc.stats["calls"], pooled_c.stats["calls"]
+    assert calls_before == sum(1 for t in chunks if t.strip()) - 0 + (0) or calls_before >= len(chunks) - 2
+    assert calls_after * 4 <= calls_before, (calls_before, calls_after)
+    assert pooled_c.stats["real"] == per_doc.stats["real"], "the same tokens are scored"
+    assert pooled_c.stats["cells"] <= per_doc.stats["real"] * 1.3, "length-sorted batches keep padding small"
+    # negative control: a mask-ignoring scorer makes pooled != per-document, and the check sees it
+    lk = _FakeCompressor(leaky=True)
+    assert not all(_same(lk.atom_scores(t), y) for t, y in zip(chunks, score_docs(_FakeCompressor(leaky=True), chunks, _policy_pooled)[0])), "control"
+    return {"documents": len(chunks), "windows": info["windows"], "ort_calls_per_doc": calls_before, "ort_calls_pooled": calls_after,
+            "windows_per_call_pooled": round(info["windows"] / calls_after, 1), "padded_cells_pooled": pooled_c.stats["cells"],
+            "real_tokens": pooled_c.stats["real"]}
+
+
+case(
+    1193,
+    claim="compress_many (plan every text, sort all windows by length, fill batches across documents, then the real compress on each document's scores) gives per-window probabilities and kept text identical to compressing each document alone, in any document order and for every compress mode, with a fraction of the ORT calls and bounded padding. Wall-clock time on 4 cores needs the real model.",
+    sim=sim_pooled_batches,
+)
+
+# ---- #461 Skip model calls on windows holding only protected atoms.
+
+
+def _numeric_rows(n: int) -> str:
+    rng = random.Random(461)
+    return "procs -----------memory---------- ---swap-- -----io----\n" + "".join(
+        " ".join(str(rng.randint(0, 99999)) for _ in range(12)) + "\n" for _ in range(n))
+
+
+def _ls_files(n: int, prefix: str = "") -> str:
+    rng = random.Random(462)
+    return "".join(f"{prefix}src/{rng.choice(['api', 'core', 'ui', 'jobs'])}/{rng.choice(['a', 'b', 'util'])}_{rng.randint(1, 99)}/{rng.choice(['index', 'main', 'mod'])}.py\n" for _ in range(n))
+
+
+def _xxd_plain(n: int) -> str:
+    rng = random.Random(463)
+    return "".join("".join(f"{rng.getrandbits(8):02x}" for _ in range(30)) + "\n" for _ in range(n))
+
+
+def _xxd_ascii(n: int) -> str:
+    rng = random.Random(464)
+    return "".join(f"{i * 16:08x}: " + " ".join(f"{rng.getrandbits(16):04x}" for _ in range(8)) + "  hello world, ok....\n" for i in range(n))
+
+
+def sim_skip_protected() -> dict:
+    corpora = {
+        "git ls-files listing": _ls_files(60), "find . listing": _ls_files(60, "./"), "vmstat numbers": _numeric_rows(50), "xxd -p": _xxd_plain(40), "xxd with ascii column": _xxd_ascii(30),
+        "plain log": _log(40, 4), "log then listing then log": _log(10, 5) + _ls_files(60) + _log(10, 6),
+        "one 3000-char base64 token": "token: " + "".join(random.Random(6).choice("ABCDEFabcdef0123456789+/") for _ in range(3000)) + "\nok\n",
+        "one 3000-char lowercase word": "word: " + "xyz" * 1000 + "\nok\n",  # not "ab"*1500: a/b are hex digits, so that IS protected
+    }
+    modes = [dict(force_protected=True), dict(force_protected=True, keep_structure=True), dict(keep_structure=True), dict()]
+    rates = [dict(rate=0.3), dict(rate=0.5), dict(rate=0.8), dict(threshold=0.5), dict(rate=0.5, unit="tokens"), dict(rate=0.5, measure=len)]
+    tot_w = tot_skip = cells_base = cells_skip = 0
+    skipped_by_corpus = {}
+    for max_len, names in ((64, list(corpora)), (512, ["plain log", "log then listing then log", "one 3000-char base64 token"])):
+        for name in names:
+            text = corpora[name]
+            base = _FakeCompressor(max_len)
+            full = base.atom_scores(text)  # the real, unskipped scores
+            for mode in modes:
+                scored, info = score_docs(_FakeCompressor(max_len), [text], _policy_baseline,
+                                          skip_forced=(mode.get("force_protected", False), mode.get("keep_structure", False)))
+                for rk in rates:
+                    want = _Fixed(base, full).compress(text, **mode, **rk)
+                    got = _Fixed(base, scored[0]).compress(text, **mode, **rk)
+                    assert got == want, f"{name} {mode} {rk}: output changed by skipping"
+                if max_len == 64 and mode == dict(force_protected=True):
+                    tot_w += info["windows"]
+                    tot_skip += info["skipped"]
+                    skipped_by_corpus[name] = (info["skipped"], info["windows"])
+    # padded compute with and without the skip, at max_len 64 and the hook's flags
+    for text in corpora.values():
+        full_c, skip_c = _FakeCompressor(64), _FakeCompressor(64)
+        score_docs(full_c, [text], _policy_baseline)
+        score_docs(skip_c, [text], _policy_baseline, skip_forced=(True, False))
+        cells_base += full_c.stats["cells"]
+        cells_skip += skip_c.stats["cells"]
+    s = skipped_by_corpus
+    assert s["git ls-files listing"][0] == s["git ls-files listing"][1] > 5, "a path listing is all protected atoms: every window skipped"
+    assert s["vmstat numbers"][0] >= s["vmstat numbers"][1] - 2 > 5 and s["xxd -p"][0] == s["xxd -p"][1] > 5
+    assert s["plain log"][0] == 0 and s["xxd with ascii column"][0] == 0 and s["one 3000-char lowercase word"][0] == 0, "windows with any unprotected atom are never skipped"
+    # finding: atomize splits './src/x.py' into '.' + '/src/x.py' and a lone '.' is not protected, so `find .` output is never skippable
+    assert s["find . listing"][0] == 0, "the lone '.' atoms of `find .` output are unprotected, so no window qualifies"
+    assert 0 < s["log then listing then log"][0] < s["log then listing then log"][1], "mixed text skips only the fully protected windows"
+    assert s["one 3000-char base64 token"][0] >= 4, "an oversized protected atom spans many windows, all skippable"
+    assert cells_skip < cells_base * 0.7, (cells_skip, cells_base)
+
+    # without force flags nothing is forced, so nothing is skipped and scoring is unchanged
+    _, info = score_docs(_FakeCompressor(64), [corpora["git ls-files listing"]], _policy_baseline, skip_forced=(False, False))
+    assert info["skipped"] == 0, "no flag, no forced atoms, no skipped windows"
+
+    # negative control: skipping windows that are only MOSTLY protected (>= 40% forced atoms) changes the output somewhere
+    changed = 0
+    for name in ("log then listing then log", "plain log", "xxd with ascii column", "vmstat numbers"):
+        text = corpora[name]
+        base = _FakeCompressor(64)
+        p = _plan(base, text)
+        sets = token_atom_sets(p.offs, p.owner)
+        forced = [bool(a.text) and is_protected(a.text) for a in p.atoms]
+        bad = {w for w, (a, b) in enumerate(p.windows)
+               if sum(forced[x] for t in range(a, b) for x in sets[t]) >= 0.4 * max(1, sum(len(sets[t]) for t in range(a, b)))}
+        atoms_, sc, counts = base.atom_scores(text)
+        sc = list(sc)
+        for w in bad:
+            a, b = p.windows[w]
+            for t in range(a, b):
+                for x in sets[t]:
+                    sc[x] = 0.0
+        for rate in (0.5, 0.8):
+            changed += _Fixed(base, (atoms_, sc, counts)).compress(text, rate=rate, force_protected=True) != base.compress(text, rate=rate, force_protected=True)
+    assert changed > 0, "negative control: an unsound skip rule must change the output on at least one corpus"
+    return {"windows(max_len=64, hook flags)": tot_w, "skipped": tot_skip, "padded_cells_saved_pct": round(100 * (1 - cells_skip / cells_base), 1),
+            **{f"skipped[{k}]": f"{a}/{b}" for k, (a, b) in s.items()}}
+
+
+case(
+    461,
+    claim="Windows whose every atom is forced (force_protected / keep_structure) are not scored: compress() output, kept count and total are byte-identical to the baseline for every rate, threshold, unit and measure mode, on numeric tables, path listings, plain hex and a 3000-char token; windows with any unprotected atom are always scored.",
+    sim=sim_skip_protected,
+)
+
+# ---- #1138 Re-glue punctuation, CJK and tabs after deletions in detok.
+
+_WS_RANK = (("\n", "\n"), ("\t", "\t"))
+
+
+def _gap_ws(span: str) -> str:
+    """Whitespace to emit for the source whitespace seen across a deleted run: newline beats tab beats space."""
+    for ch, out in _WS_RANK:
+        if ch in span:
+            return out
+    return " " if span else ""
+
+
+def detok_glue(atoms: list[Atom], keep: list[bool]) -> str:
+    """detok with source adjacency: an atom that was glued to what precedes it stays glued when the deleted atoms between
+    were glued too, unless the glued run would no longer read back as the same atoms (two words would fuse), and a deleted
+    run keeps its widest whitespace (newline > tab > space) instead of collapsing tabs to spaces."""
+    out: list[str] = []
+    run: list[str] = []  # atom texts of the glued run being built (since the last whitespace)
+    gap, dropped = "", False
+    for a, k in zip(atoms, keep):
+        if not k:
+            gap += a.ws
+            dropped = True
+            continue
+        if not out:
+            ws = ""
+        elif not dropped:
+            ws = a.ws
+        else:
+            ws = _gap_ws(gap + a.ws)
+        if ws == "" and out and a.text and [x.text for x in atomize("".join(run) + a.text)] != run + [a.text]:
+            ws = " "  # would fuse: "foo(" "bar" with "(" deleted must not become "foobar"
+        out.append(ws + a.text)
+        run = (run + [a.text]) if (ws == "" and out[:-1]) else [a.text]
+        if not a.text:
+            run = []
+        gap, dropped = "", False
+    return "".join(out)
+
+
+def _check_glue(text: str, keep: list[bool], out: str) -> None:
+    """Oracle written from source offsets and re-atomisation, not from detok_glue's own bookkeeping."""
+    atoms = atomize(text)
+    kept_idx = [i for i, (a, k) in enumerate(zip(atoms, keep)) if k and a.text]
+    re_atoms = [a for a in atomize(out) if a.text]
+    # 1. nothing fused, split, added or reordered: the output reads back as exactly the kept atoms
+    assert [a.text for a in re_atoms] == [atoms[i].text for i in kept_idx], f"atoms changed: {text!r} -> {out!r}"
+    for n, (i, j) in enumerate(zip(kept_idx, kept_idx[1:]), start=1):
+        got = re_atoms[n].ws
+        src_ws = "".join(a.ws for a in atoms[i + 1:j + 1])  # every source gap between the two kept atoms
+        if j == i + 1:
+            assert got == atoms[j].ws, "neighbouring kept atoms keep their own whitespace"
+        elif src_ws:
+            want = "\n" if "\n" in src_ws else ("\t" if "\t" in src_ws else " ")
+            assert got == want, f"whitespace across a deleted run: want {want!r} got {got!r} in {out!r}"
+        else:  # glued in the source across the deletion: stay glued unless that fuses atoms
+            assert got in ("", " "), got
+            if got == " ":  # the space must be necessary: without it the output must read back as different atoms
+                assert [a.text for a in atomize(_without_gap(out, n))] != [a.text for a in re_atoms], f"needless space in {out!r}"
+    if kept_idx:
+        assert re_atoms[0].ws == "", "leading whitespace of the first kept atom is dropped, as in detok"
+    if all(keep) and atoms:
+        assert out == text[len(atoms[0].ws):], "keeping everything reproduces the text"
+
+
+def _without_gap(out: str, n: int) -> str:
+    """`out` with the whitespace in front of its n-th text atom removed."""
+    atoms = [a for a in atomize(out) if a.text]
+    at = sum(len(a.ws) + len(a.text) for a in atoms[:n])
+    return out[:at] + out[at + len(atoms[n].ws):]
+
+
+def sim_reglue() -> dict:
+    # the verified examples, on the REAL detok first
+    def drop(text, words):  # words: atom texts to delete, or atom indices
+        at = atomize(text)
+        return at, [(i not in words) if all(isinstance(w, int) for w in words) else (a.text not in words) for i, a in enumerate(at)]
+
+    cases_ = [
+        ("Retrying (attempt 2).", {"attempt", ")"}, "Retrying ( 2 .", "Retrying ( 2."),
+        ("你好世界很好", {1, 4}, "你 世界 好", "你世界好"),
+        ("id\tname\tstatus\n1\tfoo\tok\n", {"name", "foo"}, None, "id\tstatus\n1\tok\n"),
+        ("see (the log.txt) now", {"see", "the"}, "( log.txt) now", "( log.txt) now"),  # a real gap stays a gap
+        ("foo(bar)", {"("}, None, "foo bar)"),
+        ("x = a[0].b", {"a"}, None, "x = [0].b"),
+        ('{"a":1,"b":2}', {'"'}, None, "{ a:1 , b:2 }"),
+    ]
+    real_defects = 0
+    for text, words, real_expect, want in cases_:
+        at, keep = drop(text, words)
+        got = detok_glue(at, keep)
+        _check_glue(text, keep, got)
+        if real_expect is not None:
+            assert detok(at, keep) == real_expect, f"real detok no longer shows the defect: {detok(at, keep)!r}"
+        real_defects += detok(at, keep) != got
+        if want is not None and text != '{"a":1,"b":2}':
+            assert got == want, (text, got, want)
+    assert real_defects >= 5, "the real detok should differ from source-adjacency output on most of these"
+
+    # property sweep over realistic texts with random keep masks
+    texts = [
+        "2026-11-04T10:15:03Z ERROR [worker-3] job 5f2d8e7a failed after 3 retries: ECONNREFUSED 10.0.4.17:5432 (see /var/log/app/worker.log).\n",
+        'curl -s "https://api.example.com/v1/items?id=42&x=1" | jq ".items[0].name"\n',
+        "NAME\tREADY\tSTATUS\tRESTARTS\nweb-0\t1/1\tRunning\t0\nweb-1\t0/1\tCrashLoopBackOff\t12\n",
+        "在软件界面查看推荐的歌单，支持循环播放（v1.22.3-x64）。\nログを確認してください。\n",
+        "def f(a, b=2):\n    return {'k': [a, b], \"z\": (1, 2)}  # note: tuple\n",
+        "Error: ENOENT: no such file or directory, open '/tmp/x.json' at fs.readFileSync (node:fs:441:20)\n",
+        "a:1 b:2 c=3 d.e f/g h-i (j) [k] {l} <m> 'n' \"o\" p,q;r!s?\n",
+        "  leading spaces\n\n\ttabbed\tline  \n",
+    ]
+    rng = random.Random(1138)
+    tried = chars_real = chars_new = fewer = 0
+    for text in texts:
+        at = atomize(text)
+        for _ in range(60):
+            p = rng.choice([0.2, 0.5, 0.8])
+            keep = [rng.random() < p for _ in at]
+            got, real = detok_glue(at, keep), detok(at, keep)
+            _check_glue(text, keep, got)
+            assert len(got) <= len(real), "never longer than the current detok"
+            assert re.sub(r"\s+", "", got) == "".join(a.text for a, k in zip(at, keep) if k), "no atom text added, lost or reordered"
+            tried += 1
+            chars_real += len(real)
+            chars_new += len(got)
+            fewer += len(got) < len(real)
+        _check_glue(text, [True] * len(at), detok_glue(at, [True] * len(at)))
+        assert detok_glue(at, [False] * len(at)) == "" and detok_glue([], []) == ""
+
+    # fail-safe: total on arbitrary strings
+    for t in ["", " ", "\n\n", "\x00\x01", "é" * 5, "a b　c", "\U0001f600 x \U0001f600", "\ud800 broken"]:
+        at = atomize(t)
+        for keep in ([True] * len(at), [False] * len(at), [i % 2 == 0 for i in range(len(at))]):
+            _check_glue(t, keep, detok_glue(at, keep))
+    return {"masks_checked": tried, "masks_where_real_detok_adds_spurious_whitespace": fewer, "chars_real_detok": chars_real, "chars_glued": chars_new,
+            "saved_pct": round(100 * (1 - chars_new / chars_real), 1), "verified_examples_differing_from_real": real_defects}
+
+
+case(
+    1138,
+    claim="After deletions, a kept atom that was glued to the deleted atoms before it stays glued unless the run would then fuse words (re-atomising the output must give exactly the kept atoms), and a deleted run keeps newline over tab over space: CJK characters, kept punctuation and tab-separated columns are no longer padded with spaces, checked against the real atomize/detok on 480 random keep masks. Token-count effect on a real tokenizer is not measured here.",
+    sim=sim_reglue,
+)

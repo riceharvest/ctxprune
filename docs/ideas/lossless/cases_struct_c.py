@@ -1077,3 +1077,1243 @@ case(
     min_gain=0.05,
     mutations=30,
 )
+
+
+
+
+# ===============================================================================================================
+# #987 Drop optional spaces in Python dict/list/call reprs. Equivalent: per line, the Python token stream is the same
+# (so every string literal is byte-identical) and ast.literal_eval agrees where the line is a literal.
+
+_SRC_LINE = re.compile(r"^\s*(?:\d+[\t:|→]\s*)?(?:def |class |import |from \S+ import |return\b|elif |else:|try:|except\b|finally:|with |for \w+ in |while |async |@\w|if .*:\s*$)")
+
+
+def _looks_like_source(text):
+    return sum(1 for ln in text.split("\n") if _SRC_LINE.match(ln)) >= 3
+
+
+_PAIRS = {")": "(", "]": "[", "}": "{"}
+
+
+def _skip_string(line, i):
+    c, n, j = line[i], len(line), i + 1
+    while j < n and line[j] != c:
+        j += 2 if line[j] == "\\" else 1
+    return j + 1 if j < n else None
+
+
+def _groups(line):
+    """Spans (callee name included) of depth-0 bracket groups outside string literals; None if the line is not balanced."""
+    spans, stack, i, n, start = [], [], 0, len(line), 0
+    while i < n:
+        c = line[i]
+        if c in "'\"":
+            i = _skip_string(line, i)
+            if i is None:
+                return None
+            continue
+        if c == "#":
+            return None
+        if c in "([{":
+            if not stack:
+                start = i
+                while start > 0 and (line[start - 1].isalnum() or line[start - 1] in "_."):
+                    start -= 1
+            stack.append(c)
+        elif c in ")]}":
+            if not stack or stack.pop() != _PAIRS[c]:
+                return None
+            if not stack:
+                spans.append((start, i + 1))
+        i += 1
+    return None if stack else spans
+
+
+def _squeeze(group):
+    out, i, n = [], 0, len(group)
+    while i < n:
+        c = group[i]
+        if c in "'\"":
+            j = _skip_string(group, i)
+            out.append(group[i:j])
+            i = j
+            continue
+        out.append(c)
+        i += 1
+        if c in ",:":
+            while i < n and group[i] == " ":
+                i += 1
+    return "".join(out)
+
+
+def _is_expression(src):
+    try:
+        compile(src, "<repr>", "eval")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _tidy_line(line):
+    if ("," not in line and ":" not in line) or "'''" in line or '"""' in line:
+        return line
+    spans = _groups(line)
+    if not spans:
+        return line
+    try:
+        _py_tokens(line)
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return line
+    out, last = [], 0
+    for a, b in spans:
+        out.append(line[last:a])
+        grp = line[a:b]
+        out.append(_squeeze(grp) if _is_expression(grp) else grp)  # only real Python expressions, never prose in parentheses
+        last = b
+    out.append(line[last:])
+    return "".join(out)
+
+
+@_total
+def encode_repr(text):
+    if _looks_like_source(text):
+        return text
+    return "\n".join(_tidy_line(ln) for ln in text.split("\n"))
+
+
+def _py_tokens(line):
+    toks = []
+    for t in tokenize.generate_tokens(io.StringIO(line.strip() + "\n").readline):
+        if t.type not in (tokenize.NEWLINE, tokenize.NL, tokenize.ENDMARKER, tokenize.INDENT, tokenize.DEDENT):
+            toks.append((t.type, t.string))
+    return toks
+
+
+def _literal(line):
+    import ast
+
+    try:
+        return repr(ast.literal_eval(line.strip()))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _equiv_repr(a, b):
+    la, lb = a.split("\n"), b.split("\n")
+    if len(la) != len(lb):
+        return False
+    for x, y in zip(la, lb):
+        if x == y:
+            continue
+        try:
+            if _py_tokens(x) != _py_tokens(y):
+                return False
+        except (tokenize.TokenError, SyntaxError, IndentationError):
+            return False  # a line the tokenizer cannot read must come back unchanged
+        if _literal(x) != _literal(y):
+            return False
+        if x[:len(x) - len(x.lstrip())] != y[:len(y) - len(y.lstrip())]:
+            return False
+    return True
+
+
+_REPRS = (
+    "{'name': 'build-agent', 'version': (2, 4, 1), 'tags': ['ci', 'linux', 'x86_64'], 'owner': None, 'retries': {'max': 5, 'backoff': 1.5}}\n"
+    "[{'id': 1, 'path': '/srv/a, b', 'ok': True}, {'id': 2, 'path': 'C:\\\\tmp\\\\x', 'ok': False}, {'id': 3, 'path': \"it's: fine, really\", 'ok': True}]\n"
+    "INFO:root:loaded config {'a': 1, 'b': [1, 2, 3, 4, 5, 6, 7, 8], 'c': 'x: y, z'} in 0.4s\n"
+    "Namespace(input='data.csv', output=None, workers=4, verbose=False, tags=['a', 'b'])\n"
+    "E       assert {'a': 1, 'b': 2, 'c': [3, 4]} == {'a': 1, 'b': 2, 'c': [3, 5]}\n"
+    "Retrying request(url='http://x.test/a?b=1,2', timeout=(3.0, 10.0), headers={'Accept': 'text/html', 'X-Id': 'k: v'}) after 2s\n"
+    "array([[1, 2, 3],\n       [4, 5, 6]])\n"
+    "b'\\x00\\x01, \\x02: \\x03' and f'{x:, }' and r'\\d+, \\w+' and 'unicode, é: ü'\n")
+_PY_SOURCE = (
+    "import os\n\n\ndef settings(env):\n    base = {'mode': 'dev', 'paths': ['/a', '/b'], 'n': 3}\n    if env == 'prod':\n        base['mode'] = 'prod'\n"
+    "    return base\n\n\nclass Cfg:\n    default = {'a': 1, 'b': 2}\n")
+case(
+    987,
+    claim="Inside balanced brackets of a single line, the spaces after ',' and ':' that sit outside string literals are removed; the per-line Python token stream (so every string literal byte) and ast.literal_eval value are unchanged, and text that looks like a Python source file is left alone.",
+    loses="optional spaces after , and : inside brackets (cosmetic; a reader that wants PEP 8 spacing must re-add it)",
+    encode=encode_repr,
+    equivalent=_equiv_repr,
+    fixtures=lambda: [
+        Fixture("repr lines from prints, logs, pytest and argparse", _REPRS, True),
+        Fixture("python source file (the Read tool)", _PY_SOURCE, False),
+        Fixture("prose with commas and colons", "Note: the build, which ran twice, failed: see the log (attached, 3 pages).\nTime: 12:30, done\n", False),
+        Fixture("already compact", "{'a':1,'b':[1,2,3]}\n", False),
+        Fixture("triple quotes, comments, unbalanced and unterminated", "x = {'a': 1, 'b': '''p, q''' }\n{'a': 1, 'b': 2}  # note: a, b\n{'a': 1, 'b': [2, 3}\nprint('it's, ok', {'k': 1})\n", None),
+        Fixture("tabs, CRLF, trailing space and odd tokens", "{'a':\t1, 'b': 2}\r\n[1,  2,   3 ]  \n(a, *b, **c)\nlambda: (x, y)\n{1: 2, 3: 4}\n", None),
+    ],
+    min_gain=0.08,
+)
+
+
+# ===============================================================================================================
+# #988 Canonicalise printf-style scientific notation. Equivalent under exact value; the printed lexeme and trailing
+# mantissa zeros are lost (that is the point), digits are never rounded.
+
+_SCI = re.compile(r"(?<![\w.])(?<![\w.][+-])([+-]?)(\d+)(?:\.(\d+))?[eE]([+-])(\d{2,})(?![\w.])")
+
+
+def _canon_sci(m):
+    sign, ip, fp, esign, ed = m.groups()
+    fp = fp or ""
+    digits = (ip + fp).lstrip("0")
+    exp10 = int(esign + ed) - len(fp)
+    if not digits:
+        new = sign + "0"  # zero keeps its sign
+    else:
+        stripped = digits.rstrip("0")
+        exp10 += len(digits) - len(stripped)
+        d = stripped
+        sci = d[0] + ("." + d[1:] if len(d) > 1 else "") + "e" + str(exp10 + len(d) - 1)
+        plain = None
+        if abs(exp10) <= 30 and len(d) + max(0, exp10) <= 40:
+            if exp10 >= 0:
+                plain = d + "0" * exp10
+            elif len(d) + exp10 > 0:
+                plain = d[:len(d) + exp10] + "." + d[len(d) + exp10:]
+            else:
+                plain = "0." + "0" * (-exp10 - len(d)) + d
+        new = sign + (plain if plain is not None and len(plain) <= len(sci) else sci)
+    return new if len(new) < len(m.group(0)) else m.group(0)
+
+
+@_total
+def encode_sci(text):
+    return _SCI.sub(_canon_sci, text)
+
+
+_NUMBER = re.compile(r"(?<![\w.])(?<![\w.][+-])[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w.])")
+_PARTS = re.compile(r"[+-]?(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?")
+
+
+def _digits_exp(tok):
+    """(coefficient digits without leading/trailing zeros, power of ten) with huge exponents kept as Python ints."""
+    ip, fp, e = _PARTS.fullmatch(tok).groups()
+    fp = fp or ""
+    digits = (ip + fp).lstrip("0")
+    exp10 = int(e or 0) - len(fp)
+    stripped = digits.rstrip("0")
+    return stripped, (exp10 + len(digits) - len(stripped) if stripped else 0)
+
+
+def _same_number(x, y):
+    if x == y:
+        return True
+    if x.startswith("-") != y.startswith("-"):
+        return False  # the sign of zero is information too
+    dx, dy = _digits_exp(x), _digits_exp(y)
+    if dx != dy:
+        return False
+    try:  # where it is cheap, also confirm with exact rational arithmetic (never float)
+        if abs(dx[1]) < 3000:
+            return Fraction(Decimal(x)) == Fraction(Decimal(y))
+    except InvalidOperation:
+        return False
+    return True
+
+
+def _equiv_sci(a, b):
+    pa, pb = _NUMBER.split(a), _NUMBER.split(b)
+    na, nb = [m.group(0) for m in _NUMBER.finditer(a)], [m.group(0) for m in _NUMBER.finditer(b)]
+    return pa == pb and len(na) == len(nb) and all(_same_number(x, y) for x, y in zip(na, nb))
+
+
+_SOLVER = "".join(
+    f"iter {i:3d}  residual= {r}  step= {s}  obj= {o}  cond= {c}\n"
+    for i, (r, s, o, c) in enumerate([
+        ("1.234560e+02", "-9.870000e-05", "0.000000e+00", "1.000000e+10"), ("5.000000e-01", "2.500000e+00", "-0.000000e+00", "3.141593e+00"),
+        ("1.000000000000000055511151231257827e-01", "1.200000e+02", "6.022000e+23", "-1.602177e-19"), ("9.999999e+01", "1.000000e+00", "1.000000e+05", "1.5E+02"),
+        ("4.200000e+01", "1.100000e-03", "7.000000e+00", "2.000000e+01")] * 3))
+_SCI_NEG = ("version 1.2.3e+10 and hash deadbeef1e+05 and 0x1e+05 and id a1.5e+02b\nunits 1.5e+03ms, 2e5, 3.0e-5, 1e+5, 12.50, 007\n"
+            "1e5 and 1.5e-3 are already short; so are 1e+5 (one exponent digit)\n")
+case(
+    988,
+    claim="printf-style numbers like 1.234560e+02 (mantissa, signed exponent of 2+ digits) are rewritten to the shorter of the plain decimal (123.456) and the unpadded scientific form (9.87e-5) using digit-string arithmetic, never float; every digit is kept, zero keeps its sign, and identifier-, hex- and unit-adjacent tokens are left alone.",
+    loses="the original spelling and the trailing zeros of the mantissa (1.230000e+00 and 1.23 compare equal: printed precision is not preserved), the + and leading zeros of the exponent, and the case of E",
+    encode=encode_sci,
+    equivalent=_equiv_sci,
+    fixtures=lambda: [
+        Fixture("solver log with padded mantissas, zeros, 34-digit value", _SOLVER, True),
+        Fixture("look-alikes that must stay (hex, identifiers, versions, units)", _SCI_NEG, False),
+        Fixture("plain numbers", "total 12.50 items, 007, 1e5, 3.0e-5, -0.0\n", False),
+        Fixture("exponent edge cases", "1e+99999999999999999999 2.5e-400 -0.000e+00 +7.0e+01 000123.4500e-02 9e+30 9e+31 1.0e+40\n", None),
+        Fixture("zero and sign", "0.000000e+00 -0.000000e+00 +0.0e+00 0e+00\n", None),
+    ],
+    min_gain=0.15,
+)
+
+
+# ===============================================================================================================
+# #1081 Lossless HTML attribute minifier. Equivalent: html.parser sees the same tag / attribute / data sequence once
+# boolean attributes, spec defaults and empty class/style are normalised (the oracle owns that table of HTML facts).
+
+_VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+_BOOL = {"allowfullscreen", "async", "autofocus", "autoplay", "checked", "controls", "default", "defer", "disabled", "formnovalidate",
+         "hidden", "inert", "ismap", "itemscope", "loop", "multiple", "muted", "nomodule", "novalidate", "open", "playsinline",
+         "readonly", "required", "reversed", "selected"}
+_DEFAULTS = {("script", "type"): ("text/javascript",), ("style", "type"): ("text/css",), ("form", "method"): ("get",)}
+_RAWTEXT = {"script", "style", "textarea", "title"}
+_ATTR_SRC = r"""[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?"""
+_TAG = re.compile(r"<([A-Za-z][A-Za-z0-9:-]*)((?:\s+" + _ATTR_SRC + r")*)\s*(/?)>")
+_ATTR = re.compile(r"""\s+([^\s"'<>/=]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+))?""")
+_UNQUOTABLE = re.compile(r"[A-Za-z0-9_.:/#?%~+@-]+")
+
+
+def _rewrite_tag(m):
+    name, attr_src, slash = m.group(1), m.group(2), m.group(3)
+    lname = name.lower()
+    found = list(_ATTR.finditer(attr_src))
+    if sum(len(a.group(0)) for a in found) != len(attr_src):
+        return m.group(0)
+    new_slash = "" if lname in _VOID else slash
+    parts = []
+    for a in found:
+        an, av = a.group(1), a.group(2)
+        la = an.lower()
+        quoted = av is not None and av[0] in "\"'"
+        v = av[1:-1] if quoted else av
+        if av is not None and (lname, la) in _DEFAULTS and v == _DEFAULTS[(lname, la)][0]:
+            continue  # the attribute's default value
+        if av is not None and la in ("class", "style") and v == "":
+            continue  # empty class / style equals none
+        if av is not None and la in _BOOL and (v == "" or v.lower() == la):
+            parts.append(an)
+        elif quoted and not new_slash and _UNQUOTABLE.fullmatch(v) and not v.endswith("/"):
+            parts.append(f"{an}={v}")
+        elif av is None:
+            parts.append(an)
+        else:
+            parts.append(f"{an}={av}")
+    out = f"<{name}" + "".join(" " + p for p in parts) + (" />" if new_slash else ">")
+    return out if len(out) < len(m.group(0)) else m.group(0)
+
+
+@_total
+def encode_html(text):
+    out, i, n = [], 0, len(text)
+    while True:
+        j = text.find("<", i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        i = j
+        if text.startswith("<!--", i) or text.startswith("<![CDATA[", i):
+            end = "-->" if text.startswith("<!--", i) else "]]>"
+            k = text.find(end, i + 4)
+            k = n if k < 0 else k + len(end)
+            out.append(text[i:k])
+            i = k
+            continue
+        m = _TAG.match(text, i)
+        if not m:
+            if text[i + 1:i + 2].isalpha():
+                out.append(text[i:])  # a start tag we cannot parse may swallow what follows (html.parser is tolerant): stop here
+                break
+            out.append("<")
+            i += 1
+            continue
+        out.append(_rewrite_tag(m))
+        i = m.end()
+        lname = m.group(1).lower()
+        if lname in _RAWTEXT and not m.group(3):
+            close = re.compile(r"</" + lname + r"(?=[\s/>])", re.I).search(text, i)
+            k = close.start() if close else n
+            out.append(text[i:k])  # raw text is never rewritten
+            i = k
+    return "".join(out)
+
+
+class _Events(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ev, self.buf = [], []
+
+    def _flush(self):
+        if self.buf:
+            self.ev.append(("data", "".join(self.buf)))
+            self.buf.clear()
+
+    @staticmethod
+    def _norm(tag, attrs):
+        out = []
+        for k, v in attrs:
+            if k in _BOOL and (v is None or v == "" or v.lower() == k):
+                v = None
+            if k in ("class", "style") and v == "":
+                continue
+            if (tag, k) in _DEFAULTS and v is not None and v.lower() in _DEFAULTS[(tag, k)]:
+                continue
+            out.append((k, v))
+        return tuple(out)
+
+    def handle_starttag(self, tag, attrs):
+        self._flush()
+        self.ev.append(("start", tag, self._norm(tag, attrs)))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in _VOID:
+            self.ev.append(("end", tag))
+
+    def handle_endtag(self, tag):
+        self._flush()
+        self.ev.append(("end", tag))
+
+    def handle_data(self, data):
+        self.buf.append(data)
+
+    def handle_comment(self, data):
+        self._flush()
+        self.ev.append(("comment", data))
+
+    def handle_decl(self, decl):
+        self._flush()
+        self.ev.append(("decl", decl))
+
+    def handle_pi(self, data):
+        self._flush()
+        self.ev.append(("pi", data))
+
+    def unknown_decl(self, data):
+        self._flush()
+        self.ev.append(("unknown", data))
+
+
+def _html_events(text):
+    p = _Events()
+    p.feed(text)
+    p.close()
+    p._flush()
+    return p.ev
+
+
+def _equiv_html(a, b):
+    if a == b:
+        return True
+    try:
+        return _html_events(a) == _html_events(b)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_FORM = (
+    '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <link rel="stylesheet" href="/static/app.css" type="text/css" />\n'
+    '  <script type="text/javascript" src="/static/app.js"></script>\n  <title>Sign up &amp; go</title>\n</head>\n<body class="" id="top">\n'
+    '  <form method="get" action="/signup" class="form form-wide" novalidate="novalidate" style="">\n'
+    '    <label for="email">Email</label>\n    <input type="text" id="email" name="email" value="" required="required" autofocus="autofocus" />\n'
+    '    <input type="checkbox" name="tos" checked="checked" disabled="disabled">\n    <select name="plan" multiple="multiple">\n'
+    '      <option value="free" selected="selected">Free</option>\n      <option value="pro">Pro &mdash; $9</option>\n    </select>\n'
+    '    <img src="/logo.png" alt="" width="32" height="32" />\n    <br />\n    <button type="submit" class="btn btn-primary" disabled="disabled">Go</button>\n'
+    '  </form>\n  <a href="https://x.test/a?b=1&amp;c=2" title="a > b">more</a>\n  <p data-note=\'single quoted\'>text</p>\n</body>\n</html>\n')
+_MIN_HTML = '<!DOCTYPE html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n</head>\n<body>\n<form action=/signup>\n<input name=email required>\n</form>\n</body>\n</html>\n'
+_TRICKY = (
+    '<script>var s = "<a href=\\"x\\" class=\\"y\\" disabled=\\"disabled\\" />";</script>\n<style>a[href="x"] { color: red }</style>\n'
+    '<textarea><input disabled="disabled" /></textarea>\n<!-- <br /> <input checked="checked"> -->\n<![CDATA[ <br /> ]]>\n'
+    '<svg><path d="M0 0" /><circle r="1" /></svg>\n<DIV CLASS="A" ID="b"/>\n<a href="x/" id = "y">k</a>\n<p class="a" class="b" hidden="false">dup</p>\n'
+    '<input value="a>b" title=\'q"r\' disabled = "DISABLED">\n<a href=x/ >\n<br class=a/>\n<p\nclass="multi"\n  id="line">\n<b "weird" =x>\n<a href="x"title="y">\n')
+case(
+    1081,
+    claim="Start tags are rewritten with boolean attributes bare (disabled=\"disabled\" to disabled), simple quoted values unquoted, default attributes (script type=text/javascript, style type=text/css, form method=get) and empty class/style dropped and the / of void elements removed; comments, CDATA, script, style, textarea and title content, any tag the pattern does not recognise and everything after such a tag are untouched, and html.parser yields the same event sequence.",
+    loses="attribute quote style, whitespace inside tags, the trailing / on void tags, and attributes equal to their HTML default or empty class/style",
+    encode=encode_html,
+    equivalent=_equiv_html,
+    fixtures=lambda: [
+        Fixture("form page with booleans, defaults, quotes and void slashes", _FORM, True),
+        Fixture("already minimal HTML", _MIN_HTML, False),
+        Fixture("empty alt and value are meaningful", '<img src=a.png alt="">\n<input name=q value="">\n<a href="">x</a>\n', False),
+        Fixture("no markup", "plain text with a < b and c > d\n", False),
+        Fixture("raw text, comments, odd and malformed tags", _TRICKY, None),
+    ],
+    min_gain=0.1,
+)
+
+
+# ===============================================================================================================
+# #1167 Decode JSON arrays of byte values to text. Roundtrip: only canonical compact arrays under "MESSAGE" or
+# {"type":"Buffer","data":...} whose bytes are strict UTF-8 text; the encoded string carries a sigil so decode knows.
+
+_BYTES = r"\[((?:0|[1-9]\d{0,2})(?:,(?:0|[1-9]\d{0,2})){7,})\]"
+_MSG_ARR = re.compile(r'("MESSAGE":)' + _BYTES)
+_BUF_ARR = re.compile(r'(\{"type":"Buffer","data":)' + _BYTES)
+_MSG_STR = re.compile(r'("MESSAGE":)"§((?:[^"\\]|\\.)*)"')
+_BUF_STR = re.compile(r'(\{"type":"Buffer","data":)"§((?:[^"\\]|\\.)*)"')
+
+
+def _bytes_to_lexeme(nums):
+    vals = nums.split(",")
+    if any(int(v) > 255 for v in vals):
+        return None
+    try:
+        text = bytes(int(v) for v in vals).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    bad = [c for c in text if (not c.isprintable()) and c not in "\n\t\r\x1b"]
+    if bad or sum(c in "\r\x1b" for c in text) > len(text) // 4:
+        return None  # not text-like: binary data stays as numbers
+    lex = json.dumps("§" + text, ensure_ascii=False)
+    return lex if len(lex) < len(nums) + 2 else None
+
+
+def _fold_bytes(text):
+    def sub(m):
+        lex = _bytes_to_lexeme(m.group(2))
+        return m.group(0) if lex is None else m.group(1) + lex
+
+    body = _BUF_ARR.sub(sub, _MSG_ARR.sub(sub, text))
+    return None if body == text else body
+
+
+def _unfold_bytes(body):
+    def sub(m):
+        text = json.loads('"' + m.group(2) + '"')
+        return m.group(1) + "[" + ",".join(str(b) for b in text.encode("utf-8")) + "]"
+
+    return _BUF_STR.sub(sub, _MSG_STR.sub(sub, body))
+
+
+@_failopen
+def encode_bytes(text):
+    return _esc_encode(text, "§b\n", _fold_bytes, strict_inner=True)
+
+
+def decode_bytes(text):
+    return _esc_decode(text, "§b\n", _unfold_bytes)
+
+
+def _arr(s):
+    return "[" + ",".join(str(b) for b in s.encode("utf-8")) + "]"
+
+
+_JOURNAL = "".join(
+    json.dumps({"__REALTIME_TIMESTAMP": str(1700000000000000 + i), "_SYSTEMD_UNIT": "app.service", "PRIORITY": "3"}, separators=(",", ":"))[:-1]
+    + ',"MESSAGE":' + _arr(msg) + "}\n"
+    for i, msg in enumerate(["\x1b[31mERROR\x1b[0m connection to db-1 refused: retrying in 5s",
+                             "\x1b[1;33mWARN\x1b[0m cache cold, rebuilding index (3 of 12 shards)",
+                             "café ☃ unicode message — fine"]))
+_JOURNAL += '{"PRIORITY":"6","MESSAGE":"plain string message stays","_PID":"41"}\n{"PRIORITY":"3","MESSAGE":[255,254,0,1,2,3,4,5,6,7]}\n'
+_BUFFER = json.dumps({"type": "Buffer", "data": list("hello from a node buffer, two lines\nsecond line".encode())}, separators=(",", ":"))
+_BUFFER_RESULT = '{"ok":true,"payload":' + _BUFFER + ',"size":52}\n'
+case(
+    1167,
+    claim="A canonical compact array of 8+ byte values under \"MESSAGE\" or {\"type\":\"Buffer\",\"data\":...} that is strict UTF-8 text becomes a sigil-prefixed JSON string; decode regenerates the exact array, so the original bytes come back. Arrays elsewhere, invalid UTF-8, binary-looking data and non-canonical spellings stay as numbers.",
+    encode=encode_bytes,
+    decode=decode_bytes,
+    fixtures=lambda: [
+        Fixture("journalctl -o json with coloured MESSAGE arrays", _JOURNAL, True),
+        Fixture("Node Buffer.toJSON", _BUFFER_RESULT, True),
+        Fixture("ASCII-valid arrays under other keys", '{"values":[72,101,108,108,111,32,119,111,114,108,100],"MESSAGES":[72,101,108,108,111,32,119,111,114,108,100]}\n', False),
+        Fixture("invalid UTF-8 and binary MESSAGE", '{"MESSAGE":[255,254,0,1,2,3,4,5,6,7]}\n{"MESSAGE":[0,1,2,3,4,5,6,7,8,9,10,11]}\n', False),
+        Fixture("pretty-printed or non-canonical arrays", '{"MESSAGE": [72, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]}\n{"MESSAGE":[072,101,108,108,111,32,119,111,114,108,100]}\n', False),
+        Fixture("short array", '{"MESSAGE":[72,101,108,108,111]}\n', False),
+        Fixture("sigil already present", '{"MESSAGE":"§hello"}\n' + _JOURNAL, None),
+        Fixture("text that starts like encoder output", '§b\n{"MESSAGE":"§x"}\n', None),
+        Fixture("quotes, backslashes and control bytes inside the text", '{"MESSAGE":' + _arr('say "hi" \\ path\\n\ttab\x1b[0m end') + "}\n", None),
+    ],
+    min_gain=0.3,
+    idempotent=False,
+)
+
+
+# ===============================================================================================================
+# #1169 Delta and run-length encode metric value lists. Roundtrip on canonical compact numeric arrays.
+
+_ITEM = r'(?:-?(?:0|[1-9]\d*)(?:\.\d+)?|"-?(?:0|[1-9]\d*)(?:\.\d+)?")'
+_SERIES = re.compile(r"\[(" + _ITEM + "(?:," + _ITEM + r"){7,})\]")
+_SERIES_ENC = re.compile(r"§([drD])\[([^\]\[]*)\]")
+
+
+def _runs(tokens_, fmt=lambda t: t):
+    out, i = [], 0
+    while i < len(tokens_):
+        j = i
+        while j < len(tokens_) and tokens_[j] == tokens_[i]:
+            j += 1
+        out += [f"{fmt(tokens_[i])}*{j - i}"] if j - i >= 3 else [fmt(tokens_[i])] * (j - i)
+        i = j
+    return out
+
+
+def _fmt_delta(d):
+    return f"{'+' if d >= 0 else '-'}{abs(d)}"
+
+
+def _series_encode(m):
+    body = m.group(1)
+    items = body.split(",")
+    quoted = items[0][0] == '"'
+    if any((it[0] == '"') != quoted for it in items):
+        return m.group(0)
+    best = "§r[" + ",".join(_runs(items)) + "]"
+    raw = [it.strip('"') for it in items]
+    if all(re.fullmatch(r"-?(?:0|[1-9]\d*)", r) for r in raw) and all(str(int(r)) == r for r in raw):
+        vals = [int(r) for r in raw]
+        deltas = [b - a for a, b in zip(vals, vals[1:])]
+        cand = f"§{'D' if quoted else 'd'}[" + ",".join([str(vals[0])] + _runs(deltas, _fmt_delta)) + "]"
+        if len(cand) < len(best):
+            best = cand
+    return best if len(best) < len(m.group(0)) else m.group(0)
+
+
+def _series_decode(m):
+    mode, body = m.group(1), m.group(2)
+    items = body.split(",")
+    if mode == "r":
+        out = []
+        for it in items:
+            tok, star, n = it.partition("*")
+            out += [tok] * (int(n) if star else 1)
+        return "[" + ",".join(out) + "]"
+    v, out = int(items[0]), [items[0]]
+    for it in items[1:]:
+        d, star, n = it.partition("*")
+        for _ in range(int(n) if star else 1):
+            v += int(d)
+            out.append(str(v))
+    return "[" + ",".join(f'"{x}"' if mode == "D" else x for x in out) + "]"
+
+
+def _fold_series(text):
+    body = _SERIES.sub(_series_encode, text)
+    return None if body == text else body
+
+
+@_failopen
+def encode_series(text):
+    return _esc_encode(text, "§dr\n", _fold_series, strict_inner=True)
+
+
+def decode_series(text):
+    return _esc_decode(text, "§dr\n", lambda body: _SERIES_ENC.sub(_series_decode, body))
+
+
+def _prom_like():
+    counter, total = [], 1_204_000
+    for i in range(60):
+        total += [3, 7, 4, 12, 5][i % 5] + (i // 17)
+        counter.append(total)
+    plateau = [0] * 20 + [100] * 25 + [250] * 15
+    ts = [1700000000 + 15 * i for i in range(60)]
+    quoted = [str(v) for v in counter[:30]]
+    return json.dumps({"status": "success", "timestamps": ts, "http_requests_total": counter, "queue_depth": plateau,
+                       "as_strings": quoted, "ratio": [0.5] * 10 + [0.25] * 10}, separators=(",", ":")) + "\n"
+
+
+case(
+    1169,
+    claim="Canonical compact numeric arrays of 8+ items (bare or quoted) are rewritten as first value plus signed deltas with 'x*N' runs, or as raw tokens with runs, whichever is shorter; decode rebuilds the exact array text, including quotes and decimals.",
+    encode=encode_series,
+    decode=decode_series,
+    fixtures=lambda: [
+        Fixture("counter series, timestamps, plateau and quoted values", _prom_like(), True),
+        Fixture("noisy small integers", '{"v":[3,1,4,1,5,9,2,6,5,3,5,8,9,7,9,3]}\n', False),
+        Fixture("short arrays and strings", '{"v":[1,2,3],"s":["a","b","c","d","e","f","g","h"]}\n', False),
+        Fixture("non-canonical numbers", '{"v":[1,2,3,4,5,6,7,8.0,9],"w":[01,2,3,4,5,6,7,8],"x":[1e5,1e5,1e5,1e5,1e5,1e5,1e5,1e5]}\n', False),
+        Fixture("negative, zero and big values", '{"v":[-5,-5,-5,-5,0,0,0,0,9007199254740993,9007199254740994,-0,-1]}\n{"w":[-3,-2,-1,0,1,2,3,4,5]}\n', None),
+        Fixture("mixed quoting and decimals", '{"v":["1",2,"3",4,5,6,7,8],"d":[0.5,0.5,0.5,0.5,1.25,1.25,1.25,1.25,-0.0,-0.0]}\n', None),
+        Fixture("text that starts like encoder output", '§dr\n§d[1,+1*7]\n', None),
+        Fixture("sigil in the middle", _prom_like() + "§d[1]\n", None),
+    ],
+    min_gain=0.25,
+    idempotent=False,
+)
+
+
+# ===============================================================================================================
+# #1234 docker compose config: re-shorten long-form ports, volumes and depends_on. Equivalent: a YAML-subset parser
+# plus a normaliser that expands every short form to its long form (the reverse direction of the encoder) gives the
+# same model for both texts.
+
+_PORT_KEYS = {"mode", "host_ip", "target", "published", "protocol"}
+
+
+def _scalar(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v
+
+
+def _item_fields(lines):
+    """Parse the lines of one list item ('- k: v' then 'k: v' at a deeper indent, nested lines kept) into
+    {key: (value, nested_lines)} or None when the item is not plain key/value text."""
+    fields, key = {}, None
+    for n, ln in enumerate(lines):
+        body = ln[8:] if n else ln[8:]  # both '      - k: v' and '        k: v' keep the key from column 8
+        if n == 0 and not ln.startswith("      - "):
+            return None
+        m = re.fullmatch(r"([a-z_]+):(?: (.*))?", body) if not ln[8:9].isspace() and (n == 0 or ln.startswith("        ") and not ln.startswith("         ")) else None
+        if m:
+            key = m.group(1)
+            if key in fields:
+                return None
+            fields[key] = [m.group(2) or "", []]
+        elif key is not None and n and ln.startswith("          "):
+            fields[key][1].append(ln.strip())
+        else:
+            return None
+    return fields
+
+
+def _short_port(f):
+    if not set(f) <= _PORT_KEYS or any(f[k][1] for k in f) or "target" not in f:
+        return None
+    if f.get("mode", ["ingress"])[0] != "ingress" or f.get("protocol", ["tcp"])[0] not in ("tcp", "udp"):
+        return None
+    tgt = _scalar(f["target"][0])
+    pub = _scalar(f["published"][0]) if "published" in f else None
+    host = _scalar(f["host_ip"][0]) if "host_ip" in f else None
+    rng = r"\d+(?:-\d+)?"
+    if not re.fullmatch(rng, tgt) or (pub is not None and not re.fullmatch(rng, pub)):
+        return None
+    if host is not None and (pub is None or not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", host)):
+        return None
+    proto = "/udp" if f.get("protocol", ["tcp"])[0] == "udp" else ""
+    return '"' + (f"{host}:" if host else "") + (f"{pub}:" if pub else "") + tgt + proto + '"'
+
+
+def _short_volume(f):
+    kind = f.get("type", [""])[0]
+    allowed = {"type", "source", "target", "read_only", kind}
+    if kind not in ("bind", "volume") or not set(f) <= allowed or "source" not in f or "target" not in f:
+        return None
+    sub = f.get(kind)
+    if sub is not None:
+        want = ("create_host_path: true",) if kind == "bind" else ()
+        if tuple(sub[1]) != want or sub[0] not in ("", "{}") or (kind == "bind" and sub[0] != "") or (kind == "volume" and sub[0] != "{}"):
+            return None
+    if any(f[k][1] for k in f if k != kind):
+        return None
+    ro = f.get("read_only", ["false"])[0]
+    if ro not in ("true", "false"):
+        return None
+    src, tgt = f["source"][0], f["target"][0]
+    if not re.fullmatch(r"[A-Za-z0-9_./-]+", src) or not re.fullmatch(r"/[A-Za-z0-9_./-]*", tgt):
+        return None
+    if (kind == "bind") != src.startswith("/") or (kind == "volume" and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", src)):
+        return None
+    return f"{src}:{tgt}" + (":ro" if ro == "true" else "")
+
+
+def _items(block):
+    """Split a service-level list block into items (list of line lists), or None."""
+    items = []
+    for ln in block:
+        if ln.startswith("      - "):
+            items.append([ln])
+        elif items and ln.startswith("        "):
+            items[-1].append(ln)
+        else:
+            return None
+    return items
+
+
+@_total
+def encode_compose(text):
+    lines = text.split("\n")
+    out, i, top = [], 0, ""
+    while i < len(lines):
+        ln = lines[i]
+        if re.match(r"\S", ln):
+            top = ln.split(":")[0]
+        m = re.fullmatch(r"    (ports|volumes|depends_on):", ln) if top == "services" else None
+        if not m:
+            out.append(ln)
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j].startswith("     "):
+            j += 1
+        block, key = lines[i + 1:j], m.group(1)
+        out.append(ln)
+        if key == "depends_on":
+            names, ok = [], bool(block)
+            k = 0
+            while ok and k < len(block):
+                nm = re.fullmatch(r"      ([\w.-]+):", block[k])
+                body = block[k + 1:k + 3]
+                if not nm or body not in (["        condition: service_started", "        required: true"], ["        condition: service_started"]):
+                    ok = False
+                    break
+                names.append(nm.group(1))
+                k += 1 + len(body)
+            out += [f"      - {n}" for n in names] if ok else block
+        else:
+            items = _items(block)
+            conv = _short_port if key == "ports" else _short_volume
+            if items is None:
+                out += block
+            else:
+                for item in items:
+                    f = _item_fields(item)
+                    short = conv(f) if f else None
+                    out += [f"      - {short}"] if short else item
+        i = j
+    return "\n".join(out)
+
+
+# ---- oracle: tiny YAML subset parser + model normaliser ---------------------------------------------------------
+
+def _yaml_lines(text):
+    return [(len(ln) - len(ln.lstrip(" ")), ln.strip()) for ln in text.split("\n") if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _yaml_value(v):
+    if v == "{}":
+        return {}
+    if v == "[]":
+        return []
+    if v in ("null", "~"):
+        return None
+    return _scalar(v)
+
+
+def _yaml_block(ls, i, ind):
+    if ls[i][1].startswith("- ") or ls[i][1] == "-":
+        res = []
+        while i < len(ls) and ls[i][0] == ind and (ls[i][1].startswith("- ") or ls[i][1] == "-"):
+            rest = ls[i][1][2:].strip()
+            if re.match(r"[\w.-]+:(?: |$)", rest):
+                ls[i] = (ind + 2, rest)
+                item, i = _yaml_block(ls, i, ind + 2)
+                res.append(item)
+            else:
+                res.append(_yaml_value(rest) if rest else None)
+                i += 1
+        return res, i
+    res = {}
+    while i < len(ls) and ls[i][0] == ind and not ls[i][1].startswith("- "):
+        m = re.fullmatch(r"([^\s:][^:]*?):(?: +(.*))?", ls[i][1])
+        if not m:
+            res[ls[i][1]] = None
+            i += 1
+            continue
+        key, val = m.group(1), m.group(2)
+        if val:
+            res[key] = _yaml_value(val)
+            i += 1
+        elif i + 1 < len(ls) and (ls[i + 1][0] > ind or (ls[i + 1][0] == ind and ls[i + 1][1].startswith("- "))):
+            res[key], i = _yaml_block(ls, i + 1, ls[i + 1][0])
+        else:
+            res[key] = None
+            i += 1
+    return res, i
+
+
+def _yaml_parse(text):
+    ls, i, chunks = _yaml_lines(text), 0, []
+    while i < len(ls):
+        node, j = _yaml_block(ls, i, ls[i][0])
+        chunks.append(node)
+        i = max(j, i + 1)
+    return chunks
+
+
+def _norm_port(p):
+    if isinstance(p, str):
+        proto = "tcp"
+        if "/" in p:
+            p, proto = p.rsplit("/", 1)
+        parts = p.split(":")
+        d = {"target": parts[-1], "protocol": proto, "mode": "ingress"}
+        if len(parts) >= 2:
+            d["published"] = parts[-2]
+        if len(parts) == 3:
+            d["host_ip"] = parts[0]
+        return d
+    if isinstance(p, dict):
+        d = {k: (str(v) if v is not None else None) for k, v in p.items()}
+        d.setdefault("mode", "ingress")
+        d.setdefault("protocol", "tcp")
+        return d
+    return p
+
+
+def _norm_volume(v):
+    if isinstance(v, str):
+        parts = v.split(":")
+        if len(parts) in (2, 3):
+            return {"type": "bind" if parts[0][:1] in "/.~" else "volume", "source": parts[0], "target": parts[1],
+                    **({"read_only": "true"} if len(parts) == 3 and parts[2] == "ro" else {})}
+        return v
+    if isinstance(v, dict):
+        d = {k: x for k, x in v.items()}
+        if d.get("read_only") == "false":
+            del d["read_only"]
+        if d.get("bind") == {"create_host_path": "true"} or d.get("bind") == {"create_host_path": True}:
+            del d["bind"]
+        if d.get("volume") == {}:
+            del d["volume"]
+        return d
+    return v
+
+
+def _norm_dep(d):
+    if isinstance(d, list):
+        return {n: {"condition": "service_started", "required": "true"} for n in d}
+    if isinstance(d, dict):
+        return {n: {**{"condition": "service_started", "required": "true"}, **(v if isinstance(v, dict) else {})} for n, v in d.items()}
+    return d
+
+
+def _norm_compose(node):
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            v = _norm_compose(v)
+            if k == "ports" and isinstance(v, list):
+                v = [_norm_port(p) for p in v]
+            elif k == "volumes" and isinstance(v, list):
+                v = [_norm_volume(x) for x in v]
+            elif k == "depends_on":
+                v = _norm_dep(v)
+            out[k] = v
+        return out
+    if isinstance(node, list):
+        return [_norm_compose(x) for x in node]
+    return node
+
+
+def _equiv_compose(a, b):
+    return a == b or _norm_compose(_yaml_parse(a)) == _norm_compose(_yaml_parse(b))
+
+
+_COMPOSE = """name: shop
+services:
+  api:
+    build:
+      context: /home/dev/shop/api
+      dockerfile: Dockerfile
+    depends_on:
+      cache:
+        condition: service_started
+        required: true
+      db:
+        condition: service_healthy
+        required: true
+    environment:
+      DATABASE_URL: postgres://shop:shop@db:5432/shop
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 8080
+        published: "8080"
+        protocol: tcp
+      - mode: ingress
+        host_ip: 127.0.0.1
+        target: 9090
+        published: "9090"
+        protocol: tcp
+      - mode: ingress
+        target: 5353
+        published: "5353"
+        protocol: udp
+      - mode: host
+        target: 443
+        published: "443"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /home/dev/shop/api/src
+        target: /app/src
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /home/dev/shop/certs
+        target: /certs
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          propagation: rshared
+          create_host_path: true
+      - type: volume
+        source: api_cache
+        target: /var/cache/api
+        volume: {}
+      - type: volume
+        source: api_logs
+        target: /var/log/api
+        volume:
+          nocopy: true
+      - type: tmpfs
+        target: /tmp
+  db:
+    image: postgres:16
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 5432
+        published: "5432"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: db_data
+        target: /var/lib/postgresql/data
+        volume: {}
+  cache:
+    depends_on:
+      db:
+        condition: service_started
+        required: true
+    image: redis:7
+    labels:
+      note: "volumes: not a list"
+    ports:
+      - mode: ingress
+        target: 6379
+        published: "6379"
+        protocol: tcp
+networks:
+  default:
+    name: shop_default
+volumes:
+  api_cache:
+    name: shop_api_cache
+  db_data:
+    name: shop_db_data
+"""
+_COMPOSE_SHORT = """name: app
+services:
+  web:
+    image: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+    depends_on:
+      - db
+"""
+case(
+    1234,
+    claim="In docker compose config output, long-form ports (mode ingress, protocol tcp/udp, optional IPv4 host_ip), bind and named-volume mounts (default bind/volume options only, optional read_only) and depends_on entries with the default condition become short syntax; any item with a non-default sub-field (mode host, propagation, nocopy, tmpfs, condition service_healthy) stays in long form, and the resolved model is the same.",
+    loses="long-form defaults that short syntax implies: mode: ingress, protocol: tcp, create_host_path: true, an empty volume: {}, condition: service_started and required: true",
+    encode=encode_compose,
+    equivalent=_equiv_compose,
+    fixtures=lambda: [
+        Fixture("compose config with ports, volumes and depends_on", _COMPOSE, True),
+        Fixture("already short syntax", _COMPOSE_SHORT, False),
+        Fixture("only non-default long forms", "services:\n  a:\n    ports:\n      - mode: host\n        target: 80\n        published: \"80\"\n        protocol: tcp\n    depends_on:\n      b:\n        condition: service_healthy\n        required: true\n", False),
+        Fixture("not compose", "ports:\n  - 80\nvolumes: 3\n", False),
+        Fixture("CRLF compose", _COMPOSE.replace("\n", "\r\n"), None),
+        Fixture("tabs and odd quoting", _COMPOSE.replace('published: "8080"', "published: '8080'").replace("  db:\n    image", "  db:\n\timage"), None),
+    ],
+    min_gain=0.1,
+    mutations=30,
+)
+
+
+# ===============================================================================================================
+# #1245 Drop redundant xmlns redeclarations. Equivalent: canonical XML (ElementTree.canonicalize, C14N 2.0) is
+# identical; the encoder is a start-tag scanner with a namespace scope stack, applied only to well-formed XML.
+
+_XTOK = re.compile(
+    r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>|</[^\s>]+\s*>"
+    r"|<([^\s/>!?]+)((?:\s+[^\s=/>]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*)(\s*)(/?)>", re.S)
+_XATTR = re.compile(r"""\s+([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')""")
+
+
+@_total
+def encode_xmlns(text):
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:
+        return text
+    ET.fromstring(text)  # only well-formed documents
+    out, stack, scope, pos, changed = [], [], {"": ""}, 0, False
+    for m in _XTOK.finditer(text):
+        out.append(text[pos:m.start()])
+        pos = m.end()
+        if m.group(1) is None:
+            if m.group(0).startswith("</"):
+                scope = stack.pop()
+            out.append(m.group(0))
+            continue
+        name, attrs, ws, slash = m.group(1), m.group(2), m.group(3), m.group(4)
+        local = dict(scope)
+        kept = []
+        for a in _XATTR.finditer(attrs):
+            an, av = a.group(1), a.group(2)[1:-1]
+            if an == "xmlns" or an.startswith("xmlns:"):
+                prefix = "" if an == "xmlns" else an[6:]
+                if local.get(prefix) == av:
+                    changed = True
+                    continue  # redeclares the binding already in scope
+                local[prefix] = av
+            kept.append(a.group(0))
+        out.append(f"<{name}{''.join(kept)}{ws}{slash}>")
+        if not slash:
+            stack.append(scope)
+            scope = local
+    out.append(text[pos:])
+    return "".join(out) if changed else text
+
+
+def _equiv_xml(a, b):
+    if a == b:
+        return True
+    try:
+        return ET.canonicalize(a, with_comments=True) == ET.canonicalize(b, with_comments=True)
+    except ET.ParseError:
+        return False
+
+
+def _soap(n=10):
+    orders = "".join(
+        f'  <Order xmlns="urn:shop:orders" id="{i}">\n    <Customer xmlns="urn:shop:orders"><Name xmlns="urn:shop:orders">C{i}</Name></Customer>\n'
+        f'    <Total xmlns="urn:shop:orders" currency="EUR">{i * 10}.50</Total>\n    <Note xmlns="urn:other" xmlns:o="urn:shop:orders">hi</Note>\n  </Order>\n'
+        for i in range(n))
+    return ('<?xml version="1.0" encoding="utf-8"?>\n<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">\n<s:Body xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">\n'
+            '<Orders xmlns="urn:shop:orders" xmlns:x="urn:x">\n' + orders + "</Orders>\n</s:Body>\n</s:Envelope>\n")
+_XML_SCOPES = ('<a xmlns="u" xmlns:p="1"><b xmlns="v" xmlns:p="2"><c xmlns="v" xmlns:p="2"/><d xmlns:p="1"/></b><e xmlns="u" xmlns:p="1"/>'
+               '<f xmlns=""/><g xmlns="" xmlns:q=\'3\'><h xmlns:q="3"/></g></a>')
+case(
+    1245,
+    claim="An xmlns or xmlns:prefix declaration whose value equals the binding already in scope is removed from the start tag (the scope stack is rebuilt per element); every other byte, including comments, CDATA, text and attribute layout, is kept, and the canonical XML of both texts is identical.",
+    loses="redundant namespace declarations only (they do not exist in the canonical form); documents with a DOCTYPE or that are not well-formed are left untouched",
+    encode=encode_xmlns,
+    equivalent=_equiv_xml,
+    fixtures=lambda: [
+        Fixture("SOAP-style response, 10 orders with redeclared default xmlns", _soap(), True),
+        Fixture("scope changes: rebinding, undeclaring, siblings", _XML_SCOPES, None),
+        Fixture("every declaration is needed", '<a xmlns="u"><b xmlns="v"><c xmlns="u"/></b></a>', False),
+        Fixture("not XML", "xmlns=\"u\" is just text here\n", False),
+        Fixture("comments and CDATA that mention xmlns", '<a xmlns="u"><!-- <b xmlns="u"/> --><![CDATA[<c xmlns="u"/>]]><d xmlns="v"/></a>', False),
+        Fixture("DOCTYPE document", '<!DOCTYPE a [<!ENTITY e "x">]><a xmlns="u"><b xmlns="u">&e;</b></a>', None),
+    ],
+    min_gain=0.15,
+    mutations=30,
+)
+
+
+# ===============================================================================================================
+# #1248 Column-oriented dict-of-dicts (pandas to_json / to_dict) to a table. Roundtrip: a TSV of raw lexemes with an
+# index column; decode rebuilds the exact compact JSON (or the exact Python repr).
+
+_JS = r'"(?:[^"\\\x00-\x1f]|\\.)*"'
+_JV = rf"(?:{_JS}|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|null|true|false)"
+_PS = r"""(?:'(?:[^'\\\t\n]|\\.)*'|"(?:[^"\\\t\n]|\\.)*")"""
+_PV = rf"(?:{_PS}|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?|-?nan|-?inf|None|True|False)"
+_PK = rf"(?:{_PS}|-?\d+)"
+
+
+def _parse_frame(text, py):
+    s = text[:-1] if text.endswith("\n") else text
+    key = re.compile(_PK if py else _JS)
+    val = re.compile(_PV if py else _JV)
+    kv, sep = (": ", ", ") if py else (":", ",")
+    pos, cols, idx, cells = 0, [], None, []
+    if not s.startswith("{"):
+        return None
+    pos = 1
+    while True:
+        m = key.match(s, pos)
+        if not m or s[m.end():m.end() + len(kv) + 1] != kv + "{":
+            return None
+        cols.append(m.group(0))
+        pos = m.end() + len(kv) + 1
+        keys, vals = [], []
+        while True:
+            mk = key.match(s, pos)
+            if not mk or s[mk.end():mk.end() + len(kv)] != kv:
+                return None
+            mv = val.match(s, mk.end() + len(kv))
+            if not mv:
+                return None
+            keys.append(mk.group(0))
+            vals.append(mv.group(0))
+            pos = mv.end()
+            if s.startswith(sep, pos):
+                pos += len(sep)
+                continue
+            if s.startswith("}", pos):
+                pos += 1
+                break
+            return None
+        if idx is None:
+            idx = keys
+        elif keys != idx:
+            return None
+        cells.append(vals)
+        if s.startswith(sep, pos):
+            pos += len(sep)
+            continue
+        if s.startswith("}", pos) and pos + 1 == len(s):
+            break
+        return None
+    if len(set(cols)) != len(cols) or len(set(idx)) != len(idx):
+        return None
+    return cols, idx, cells
+
+
+def _fold_frame(text):
+    for py in (False, True):
+        parsed = _parse_frame(text, py)
+        if parsed:
+            break
+    else:
+        return None
+    cols, idx, cells = parsed
+    strip = (lambda k: k) if py else (lambda k: k[1:-1])
+    nl = " nl" if text.endswith("\n") else ""
+    head = "\t".join([""] + [strip(c) for c in cols])
+    rows = ["\t".join([strip(k)] + [cells[c][r] for c in range(len(cols))]) for r, k in enumerate(idx)]
+    return f"{'py' if py else 'json'}{nl}\n" + head + "".join("\n" + r for r in rows)
+
+
+def _unfold_frame(body):
+    sig, _, rest = body.partition("\n")
+    py, nl = sig.startswith("py"), sig.endswith(" nl")
+    lines = [ln.split("\t") for ln in rest.split("\n")]
+    cols, rows = lines[0][1:], lines[1:]
+    q = (lambda k: k) if py else (lambda k: f'"{k}"')
+    kv, sep = (": ", ", ") if py else (":", ",")
+    cs = sep.join(f"{q(c)}{kv}{{" + sep.join(f"{q(r[0])}{kv}{r[1 + ci]}" for r in rows) + "}" for ci, c in enumerate(cols))
+    return "{" + cs + "}" + ("\n" if nl else "")
+
+
+@_failopen
+def encode_frame(text):
+    return _esc_encode(text, "§frame ", _fold_frame)
+
+
+def decode_frame(text):
+    return _esc_decode(text, "§frame ", _unfold_frame)
+
+
+def _frame_json(rows=40, trailing=""):
+    cols = {"price": lambda i: f"{i * 1.25:.2f}".rstrip("0") if i % 3 else str(float(i)), "name": lambda i: json.dumps(f"item \"{i}\" caf\u00e9/\t" if i % 7 == 0 else f"item-{i}", ensure_ascii=False),
+            "stock": lambda i: "null" if i % 11 == 0 else str(i * 3)}
+    body = ",".join(f'"{c}":{{' + ",".join(f'"{i}":{f(i) if c == "name" else f(i)}' for i in range(rows)) + "}" for c, f in cols.items())
+    return "{" + body + "}" + trailing
+
+
+def _frame_py(rows=30):
+    return "{" + ", ".join(f"'{c}': {{" + ", ".join(f"{i}: {f(i)}" for i in range(rows)) + "}" for c, f in
+                           {"a": lambda i: i * 2, "b": lambda i: repr(f"x{i}" if i % 5 else "it's"), "c": lambda i: "nan" if i % 9 == 0 else i / 4}.items()) + "}\n"
+
+
+case(
+    1248,
+    claim="A pandas {column: {index: value}} document (compact JSON, or the Python repr with ', ' and ': ') in which every column has the same ordered index keys becomes a TSV with an index column and raw cell lexemes; decode rebuilds the exact original text, including a trailing newline, null, escaped strings and nan.",
+    encode=encode_frame,
+    decode=decode_frame,
+    fixtures=lambda: [
+        Fixture("df.to_json(), 3 columns x 40 rows", _frame_json(), True),
+        Fixture("df.to_json() with trailing newline", _frame_json(20, "\n"), True),
+        Fixture("df.to_dict() repr with int index keys", _frame_py(), True),
+        Fixture("columns with different index keys", '{"a":{"0":1,"1":2},"b":{"0":1,"2":2}}', False),
+        Fixture("row-oriented records", '[{"a":1,"b":2},{"a":3,"b":4}]', False),
+        Fixture("nested values", '{"a":{"0":[1,2],"1":[3]},"b":{"0":1,"1":2}}', False),
+        Fixture("pretty-printed", json.dumps(json.loads(_frame_json(3)), indent=2), False),
+        Fixture("duplicate column names", '{"a":{"0":1,"1":2},"a":{"0":3,"1":4}}', None),
+        Fixture("text that starts like encoder output", '§frame json\n\ta\n0\t1', None),
+        Fixture("one-row, empty keys and escaped tabs", '{"":{"":"x\\ty"},"b c":{"":1}}', None),
+    ],
+    min_gain=0.3,
+    idempotent=False,
+)

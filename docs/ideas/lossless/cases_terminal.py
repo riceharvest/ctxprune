@@ -711,3 +711,541 @@ case(
     ],
     min_gain=0.08,
 )
+
+# ---------------------------------------------------------------------------------------------------------------
+# #332 Decode UTF-16 text before the binary-stub decision. The tool result is a str in which every byte of the file became
+# one character (U+0000..U+00FF): UTF-16LE "Hi" arrives as "H\x00i\x00" (BOM: "ÿþ" = FF FE). Detect a BOM or an alternating-NUL
+# pattern, decode strictly, and prefix a one-line header so the original byte string is recoverable exactly.
+
+_U16_HDR = {
+    ("le", True): "[decoded from UTF-16LE, BOM removed]\n",
+    ("le", False): "[decoded from UTF-16LE]\n",
+    ("be", True): "[decoded from UTF-16BE, BOM removed]\n",
+    ("be", False): "[decoded from UTF-16BE]\n",
+}
+_U16_RAW = "[text follows unchanged]\n"  # escape for input that already starts like our own header
+
+
+def _u16_detect(b: bytes):
+    """-> (endian, has_bom, body) or None."""
+    if b[:2] == b"\xff\xfe":
+        return "le", True, b[2:]
+    if b[:2] == b"\xfe\xff":
+        return "be", True, b[2:]
+    if len(b) >= 16:
+        lo, hi = b[0::2], b[1::2]
+        text_like = lambda part: sum(0x20 <= v < 0x7F or v in (9, 10, 13) for v in part) * 10 >= len(part) * 9  # noqa: E731
+        if hi.count(0) * 10 >= len(hi) * 9 and text_like(lo):
+            return "le", False, b
+        if lo.count(0) * 10 >= len(lo) * 9 and text_like(hi):
+            return "be", False, b
+    return None
+
+
+def utf16_to_text(text: str) -> str:
+    if text.startswith(_U16_RAW) or any(text.startswith(h) for h in _U16_HDR.values()):
+        return _U16_RAW + text  # grows by design: otherwise decode could not tell this from an encoded text
+    if len(text) < 16 or any(ord(c) > 0xFF for c in text):
+        return text
+    found = _u16_detect(text.encode("latin-1"))
+    if found is None:
+        return text
+    endian, has_bom, body = found
+    if len(body) % 2:
+        return text  # cut in the middle of a character: do not guess
+    try:
+        dec = body.decode("utf-16-" + endian)  # strict: lone surrogates mean it is not UTF-16 text
+    except UnicodeDecodeError:
+        return text
+    bad = sum(unicodedata.category(c) in ("Cs", "Co", "Cn") or (unicodedata.category(c) == "Cc" and c not in "\t\r\n") for c in dec)
+    if "\x00" in dec or bad * 50 > len(dec):
+        return text
+    out = _U16_HDR[(endian, has_bom)] + dec
+    return out if len(out) < len(text) else text
+
+
+def text_to_utf16(text: str) -> str:
+    if text.startswith(_U16_RAW):
+        return text[len(_U16_RAW):]
+    for (endian, has_bom), hdr in _U16_HDR.items():
+        if text.startswith(hdr):
+            raw = text[len(hdr):].encode("utf-16-" + endian, "surrogatepass")
+            if has_bom:
+                raw = (b"\xff\xfe" if endian == "le" else b"\xfe\xff") + raw
+            return raw.decode("latin-1")
+    return text
+
+
+def _oracle_332(x: str, e: str) -> bool:
+    """Independent: decode the UTF-16 code units by hand and compare with the decoded text's code units."""
+    if e == x or e == _U16_RAW + x:
+        return True
+    for (endian, has_bom), hdr in _U16_HDR.items():
+        if e.startswith(hdr):
+            break
+    else:
+        return False
+    body = e[len(hdr):]
+    assert "\x00" not in body, "a NUL survived the decode, so the binary stub would still fire"
+    raw = x.encode("latin-1")  # raises if the encoder converted a string that was not byte-per-char
+    if has_bom:
+        if raw[:2] != (b"\xff\xfe" if endian == "le" else b"\xfe\xff"):
+            return False
+        raw = raw[2:]
+    if len(raw) % 2:
+        return False
+    units_x = [(raw[i] | raw[i + 1] << 8) if endian == "le" else (raw[i] << 8 | raw[i + 1]) for i in range(0, len(raw), 2)]
+    units_e = []
+    for ch in body:
+        cp = ord(ch)
+        if cp > 0xFFFF:
+            cp -= 0x10000
+            units_e += [0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF)]
+        else:
+            units_e.append(cp)
+    return units_x == units_e
+
+
+def _as_u16(s: str, endian="le", bom=True) -> str:
+    raw = s.encode("utf-16-" + endian)
+    if bom:
+        raw = (b"\xff\xfe" if endian == "le" else b"\xfe\xff") + raw
+    return raw.decode("latin-1")
+
+
+_REG = "Windows Registry Editor Version 5.00\r\n\r\n" + "".join(
+    f'[HKEY_LOCAL_MACHINE\\SOFTWARE\\Acme\\Widget\\Module{i}]\r\n"Version"="4.2.{i}"\r\n"InstallPath"="C:\\\\Program Files\\\\Acme\\\\Widget{i}"\r\n"Enabled"=dword:00000001\r\n\r\n'
+    for i in range(14))
+_SQL = "SET NOCOUNT ON;\r\n" + "".join(f"INSERT INTO dbo.Orders (Id, Customer, Total) VALUES ({i}, 'Customer {i}', {i * 13}.50);\r\n" for i in range(12)) + "GO\r\n"
+_PNG_LIKE = "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x02\x00\x00\x00\x01\x00\x08\x06\x00\x00\x00\x5c\x72\xa8\x66\x00\x00\x00\x09pHYs\x00\x00\x0b\x13\x00\x00\x0b\x13\x01\x00\x9a\x9c\x18\x00\x00\x00\x07tIME\x07\xe7\x0b\x03\x09\x0c\x2d"
+_PS_NONASCII = "Name\tSize\r\nGr\u00f6\u00dfe.txt\t12\r\n\u5927\u304d\u3055.log\t98\r\nsmile \U0001F600.md\t7\r\n" * 3
+
+case(
+    332,
+    claim="A byte-per-character string holding UTF-16 (BOM or alternating NULs, LE or BE) is decoded to text behind a one-line header that records endianness and BOM, so the exact original byte string is recoverable; binary data and undecodable or cut-off UTF-16 are left untouched.",
+    encode=utf16_to_text,
+    decode=text_to_utf16,
+    equivalent=_oracle_332,
+    fixtures=[
+        Fixture(".reg export, UTF-16LE with BOM", _as_u16(_REG), True),
+        Fixture("SQL Server script, UTF-16LE without BOM", _as_u16(_SQL, bom=False), True),
+        Fixture("big-endian without BOM", _as_u16("Report generated on host build-07\r\nstatus: all checks passed\r\n" * 4, "be", False), True),
+        Fixture("non-ASCII names with emoji (surrogate pair), LE BOM", _as_u16(_PS_NONASCII), True),
+        Fixture("PNG-like binary with NULs, no pattern", _PNG_LIKE, False),
+        Fixture("ordinary ASCII", "plain text output\nsecond line\n" * 3, False),
+        Fixture("NUL-separated strings, sparse NULs", "name\x00value\x00path\x00/usr/bin\x00mode\x00755\x00user\x00root\x00", False),
+        Fixture("UTF-16LE with a lone surrogate", _as_u16("ok text here!\r\n")[:6] + "\x00\xd8" + _as_u16("tail of the file\r\n", bom=False), False),
+        Fixture("BOM then an odd number of bytes (cut off)", _as_u16("a longer sentence than before\r\n")[:-1], False),
+        Fixture("input that starts like our header", "[decoded from UTF-16LE]\nhello\n[text follows unchanged]\n", None),
+        Fixture("input that starts with the escape", "[text follows unchanged]\n" + _as_u16(_SQL, bom=False), None),
+        Fixture("BOM only, BOM plus a character above U+00FF", "\u00ff\u00fe\n\u00ff\u00fe\u0100" * 3, None),
+    ],
+    min_gain=0.3,
+    idempotent=False,  # an encoded text starts with the header, so encoding it again must escape it
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #616 Resolve backspace overstrike like `col -b`: per line, a cursor moves left on \b and each character overwrites the one
+# in its column; the last character written to a column wins. Covers man/nroff bold (X\bX), underline (_\bX) and spinners.
+
+def apply_backspaces(text: str) -> str:
+    if "\b" not in text:
+        return text
+    out = []
+    for line in text.split("\n"):
+        if "\b" in line:
+            cells: list[str] = []
+            col = 0
+            for ch in line:
+                if ch == "\b":
+                    col = max(0, col - 1)
+                elif col < len(cells):
+                    cells[col] = ch
+                    col += 1
+                else:
+                    cells.append(ch)
+                    col += 1
+            line = "".join(cells)
+        out.append(line)
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+_KNOWN_616 = [("N\bNA\bAM\bME\bE", "NAME"), ("_\bf_\bi_\bl_\be", "file"), ("-\b\\\b|\b/", "/"), ("\bab", "ab"), ("ab\b\bX", "Xb"), ("a\b", "a"), ("x\b\b\bY\n\bz", "Y\nz")]
+
+
+def _oracle_616(x: str, e: str) -> bool:
+    """Independent: write characters into a column -> char grid and read the grid back, instead of a growing cell list."""
+    def render(line: str) -> str:
+        grid, col = {}, 0
+        for ch in line:
+            if ch == "\b":
+                col = col - 1 if col > 0 else 0
+            else:
+                grid[col] = ch
+                col += 1
+        return "".join(grid[k] for k in sorted(grid))
+
+    for src, want in _KNOWN_616:  # known answers from `col -b` semantics; a wrong oracle cannot pass a wrong encoder
+        assert "\n".join(render(l) for l in src.split("\n")) == want, f"oracle self-check failed on {src!r}"
+    assert "\b" not in e, "a backspace survived"
+    return "\n".join(render(l) for l in x.split("\n")) == e
+
+
+def _bold(s: str) -> str:
+    return "".join(f"{c}\b{c}" if c != " " else c for c in s)
+
+
+def _ul(s: str) -> str:
+    return "".join(f"_\b{c}" if c != " " else c for c in s)
+
+
+_MAN = "\n".join([
+    f"LS(1)                            User Commands                            LS(1)",
+    "",
+    _bold("NAME"),
+    "       ls - list directory contents",
+    "",
+    _bold("SYNOPSIS"),
+    f"       {_bold('ls')} [{_bold('OPTION')}]... [{_ul('FILE')}]...",
+    "",
+    _bold("DESCRIPTION"),
+    f"       List information about the {_ul('FILE')}s (the current directory by default).",
+    "",
+    f"       {_bold('-a')}, {_bold('--all')}",
+    "              do not ignore entries starting with .",
+    "",
+    f"       {_bold('-l')}     use a long listing format",
+    f"       {_bold('--block-size')}={_ul('SIZE')}",
+    f"              with {_bold('-l')}, scale sizes by {_ul('SIZE')} when printing them",
+    "",
+    f"       {_bold('--color')}[={_ul('WHEN')}]",
+    "              colorize the output; WHEN can be 'always', 'auto', or 'never'",
+]) + "\n"
+_SPINNER = "installing " + "".join(f"{f}\b" for f in "-\\|/-\\|/") + "done\n" + "building " + "-\b\\\b|\b/\b" * 6 + "ok\n"
+
+case(
+    616,
+    claim="Backspaces are applied like a terminal (col -b): per line, each character overwrites the one in its column, so X\\bX bold, _\\bX underline and -\\b\\\\b|\\b/ spinners reduce to the final visible character.",
+    loses="the bold/underline emphasis itself, intermediate spinner frames, and display-column semantics (a tab or wide character counts as one cell)",
+    encode=apply_backspaces,
+    equivalent=_oracle_616,
+    fixtures=[
+        Fixture("man ls page with bold and underline", _MAN, True),
+        Fixture("script typescript with spinners", _SPINNER * 3, True),
+        Fixture("cat -v form ^H, literal backslash-b, plain man text", "N^HNA^HAM^HME^HE\nuse \\b for a backspace in C strings\nLS(1) User Commands\n", False),
+        Fixture("backspace at line start, trailing, deleting two cells", "\bab\nab\b\bX\nend\b\nx\b\b\bY\n\b\b\n", None),
+    ],
+    min_gain=0.15,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #808 Join multi-line pretty-printed struct dumps (Rust {:#?}, pprint). A block that starts on a line ending in an opener
+# and closes where the brackets balance is joined onto one line if the result is under 160 characters, every string closes on
+# its own line and the block looks like data (no ';', comments or code keywords). Only line breaks and indentation change.
+
+_CODEWORD = re.compile(r"\b(?:def|fn|function|if|else|for|while|class|struct|impl|return|let|var|const|import|match)\b")
+_CLOSERS_ONLY = re.compile(r"[\]\)\}]+,?")
+
+
+def _scan_line(line: str):
+    """-> (net bracket balance, lowest running balance, ok). ok is False for an unclosed string, ';', a comment or a code word."""
+    depth = low = i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and line[j] != c:
+                j += 2 if line[j] == "\\" else 1
+            if j >= n:
+                return depth, low, False
+            i = j + 1
+            continue
+        if c in "{[(":
+            depth += 1
+        elif c in "}])":
+            depth -= 1
+            low = min(low, depth)
+        elif c == ";" or (c == "/" and line[i + 1:i + 2] in ("/", "*")):
+            return depth, low, False
+        i += 1
+    return depth, low, not _CODEWORD.search(line)
+
+
+def join_struct_dumps(text: str) -> str:
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        first = lines[i].rstrip()
+        net, low, ok = _scan_line(first)
+        joined = None
+        if ok and net > 0 and low == 0 and (first[-1:] in ("{", "[", "(") or (first.lstrip()[:1] in ("{", "[", "(") and first[-1:] == ",")):
+            depth, parts, j = net, [first], i + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                n2, low2, ok2 = _scan_line(s)
+                if not s or not ok2 or depth + low2 < 0:
+                    break
+                if depth + n2 == 0:  # the line that closes the block
+                    parts.append(s)
+                    cand = ""
+                    for p in parts:
+                        cand += p if not cand or cand[-1] in "[(" else " " + p
+                    joined = (cand, j) if len(cand) < 160 else None
+                    break
+                if depth + low2 <= 0 or not (s[-1] in ",{[(" or _CLOSERS_ONLY.fullmatch(s)):
+                    break
+                depth += n2
+                parts.append(s)
+                j += 1
+        if joined:
+            out.append(joined[0])
+            i = joined[1] + 1
+        else:
+            out.append(lines[i])
+            i += 1
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def _lex_808(s: str):
+    """Oracle lexer: strings (closed on their own line), single brackets and bare words; whitespace is dropped."""
+    toks, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c.isspace():
+            i += 1
+        elif c in "\"'":
+            j = i + 1
+            while j < n and s[j] != c and s[j] != "\n":
+                j += 2 if s[j] == "\\" else 1
+            if j < n and s[j] == c:
+                toks.append(("str", s[i:j + 1]))
+                i = j + 1
+            else:
+                toks.append(("quote", c))
+                i += 1
+        elif c in "{}[]()":
+            toks.append(("br", c))
+            i += 1
+        else:
+            j = i
+            while j < n and not s[j].isspace() and s[j] not in "\"'{}[]()":
+                j += 1
+            toks.append(("word", s[i:j]))
+            i = j
+    return toks
+
+
+def _oracle_808(x: str, e: str) -> bool:
+    if _lex_808(x) != _lex_808(e):  # same strings, brackets and words in the same order: balance and content unchanged
+        return False
+    old = set(x.split("\n"))
+    return all(l in old or len(l) < 160 for l in e.split("\n")) and e.count("\n") <= x.count("\n")
+
+
+_CARGO_TEST = """running 3 tests
+test config::tests::parses_defaults ... ok
+test config::tests::merges_overrides ... FAILED
+test server::tests::binds_port ... FAILED
+test server::tests::reuses_socket ... ok
+
+failures:
+
+---- config::tests::merges_overrides stdout ----
+thread 'config::tests::merges_overrides' panicked at src/config.rs:88:9:
+assertion `left == right` failed
+  left: Config {
+    name: "svc",
+    listen: Listen {
+        host: "0.0.0.0",
+        port: 8080,
+    },
+    tags: [
+        "edge",
+        "blue",
+    ],
+    retries: Some(
+        3,
+    ),
+}
+ right: Config {
+    name: "svc",
+    listen: Listen {
+        host: "0.0.0.0",
+        port: 9090,
+    },
+    tags: [
+        "edge",
+        "blue",
+    ],
+    retries: Some(
+        3,
+    ),
+}
+
+---- server::tests::binds_port stdout ----
+thread 'server::tests::binds_port' panicked at src/server.rs:41:9:
+assertion `left == right` failed: unexpected state
+  left: State {
+    phase: Ready,
+    peers: [
+        Peer {
+            id: 7,
+            addr: "10.0.0.7:9000",
+        },
+        Peer {
+            id: 9,
+            addr: "10.0.0.9:9000",
+        },
+    ],
+    last_error: None,
+}
+ right: State {
+    phase: Draining,
+    peers: [],
+    last_error: Some(
+        "connection reset by peer",
+    ),
+}
+
+failures:
+    config::tests::merges_overrides
+    server::tests::binds_port
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+_BIG_DUMP = "  left: Inventory {\n    items: [\n" + "".join(f'        Item {{ sku: "SKU-{i:05d}", qty: {i}, price: {i}.99 }},\n' for i in range(8)) + "    ],\n}\n"
+_MULTILINE_STRING = 'Msg {\n    text: "line one\nline two",\n    n: 3,\n}\n'
+_C_CODE = "int main(void) {\n    int rc = run(1,\n                2);\n    return rc;\n}\n"
+_DEF = "def configure(\n    name,\n    port,\n):\n    return name, port\n"
+_PPRINT = "{'name': 'svc',\n 'ports': [80,\n           443],\n 'meta': {'owner': 'infra', 'tier': 2}}\n"
+
+case(
+    808,
+    claim="A multi-line bracketed dump whose brackets balance, whose strings each close on their own line and whose joined form is under 160 characters becomes one line; the sequence of strings, brackets and words is identical.",
+    loses="line breaks and indentation inside the joined dump (token order, string contents and trailing commas are kept)",
+    encode=join_struct_dumps,
+    equivalent=_oracle_808,
+    fixtures=[
+        Fixture("cargo test assert_eq with {:#?} dumps", _CARGO_TEST, True),
+        Fixture("python pprint dict", _PPRINT * 4, True),
+        Fixture("dump too long to join (over 160 characters)", _BIG_DUMP, False),
+        Fixture("string literal spanning two lines", _MULTILINE_STRING, False),
+        Fixture("C code with ';' and python def", _C_CODE + _DEF, False),
+        Fixture("unbalanced and over-closed brackets, apostrophes, tuple", "Foo {\n    a: 1,\n}}\nBar(\n    x: 'don't,\n)\nT(\n    1,\n)\nbad [\n  1,\n", None),
+        Fixture("CRLF and tabs", "Cfg {\r\n\tname: \"a b\",\r\n\tn: [\r\n\t\t1,\r\n\t],\r\n}\r\n", None),
+        Fixture("brackets inside strings", 'S {\n    a: "}{",\n    b: "[(",\n}\n', None),
+    ],
+    min_gain=0.1,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1342 Collapse the extra spaces after a sentence end in prose. Only inside prose lines (8+ words, mostly plain words, no tab or
+# pipe, no alignment gap); indentation is left as it is, and code, tables and option lists are untouched.
+
+_GAP = re.compile(r"(?<=[.!?]) {2,}(?=[A-Z])")
+_ALIGN = re.compile(r"(?<![.!? ]) {3,}")
+_CODEY = re.compile(r"[=<>{}\[\]\\;]|\w\(|::|->|&&|\|\|")
+_WORDY = re.compile(r"""[(\"']?[A-Za-z][A-Za-z'’-]*[.,;:!?)\"']*""")
+
+
+def _is_prose(body: str) -> bool:
+    if "\t" in body or "|" in body or _ALIGN.search(body) or _CODEY.search(body):
+        return False
+    words = body.split()
+    return len(words) >= 8 and sum(bool(_WORDY.fullmatch(w)) for w in words) * 10 >= len(words) * 7
+
+
+def collapse_sentence_gaps(text: str) -> str:
+    out = []
+    for line in _lines(text):
+        body = line.lstrip(" ")
+        if "  " in body and _is_prose(body):
+            line = line[: len(line) - len(body)] + _GAP.sub(" ", body)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _only_sentence_gaps(a: str, b: str) -> bool:
+    """Oracle: split into (token, following gap) pairs; tokens must match and only a gap after a sentence end before a capital may shrink."""
+    ia, ib = a[: len(a) - len(a.lstrip())], b[: len(b) - len(b.lstrip())]
+    ta, tb = re.findall(r"(\S+)(\s*)", a), re.findall(r"(\S+)(\s*)", b)
+    if ia != ib or len(ta) != len(tb):
+        return False
+    for k, ((wa, ga), (wb, gb)) in enumerate(zip(ta, tb)):
+        if wa != wb:
+            return False
+        if ga != gb:
+            nxt = ta[k + 1][0] if k + 1 < len(ta) else ""
+            if not (set(ga) == {" "} and len(ga) >= 2 and gb == " " and wa[-1] in ".!?" and nxt[:1].isascii() and nxt[:1].isupper()):
+                return False
+    return True
+
+
+def _prose_by_scan(body: str) -> bool:
+    """Oracle's own view of 'prose line': at least 8 words, no tab or pipe, no run of 3+ spaces away from a sentence end."""
+    if "\t" in body or "|" in body or len(body.split()) < 8 or any(c in body for c in "=;{}"):
+        return False
+    i = 0
+    while i < len(body):
+        if body[i] == " ":
+            j = i
+            while j < len(body) and body[j] == " ":
+                j += 1
+            if j - i >= 3 and not (i > 0 and body[i - 1] in ".!?"):
+                return False
+            i = j
+        else:
+            i += 1
+    return True
+
+
+def _oracle_1342(x: str, e: str) -> bool:
+    xl, el = _lines(x), _lines(e)
+    if len(xl) != len(el):
+        return False
+    for a, b in zip(xl, el):
+        if a == b:
+            continue
+        if not _prose_by_scan(a.lstrip(" ")) or not _only_sentence_gaps(a, b):
+            return False
+    return True
+
+
+_TERSE = "\n".join([
+    "   It works.  It is fast.  It is cheap.  Use it each day.  Enjoy it.",
+    "   Copy the file.  Run it.  Read the log.  Then stop.  Rest well.",
+    "   Set the flag.  Clear it.  Run it twice.  Done now.  Go home.",
+    "Open it first.  Close it later.  Do not leave it open.  Ever.  Really.",
+    "   Wait for it.  Press the key.  Look.  Note the time.  Write it down.",
+    "   The server MUST reply.  The client MAY retry.  Both MUST close.  Stop.  Now.",
+    "   Is it done?  Yes it is!  Then ship the build.  Tell the team.  Cheer.",
+]) + "\n"
+_KEEP_1342 = "\n".join([
+    "Usage: tool [OPTIONS] FILE",
+    "  -f, --force     Overwrite existing files.  Never asks for confirmation.",
+    "Name        Value.  Note",
+    "a | b | c | d | e | f | g | h | Fine.  Really.",
+    ">>> print(\"Done.  Next\", end=\"\", flush=True)  # one two three four five six",
+    "if x == \"a.  B\" and y == \"C\":  # Then do it.  Really.  Right now please",
+    "Short one.  Two words only.",
+    "tab\tseparated line with many words in it.  Never touch.  Please keep them.",
+]) + "\n"
+
+case(
+    1342,
+    claim="Two or more spaces after . ! or ? and before a capital letter become one space, only inside prose lines (8+ words, mostly plain words, no tab, pipe or alignment gap); indentation, code, tables and option lists are byte-identical.",
+    loses="the second space after a sentence end in prose lines",
+    encode=collapse_sentence_gaps,
+    equivalent=_oracle_1342,
+    fixtures=[
+        Fixture("RFC and old-docstring style prose with two spaces", _TERSE, True),
+        Fixture("option list, table, pipes, code, short line, tabs", _KEEP_1342, False),
+        Fixture("lowercase and digit after the gap, 3+ spaces, quotes, CRLF", "Write e.g.  the value, then wait.  and then 3.  4 more things happen now.\nWe stopped.   Then we left it be and went home early.\r\nHe said \"stop.\"  The end came soon after that moment.\n", None),
+    ],
+    min_gain=0.05,
+)

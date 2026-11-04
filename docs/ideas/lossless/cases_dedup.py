@@ -199,6 +199,8 @@ class Session:
         """Text the model holds without a tool call: system prompt files, @-attachments, prompts, its own messages."""
         self.turn += 1
         self.ctx.append(dict(turn=self.turn, kind="msg", label=label, text=text, pinned=pinned))
+        if self.hook is not None and hasattr(self.hook, "seed"):
+            self.hook.seed(label, text, pinned)
         return self.turn
 
     def step(self, tool: str, args: dict, raw: str) -> str:
@@ -1584,4 +1586,634 @@ case(
     144,
     claim="A full re-read of a file that differs from the last read only by the model's own successful Edits (replayed onto a shadow) is shown as the edited lines plus 3 context lines and pointers (new and old line numbers) to unchanged ranges; a foreign change, a failed Edit, a ranged Read, compaction or a broken shadow give the full text.",
     sim=sim_own_edit_read,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #349 Delta-encode repeated browser accessibility snapshots per tab. The ledger holds the last snapshot of each tab;
+# the delta is the same keep/drop/add line format as #62 plus an explicit `removed refs:` list, so a model that cannot
+# replay the delta can still tell which refs are gone. Refs must be stable on the server: if they are not, almost
+# every line changes and the size gate falls back to the full snapshot.
+
+
+class FakePage:
+    """A Playwright-MCP-like page. stable=True: a ref is assigned to an element once and kept; stable=False: refs are
+    renumbered in document order on every snapshot (the failure the idea says to check first)."""
+
+    def __init__(self, base: str, stable: bool = True):
+        self.base, self.stable, self.refs = base, stable, {}
+        self.cart, self.query, self.page, self.dialog, self.status = 0, "", 1, False, ""
+
+    def _ref(self, key, n):
+        if not self.stable:
+            return f"e{n}"
+        return f"e{self.refs.setdefault(key, len(self.refs) + 1)}"
+
+    def ref(self, key) -> str:
+        return f"e{self.refs[key]}"
+
+    def products(self):
+        hit = [i for i in range(1, 25) if self.query.lower() in f"product {i}"]
+        return hit[(self.page - 1) * 12: self.page * 12]
+
+    def url(self):
+        return f"{self.base}/products?page={self.page}"
+
+    def snapshot(self) -> str:
+        n, out = [0], []
+
+        def el(depth, role, name, key, extra=""):
+            n[0] += 1
+            r = self._ref(key, n[0])
+            nm = f' "{name}"' if name else ""
+            out.append(f"{'  ' * depth}- {role}{nm} [ref={r}]{extra}")
+
+        el(0, "banner", "", ("banner",))
+        for i, label in enumerate(["Home", "Shop", "Deals", "Help", "Account", "Wishlist"]):
+            el(1, "link", label, ("nav", i), " [cursor=pointer]")
+        el(1, "button", f"Cart ({self.cart})", ("cart",))
+        el(0, "main", "", ("main",))
+        if self.status:
+            el(1, "status", self.status, ("status",))
+        el(1, "textbox", "Search", ("search",), f": {self.query}" if self.query else "")
+        el(1, "list", "", ("list",))
+        for pid in self.products():
+            el(2, "listitem", "", ("item", pid))
+            el(3, "heading", f"Product {pid}", ("h", pid), " [level=3]")
+            el(3, "text", "", ("price", pid), f": ${pid * 3}.99")
+            el(3, "button", f"Add Product {pid} to cart", ("add", pid), " [cursor=pointer]")
+        el(1, "link", "Next page", ("pager",), " [cursor=pointer]")
+        if self.dialog:
+            el(1, "dialog", f"Cart: {self.cart} items", ("dialog",))
+            el(2, "button", "Close", ("dclose",), " [cursor=pointer]")
+        el(0, "contentinfo", "", ("footer",))
+        for i, label in enumerate(["Terms", "Privacy", "Contact"]):
+            el(1, "link", label, ("foot", i), " [cursor=pointer]")
+        return f"- Page URL: {self.url()}\n- Page Title: Shop\n- Page Snapshot:\n```yaml\n" + "\n".join(out) + "\n```\n"
+
+    def do(self, op: tuple) -> None:
+        kind = op[0]
+        if kind == "type":
+            self.query, self.page = op[1], 1
+        elif kind == "add":
+            self.cart += 1
+            self.status = f"Added Product {op[1]} to cart"
+        elif kind == "dialog":
+            self.dialog = not self.dialog
+        elif kind == "page":
+            self.page = op[1]
+        else:
+            raise ValueError(kind)
+
+
+_REF = re.compile(r"\[ref=(e\d+)\]")
+_ELEM = re.compile(r"^\s*- (\w+)(?: \"([^\"]*)\")?.*\[ref=(e\d+)\]")
+
+
+def refs_of(lines) -> set:
+    return {r for l in lines for r in _REF.findall(l)}
+
+
+def refs_stable(snaps: list[str]) -> bool:
+    """The server-side check the idea starts with: an element that persists keeps its ref between snapshots."""
+    for a, b in zip(snaps, snaps[1:]):
+        ea = {(m.group(1), m.group(2)): m.group(3) for l in a.split("\n") for m in [_ELEM.match(l)] if m and m.group(2)}
+        eb = {(m.group(1), m.group(2)): m.group(3) for l in b.split("\n") for m in [_ELEM.match(l)] if m and m.group(2)}
+        if any(ea[k] != eb[k] for k in ea.keys() & eb.keys() if k[0] not in ("status", "dialog")):
+            return False
+    return True
+
+
+SNAP_HDR = "{m} snapshot delta vs turn {t} of this tab: keep/drop N = lines of that snapshot, add N = N literal lines follow; removed refs: {r}]\n"
+SNAP_RX = re.compile(r"\[ctxprune: snapshot delta vs turn (\d+) of this tab: [^\n]*; removed refs: ([^\]]*)\]\n")
+
+
+class SnapshotDelta:
+    MAX_CHAIN = 4
+
+    def __init__(self):
+        self.tab: dict | None = {}
+
+    def on_compact(self):
+        self.tab = {}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        t = args.get("tab")
+        if tool == "browser_close":
+            self.tab.pop(t, None)
+            return raw
+        if tool != "browser_snapshot" or MARK in raw:
+            return raw
+        url = raw.split("\n", 1)[0]
+        prev, out, depth = self.tab.get(t), raw, 0
+        if prev and prev["url"] == url and prev["depth"] < self.MAX_CHAIN:  # other page: start over, refs are not comparable
+            a, b = items_of(prev["text"]), items_of(raw)
+            removed = sorted(refs_of(a) - refs_of(b), key=lambda r: int(r[1:]))
+            cand = SNAP_HDR.format(m=MARK, t=prev["turn"], r=" ".join(removed) or "none") + make_delta(a, b)
+            if len(cand) < 0.8 * len(raw):
+                out, depth = cand, prev["depth"] + 1
+        self.tab[t] = {"turn": turn, "text": raw, "url": url, "depth": depth}
+        return out
+
+
+def resolve_snapshot(s: Session, turn: int) -> str:
+    t = s.result(turn)["text"]
+    m = SNAP_RX.match(t)
+    if not m:
+        return t
+    assert s.use(int(m.group(1)))["args"]["tab"] == s.use(turn)["args"]["tab"], "a delta never references another tab"
+    return "".join(apply_delta(items_of(resolve_snapshot(s, int(m.group(1)))), t[m.end():]))
+
+
+def visible_refs(s: Session, tab: str) -> set:
+    """Reader view that does not replay the delta: refs literally shown (full snapshot or `add` lines) minus the
+    explicit removed list, accumulated over the tab's results in order."""
+    refs: set = set()
+    for e in s.ctx:
+        if e["kind"] != "result" or e["tool"] != "browser_snapshot" or e["args"]["tab"] != tab:
+            continue
+        m = SNAP_RX.match(e["text"])
+        if not m:
+            refs = refs_of(e["text"].split("\n"))
+            continue
+        refs -= set(m.group(2).split())
+        body, pos = e["text"][m.end():], 0
+        while pos < len(body):
+            nl = body.index("\n", pos)
+            op, n = body[pos:nl].split(" ")
+            pos = nl + 1
+            if op == "add":
+                for _ in range(int(n)):
+                    mm = _ITEM.match(body, pos)
+                    refs |= refs_of([mm.group()])
+                    pos = mm.end()
+    return refs
+
+
+SCRIPT_349 = [("a", ("snap",)), ("a", ("type", "Product 1")), ("a", ("type", "")), ("a", ("add", 3)), ("a", ("add", 5)),
+              ("a", ("dialog",)), ("a", ("dialog",)), ("b", ("snap",)), ("b", ("add", 2)), ("a", ("page", 2)),
+              ("a", ("add", 14)), ("a", ("page", 1)), ("a", ("add", 7)), ("a", ("type", "Product 2")), ("a", ("type", "")),
+              ("b", ("add", 4)), ("a", ("add", 9)), ("a", ("dialog",)), ("a", ("dialog",)), ("a", ("add", 11))]
+
+
+def click_key(pg: FakePage, op: tuple):
+    """The element the model acts on for `op`, known before the action runs."""
+    return {"type": ("search",), "add": ("add", op[1] if len(op) > 1 else None), "page": ("pager",),
+            "dialog": ("dclose",) if pg.dialog else ("cart",)}[op[0]]
+
+
+def run_browser(stable: bool, hook=None):
+    s = Session(hook)
+    pages = {"a": FakePage("https://shop.test", stable), "b": FakePage("https://blog.test", stable)}
+    snaps, modes = [], []
+    for tab, op in SCRIPT_349:
+        pg = pages[tab]
+        if op[0] != "snap":
+            pg.do(op)
+        raw = pg.snapshot()
+        seen = s.step("browser_snapshot", {"tab": tab, "action": op[0]}, raw)
+        snaps.append((tab, raw))
+        modes.append("delta" if is_stub(seen) else "full")
+        if hook is not None:
+            assert resolve_snapshot(s, s.turn) == raw, "reader view: previous snapshot + delta rebuilds the page exactly"
+            assert visible_refs(s, tab) == refs_of(raw.split("\n")), "refs the model can see == refs on the page (nothing stale, nothing missing)"
+    return s, snaps, modes
+
+
+def sim_snapshot_delta() -> dict:
+    # 1. refs stable on this server, then the delta run
+    _, snaps, _ = run_browser(True, None)
+    for tab in "ab":
+        assert refs_stable([t for tb, t in snaps if tb == tab]), "precondition from the idea: refs stay stable across snapshots"
+    hook = SnapshotDelta()
+    s, snaps, modes = run_browser(True, hook)
+    assert modes.count("delta") >= 12, modes
+    assert modes[9] == "full" and modes[11] == "full", "URL change (page 2, back to page 1) starts a fresh snapshot"
+    assert s.saved > 0.5 * s.raw_tok, (s.saved, s.raw_tok)
+    # every click's ref was visible before the click: replay the script and check against the ctx at that moment
+    s2, pages = Session(SnapshotDelta()), {"a": FakePage("https://shop.test"), "b": FakePage("https://blog.test")}
+    clicked = 0
+    for tab, op in SCRIPT_349:
+        pg = pages[tab]
+        if op[0] != "snap":
+            key = click_key(pg, op)
+            assert pg.ref(key) in visible_refs(s2, tab), f"{key} (ref {pg.ref(key)}) must be visible before the click"
+            clicked += 1
+            pg.do(op)
+        s2.step("browser_snapshot", {"tab": tab}, pg.snapshot())
+    assert clicked >= 17
+    # 2. the failure case: refs renumbered on every snapshot -> the check detects it, the gate falls back to full text
+    _, snaps_u, _ = run_browser(False, None)
+    assert not refs_stable([t for tb, t in snaps_u if tb == "a"]), "the stability check must catch a server that renumbers refs"
+    su = Session(SnapshotDelta())
+    pg = FakePage("https://shop.test", stable=False)
+    su.modes_full = 0
+    for op in [("snap",), ("add", 3), ("add", 5), ("type", "Product 1"), ("type", "")]:
+        if op[0] != "snap":
+            pg.do(op)
+        raw = pg.snapshot()
+        seen = su.step("browser_snapshot", {"tab": "a"}, raw)
+        su.modes_full += seen == raw
+        assert resolve_snapshot(su, su.turn) == raw
+    assert su.modes_full >= 3, "every structural change renumbers everything below it: those steps must be full snapshots"
+    # 3. closing a tab drops its ledger; compaction forgets; fail open
+    h3, pg = SnapshotDelta(), FakePage("https://shop.test")
+    s3 = Session(h3)
+    raw = pg.snapshot()
+    s3.step("browser_snapshot", {"tab": "a"}, raw)
+    pg.do(("add", 1))
+    raw2 = pg.snapshot()
+    assert is_stub(s3.step("browser_snapshot", {"tab": "a"}, raw2))
+    s3.step("browser_close", {"tab": "a"}, "closed")
+    assert s3.step("browser_snapshot", {"tab": "a"}, raw2) == raw2, "reopened tab id: full snapshot"
+    pg.do(("add", 2))
+    assert is_stub(s3.step("browser_snapshot", {"tab": "a"}, pg.snapshot()))
+    s3.compact()
+    pg.do(("add", 3))
+    raw4 = pg.snapshot()
+    assert s3.step("browser_snapshot", {"tab": "a"}, raw4) == raw4, "after compaction the previous snapshot is gone"
+    h3.tab["a"]["text"] = None
+    pg.do(("add", 4))
+    raw5 = pg.snapshot()
+    assert s3.step("browser_snapshot", {"tab": "a"}, raw5) == raw5, "fail open"
+    return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved, "delta_steps": modes.count("delta"), "steps": len(modes)}
+
+
+case(
+    349,
+    claim="After the first snapshot of a tab, a repeated accessibility snapshot of the same URL is sent as keep/drop/add line counts, the changed lines and an explicit removed-refs list; replaying it rebuilds every page exactly, every ref the model acts on is visible beforehand, and a URL change, renumbered refs, a closed tab or compaction give the full snapshot.",
+    sim=sim_snapshot_delta,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #530 Seed the ledger with text the model already holds: CLAUDE.md (survives compaction), @-attachments, prompts and
+# its own messages (do not). A tool result whose lines contain a run of lines equal to a run of a seeded text
+# gets that run replaced by a pointer naming the source and the source lines.
+
+MIN_RUN_LINES = 3
+
+
+class SeededLedger:
+    def __init__(self):
+        self.src: dict | None = {}
+
+    def seed(self, label, text, pinned=False):
+        self.src[label] = dict(lines=lines_of(text), pinned=pinned)
+
+    def on_compact(self):
+        self.src = {k: v for k, v in self.src.items() if v["pinned"]}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        if MARK in raw or not raw or raw.startswith(("Error", "Exit code")) or not self.src:
+            return raw
+        if tool == "Read":
+            rows = [_NUM.match(l) for l in raw.split("\n")]
+            if not all(rows):
+                return raw
+            nums, items = [int(r.group(1)) for r in rows], [r.group(2) for r in rows]
+        elif tool == "Bash":
+            nums, items = None, raw.split("\n")
+        else:
+            return raw
+        sources = {k: v["lines"] for k, v in self.src.items()}
+        idx, rawlines = index_sources(sources), raw.split("\n")
+        out, i = [], 0
+        while i < len(items):
+            r = best_run_at(items, i, idx, sources)
+            if r and r[1] - r[0] >= MIN_RUN_LINES and (nums is None or all(nums[k + 1] == nums[k] + 1 for k in range(r[0], r[1] - 1))):
+                n, label, c = r[1] - r[0], r[2], r[3]
+                where = f"lines {nums[r[0]]}-{nums[r[1] - 1]} already in context: {label}, lines {c + 1}-{c + n}" if nums else f"{n} lines already in context: {label}, lines {c + 1}-{c + n}"
+                marker = f"{MARK} {where}]"
+                orig = rawlines[r[0]:r[1]]
+                if len(marker) + 25 <= sum(len(l) + 1 for l in orig):
+                    out.append(marker)
+                    i = r[1]
+                    continue
+            out.append(rawlines[i])
+            i += 1
+        res = "\n".join(out)
+        return res if len(res) < len(raw) else raw
+
+
+def expand_seeded(s: Session, text: str) -> str:
+    """Reader view: each pointer names a source label that must still be in context; copy its lines back."""
+    out = []
+    for l in text.split("\n"):
+        m = re.fullmatch(r"\[ctxprune: (?:lines (\d+)-(\d+)|(\d+) lines) already in context: (.*), lines (\d+)-(\d+)\]", l)
+        if not m:
+            out.append(l)
+            continue
+        a, b, _n, label, c, d = m.groups()
+        src = next(e for e in s.ctx if e["kind"] == "msg" and e["label"] == label)  # StopIteration = dangling pointer
+        body = lines_of(src["text"])[int(c) - 1:int(d)]
+        out += [f"{int(a) + k:6d}\t{x}" for k, x in enumerate(body)] if a else body
+    return "\n".join(out)
+
+
+def sim_seeded() -> dict:
+    with tempfile.TemporaryDirectory() as d:
+        ws, hook = Workspace(d), SeededLedger()
+        tools, s = Tools(ws), Session(hook)
+        claude_md = "# Project rules\n" + "".join(f"- Rule {i}: always run the linter before committing change set {i}.\n" for i in range(8))
+        config = py_module("config", 14)
+        trace = ("Traceback (most recent call last):\n" + "".join(f'  File "src/app/worker.py", line {40 + i}, in step_{i}\n    value = compute_{i}(payload)\n' for i in range(5))
+                 + "KeyError: 'payload_id'\n")
+        ws.put("CLAUDE.md", claude_md)
+        ws.put("src/config.py", config)
+        s.say("CLAUDE.md", claude_md, pinned=True)
+        s.say("@src/config.py", config)
+        s.say("user prompt 3", "The worker crashes with this:\n\n" + trace + "\nPlease fix it.")
+        s.say("assistant message 4", "I will start from this snippet:\n```python\n" + "".join(lines_of(config)[4:14]) + "\n```\n")
+
+        def call(tool, args, raw, expect):
+            seen = s.step(tool, args, raw)
+            assert expand_seeded(s, seen) == raw, "reader view: pointers expand to exactly the raw result"
+            assert (seen != raw) == expect, (tool, args, seen[:100])
+            return seen
+
+        seen = call("Read", {"path": "src/config.py"}, tools.read("src/config.py"), True)
+        assert seen.count("\n") == 0 and "@src/config.py" in seen, "whole attached file: one pointer"
+        call("Bash", {"command": "cat CLAUDE.md"}, claude_md, True)
+        out = "collecting...\nERROR in worker\n" + trace + "worker exited with status 1\n"
+        seen = call("Bash", {"command": "python -m app.worker"}, out, True)
+        assert "collecting..." in seen and "worker exited" in seen and "user prompt 3" in seen, "only the echoed block is replaced"
+        # the file changed on disk after the attachment (git pull): unchanged runs are pointers, new lines literal
+        lines = lines_of(config)
+        lines[30] = "    total = a * 999 + b  # changed upstream"
+        lines.insert(60, "# inserted line shifts everything below")
+        ws.put("src/config.py", "\n".join(lines) + "\n")
+        seen = call("Read", {"path": "src/config.py"}, tools.read("src/config.py"), True)
+        assert "changed upstream" in seen and "inserted line shifts" in seen and seen.count(MARK) >= 3
+        # unrelated text, tiny overlaps: nothing to do
+        call("Bash", {"command": "ls"}, "a.py\nb.py\nc.py\n", False)
+        call("Bash", {"command": "echo"}, "- Rule 1: always run the linter before committing change set 1.\n", False)
+        ws.put("src/other.py", "".join(f"Note {i}: this paragraph of the release notes is about topic number {i}.\n" for i in range(30)))
+        call("Read", {"path": "src/other.py"}, tools.read("src/other.py"), False)
+        assert s.step("Bash", {"command": "cat NOTE"}, f"see {MARK} x]\n" + claude_md) == f"see {MARK} x]\n" + claude_md, "hostile text passes through"
+        # compaction: CLAUDE.md is still in context, the attachment, prompt and assistant text are not
+        s.compact()
+        assert [e["label"] for e in s.ctx] == ["CLAUDE.md"]
+        call("Read", {"path": "src/config.py"}, tools.read("src/config.py"), False)
+        call("Bash", {"command": "cat CLAUDE.md"}, claude_md, True)
+        call("Bash", {"command": "python -m app.worker"}, out, False)
+        hook.src = {"x": {"lines": None, "pinned": True}}  # corrupted ledger
+        call("Bash", {"command": "cat CLAUDE.md"}, claude_md, False)
+        assert s.saved > 0.3 * s.raw_tok, (s.saved, s.raw_tok)
+        return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved}
+
+
+case(
+    530,
+    claim="A Read or Bash result containing runs of at least 3 lines that equal lines of CLAUDE.md, an @-attachment, a user prompt or an assistant message already in context gets each run replaced by a pointer naming that source and its lines; changed lines stay literal, and after compaction only CLAUDE.md remains a source.",
+    sim=sim_seeded,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #763 Chunk-id seen-set across retrieval calls. Key (tool, chunk id) plus a hash of the chunk text; a chunk seen in
+# one of the last WINDOW calls is replaced by {id, score, seen_in_call}, keeping this call's score and rank.
+
+WINDOW = 5
+TOPICS = {
+    "token": "rotate api token key credentials secret rotation expire revoke",
+    "invoice": "billing invoice export csv payment statement tax receipt",
+    "deploy": "deploy rollback release canary rollout revert pipeline",
+}
+
+
+def make_corpus() -> dict:
+    out = {}
+    for topic, words in TOPICS.items():
+        w = words.split()
+        for k in range(10):
+            out[f"{topic}.md#{k}"] = " ".join(f"The {w[(k + j) % len(w)]} step {k} says to check the {w[(k * 3 + j) % len(w)]} settings first, then confirm with the {w[(k + 2 * j) % len(w)]} dashboard." for j in range(3))
+    return out
+
+
+def retrieve(corpus: dict, query: str, k: int = 5) -> str:
+    q = set(query.lower().split())
+    scored = sorted(((len(q & set(t.lower().replace(".", "").replace(",", "").split())) / (1 + len(t) / 400), cid) for cid, t in corpus.items()), key=lambda x: (-x[0], x[1]))[:k]
+    return json.dumps([{"id": cid, "score": round(sc, 3), "text": corpus[cid]} for sc, cid in scored], ensure_ascii=False)
+
+
+class ChunkSeen:
+    def __init__(self):
+        self.seen: dict | None = {}
+        self.calls = 0
+
+    def on_compact(self):
+        self.seen = {}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        if tool != "search_docs":
+            return raw
+        self.calls += 1
+        data = json.loads(raw)
+        out, changed = [], False
+        for e in data:
+            key, h = (tool, e["id"]), sha(e["text"])
+            prev = self.seen.get(key)
+            if prev and prev[0] == h and self.calls - prev[2] <= WINDOW:
+                stub = {"id": e["id"], "score": e["score"], "seen_in_call": prev[1]}
+                if len(json.dumps(stub)) < len(json.dumps(e, ensure_ascii=False)):
+                    out.append(stub)
+                    changed = True
+                    continue
+            self.seen[key] = (h, turn, self.calls)
+            out.append(e)
+        return json.dumps(out, ensure_ascii=False) if changed else raw
+
+
+def rebuild_chunks(s: Session, text: str) -> list:
+    """Reader view: a stub's text comes from the earlier call's literal entry with the same id."""
+    out = []
+    for e in json.loads(text):
+        if "seen_in_call" in e:
+            src = [x for x in json.loads(s.result(e["seen_in_call"])["text"]) if x["id"] == e["id"] and "text" in x]
+            assert len(src) == 1, "the pointed-at call must carry the chunk literally"
+            e = {"id": e["id"], "score": e["score"], "text": src[0]["text"]}
+        out.append(e)
+    return out
+
+
+def sim_chunk_seen() -> dict:
+    corpus = make_corpus()
+    s = Session(ChunkSeen())
+    queries = ["how do I rotate the api token", "token rotation procedure api key", "rotate api credentials safely",
+               "billing invoice export csv", "export invoices as csv statement", "deploy rollback steps",
+               "how to rollback a deploy release", "rotate api token then revoke old key", "invoice csv export tax",
+               "canary rollout revert pipeline", "rotate token credentials expire"]
+    shares = []
+    seen_ids: list[set] = []
+    for q in queries:
+        raw = retrieve(corpus, q)
+        ids = [e["id"] for e in json.loads(raw)]
+        recent = set().union(*seen_ids[-WINDOW:]) if seen_ids else set()
+        shares.append(len(set(ids) & recent) / len(ids))
+        seen_ids.append(set(ids))
+        seen = s.step("search_docs", {"query": q}, raw)
+        assert rebuild_chunks(s, seen) == json.loads(raw), "reader view: stubs + earlier literal calls rebuild the result list (ids, scores, text, order)"
+    assert max(shares) > 0.5 and s.saved > 0.2 * s.raw_tok, (shares, s.saved, s.raw_tok)
+    # re-indexed corpus: same id, different text -> shown in full
+    corpus2 = dict(corpus)
+    first_id = json.loads(retrieve(corpus, "rotate api token"))[0]["id"]
+    corpus2[first_id] = corpus[first_id].replace("check", "verify")
+    raw = retrieve(corpus2, "rotate api token")
+    seen = s.step("search_docs", {"query": "rotate api token"}, raw)
+    assert any(e["id"] == first_id and "text" in e and "verify" in e["text"] for e in json.loads(seen)), "changed chunk text is never stubbed"
+    assert rebuild_chunks(s, seen) == json.loads(raw)
+    # outside the window: a chunk seen long ago is shown again
+    h = Session(ChunkSeen())
+    h.step("search_docs", {"query": "x"}, retrieve(corpus, "rotate api token"))
+    for _ in range(WINDOW):
+        h.step("search_docs", {"query": "y"}, retrieve(corpus, "billing invoice csv"))
+    raw = retrieve(corpus, "rotate api token")
+    seen = h.step("search_docs", {"query": "x"}, raw)
+    assert seen == raw, "seen more than WINDOW calls ago: literal again"
+    # another tool with the same chunk ids, odd payloads, compaction, fail open
+    assert h.step("other_search", {"query": "x"}, raw) == raw
+    assert h.step("search_docs", {"query": "x"}, "not json at all") == "not json at all"
+    assert h.step("search_docs", {"query": "x"}, '[{"title": "no id"}]') == '[{"title": "no id"}]'
+    h.compact()
+    assert h.step("search_docs", {"query": "x"}, raw) == raw
+    h.hook.seen = None
+    assert h.step("search_docs", {"query": "x"}, raw) == raw
+    return {"tokens_without": s.raw_tok, "tokens_with": s.seen_tok, "saved": s.saved, "max_share_seen": round(max(shares), 2)}
+
+
+case(
+    763,
+    claim="A retrieved chunk whose id and text hash were returned literally by the same tool within the last 5 calls is replaced by {id, score, seen_in_call}, keeping this call's score and rank; re-indexed text, a chunk last seen longer ago, another tool, malformed results and compaction stay literal.",
+    sim=sim_chunk_seen,
+)
+
+# ---------------------------------------------------------------------------------------------------------------
+# #908 Line-keyed delta for repeated git diff after further edits. A diff body line is keyed (file, line with its
+# +/-/space marker); a run of lines already shown literally becomes `K lines as before: turn T lines a-b`, where a-b
+# are visible line numbers of that turn's output (those lines are literal there, so the reader needs no replay).
+
+
+class LineKeyedDiff:
+    def __init__(self):
+        self.loc: dict | None = {}  # (file, line) -> {turn: visible line number} of every literal occurrence
+
+    def on_compact(self):
+        self.loc = {}
+
+    @fail_open
+    def post(self, turn, tool, args, raw):
+        if tool != "Bash" or MARK in raw or "@@ " not in raw:
+            return raw
+        lines = raw.split("\n")
+        file_of = {}
+        for file, a, b in parse_hunks(lines):
+            for k in range(a + 1, b):
+                file_of[k] = file
+        cand = [self.loc.get((file_of[k], lines[k])) if k in file_of else None for k in range(len(lines))]
+        out, vis_of, i = [], {}, 0
+        while i < len(lines):
+            if cand[i]:  # longest run whose earlier copies sit at consecutive visible lines of ONE earlier output
+                live, j, best = dict(cand[i]), i + 1, None
+                best = (j, dict(live))
+                while j < len(lines) and cand[j]:
+                    nxt = {t: v for t, v in live.items() if cand[j].get(t) == v + 1}
+                    if not nxt:
+                        break
+                    live, j = {t: v + 1 for t, v in live.items() if t in nxt}, j + 1
+                    best = (j, dict(live))
+                j, live = best
+                t = max(live)
+                marker = f"{MARK} {j - i} lines as before: turn {t} lines {live[t] - (j - i) + 1}-{live[t]}]"
+                if len(marker) < sum(len(l) + 1 for l in lines[i:j]):
+                    out.append(marker)
+                    i = j
+                    continue
+            out.append(lines[i])
+            vis_of[i] = len(out)
+            i += 1
+        res = "\n".join(out)
+        if len(res) >= len(raw):
+            res, vis_of = raw, {k: k + 1 for k in range(len(lines))}
+        for k, f in file_of.items():
+            if k in vis_of:  # only lines that are literal in this output can be pointed at later
+                self.loc.setdefault((f, lines[k]), {})[turn] = vis_of[k]
+        return res
+
+
+def expand_line_keyed(s: Session, text: str) -> str:
+    out = []
+    for l in text.split("\n"):
+        m = re.fullmatch(r"\[ctxprune: (\d+) lines as before: turn (\d+) lines (\d+)-(\d+)\]", l)
+        if not m:
+            out.append(l)
+            continue
+        n, t, a, b = map(int, m.groups())
+        src = s.result(t)["text"].split("\n")[a - 1:b]
+        assert len(src) == n == b - a + 1 and not any(x.startswith(MARK) for x in src), "pointer must address literal lines"
+        out += src
+    return "\n".join(out)
+
+
+def sim_line_keyed() -> dict:
+    func = ["def process_order(order, ledger):", "    items = order.items", "    total = 0", "    for item in items:", "        total += item.price * item.qty",
+            "    ledger.record(order.id, total)", "    return total"]
+    base_file = lines_of(py_module("util", 3)) + [""] + func + ["", "def main():", "    return process_order(load(), Ledger())"]
+    base = {"app.py": "\n".join(base_file) + "\n", "util.py": "import os\n\nVALUE = 1\n"}
+
+    def ins_before(f, anchor, new):
+        k = f.index(anchor)
+        return f[:k] + new + f[k:]
+
+    def ins_after(f, anchor, new):
+        k = f.index(anchor) + 1
+        return f[:k] + new + f[k:]
+
+    sub = lambda f, a, b: [l.replace(a, b) for l in f]  # noqa: E731
+    steps = [  # each edit is applied to the cumulative file, as in an edit-diff-edit loop
+        lambda f: ins_before(f, "    total = 0", ["    if not order.items:", "        raise ValueError('empty order')", "    if order.currency not in SUPPORTED:",
+                                                  "        raise ValueError('unsupported currency: ' + order.currency)"]),
+        lambda f: ["import logging"] + ins_before(f, "    total = 0", ["    log.info('processing order %s with %d items', order.id, len(items))", "    started = time.monotonic()"]),
+        lambda f: sub(f, "raise ValueError('empty order')", "raise OrderError(order.id, 'empty order')"),
+        lambda f: ins_before(f, "    ledger.record(order.id, total)", ["    # totals are rounded to cents in the order currency", "    total = round(total, CURRENCY_DIGITS[order.currency])",
+                                                                      "    if total < 0:", "        raise OrderError(order.id, 'negative total')"]),
+        lambda f: [l for l in f if "log.info" not in l and "started =" not in l],
+        lambda f: ins_after(f, "    for item in items:", ["        if item.discontinued:", "            continue", "        if item.qty <= 0:", "            raise OrderError(order.id, 'bad quantity')"]),
+        lambda f: ins_after(sub(f, "total += item.price * item.qty", "total += item.price * item.qty * (1 - item.discount)"), "        total += item.price * item.qty * (1 - item.discount)",
+                            ["    tax = total * TAX_RATE[order.country]", "    total += tax"]),
+        lambda f: ins_after(f, "    ledger.record(order.id, total)", ["    metrics.incr('orders.processed')", "    metrics.observe('orders.total', total)", "    audit.log(order.id, total)"]),
+    ]
+    cur, outputs = list(base_file), []
+    for st in steps:
+        cur = st(cur)
+        after = {"app.py": "\n".join(cur) + "\n", "util.py": "import os\n\nVALUE = 1\nimport logging\n" if len(outputs) >= 2 else base["util.py"]}
+        outputs.append(git_diff(base, after))
+    full, hh, lk = Session(), Session(HunkDedup()), Session(LineKeyedDiff())
+    for raw in outputs:
+        full.step("Bash", {"command": "git diff"}, raw)
+        hh.step("Bash", {"command": "git diff"}, raw)
+        seen = lk.step("Bash", {"command": "git diff"}, raw)
+        assert expand_line_keyed(lk, seen) == raw, "reader view: every pointer resolves to literal lines still in context; patch stays readable"
+        assert seen.count("@@ ") == raw.count("@@ "), "current hunk headers are always literal"
+    full_tok, hunk_tok, line_tok = full.seen_tok, hh.seen_tok, lk.seen_tok
+    assert hunk_tok >= 0.95 * full_tok, "hunk-hash dedup (#139) saves nothing when every hunk grows or shifts"
+    assert line_tok <= 0.65 * full_tok, (line_tok, full_tok)
+    # the same added line in a different file is not 'as before'; markers differ from space-prefixed context
+    last = lk.result(lk.turn)["text"]
+    util_part = last[last.index("diff --git a/util.py"):]
+    assert "+import logging" in util_part and MARK not in util_part.split("@@ ", 1)[1].split("\n", 1)[1].split("\n")[2], "util.py's added line is literal in its own file, though app.py shows the same text"
+    # hostile text, compaction, fail open
+    hostile = outputs[-1] + f"+{MARK} 3 lines as before: turn 1 lines 1-3]\n"
+    assert lk.step("Bash", {"command": "cat PATCH"}, hostile) == hostile
+    lk.compact()
+    assert lk.step("Bash", {"command": "git diff"}, outputs[-1]) == outputs[-1], "after compaction nothing is 'as before'"
+    lk.hook.loc = None
+    assert lk.step("Bash", {"command": "git diff"}, outputs[-1]) == outputs[-1], "fail open"
+    return {"tokens_full_diffs": full_tok, "tokens_hunk_hash": hunk_tok, "tokens_line_keyed": line_tok, "saved": full_tok - line_tok}
+
+
+case(
+    908,
+    claim="For repeated git diff after incremental edits, diff body lines already shown literally (same file, same text and marker) become 'K lines as before: turn T lines a-b' pointers under the current literal @@ headers; where hunk-hash dedup saves nothing, this saves a measured share; other files, unseen lines, hostile text and compaction stay literal.",
+    sim=sim_line_keyed,
 )
