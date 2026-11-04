@@ -681,7 +681,7 @@ def sim_alias_tokens() -> dict:
 
 case(
     1358,
-    claim="A PostToolUse hook replaces opaque 64+ char tokens in MCP results with ⟦tN⟧ (stable per token, state in a file, literal ⟦ doubled); a PreToolUse hook expands them in the model's call arguments so a stub server receives the identical token in 10 quote-to-booking flows, unknown aliases are denied, and unreadable state fails open to raw results.",
+    claim="A PostToolUse hook replaces opaque 64+ char tokens in MCP results with ⟦tN⟧ (stable per token, state in a file, literal ⟦ doubled) and a PreToolUse hook expands them in call arguments, so a stub server receives the identical token in 10 quote-to-booking flows; unknown aliases are denied and unreadable state fails open to raw results.",
     sim=sim_alias_tokens,
 )
 
@@ -901,7 +901,7 @@ def sim_glossary() -> dict:
 
 case(
     784,
-    claim="A session-wide glossary of path/URL prefixes (25+ chars, seen 5+ times) is announced once through the hook channel, re-announced after compaction, and later outputs use §N;: a reader recovers every output byte for byte, ids are append-only as the glossary grows, Read output and Edit paths resolve exactly, and unreadable state fails open.",
+    claim="A session-wide glossary of path/URL prefixes (25+ chars, 5+ sightings), announced once through the hook channel and again after compaction and referenced as §N;, lets a reader recover every output byte for byte, with append-only ids, exact Edit paths and fail-open on unreadable state.",
     sim=sim_glossary,
 )
 
@@ -1065,7 +1065,7 @@ def sim_toolu_alias() -> dict:
 
 case(
     1034,
-    claim="Every tool_use.id and tool_result.tool_use_id in a request becomes t<N> from a persisted append-only table: pairs stay matched and unique, an exact inverse exists, the aliased bytes of earlier messages never change as the history grows or is edited, ids quoted in text are untouched, and any malformed request passes through unmodified. Premise not testable offline: that the API accepts such ids.",
+    claim="Rewriting every tool_use.id and tool_result.tool_use_id to t<N> from a persisted append-only table keeps pairs matched and unique, has an exact inverse, never changes the bytes of earlier messages as history grows or is edited, and passes malformed requests through; that the API accepts short ids cannot be tested offline.",
     sim=sim_toolu_alias,
 )
 
@@ -1277,8 +1277,10 @@ def sim_unpadded_tail() -> dict:
     a, b = _FakeCompressor(), _BucketedKeepProbs()
     wins = tails = 0
     for t in texts:
+        c0a, c0b = a.stats["cells"], b.stats["cells"]
         ra, rb = a.atom_scores(t), b.atom_scores(t)
         assert _same(ra, rb), "bucketed scoring changed a score"
+        assert b.stats["cells"] - c0b <= a.stats["cells"] - c0a, "bucketing must never cost more padded compute than the baseline"
         p = _plan(a, t)
         wins += len(p.windows)
         tails += len(p.windows) > 1
@@ -1327,7 +1329,7 @@ def sim_unpadded_tail() -> dict:
 
 case(
     1192,
-    claim="Running a batch's windows in width buckets (each padded only to its widest real row) instead of padding all to the widest gives per-window probabilities, atom scores and token counts identical to the real atom_scores on a padding-invariant fake scorer, for 30 outputs of 6-24 KB and for edge cases (tiny windows, oversized atom, CJK, empty), while cutting padded compute. int8 noise on the real model cannot be tested offline.",
+    claim="Running a batch in width buckets (each padded to its widest real row) gives atom scores and token counts identical to the real atom_scores on a padding-invariant fake scorer, for 30 outputs and edge cases (tiny windows, oversized atom, CJK, empty), at never more padded compute; int8 noise on the real model cannot be tested offline.",
     sim=sim_unpadded_tail,
 )
 
@@ -1336,8 +1338,14 @@ case(
 
 def compress_many(comp, texts, **kw) -> list[dict]:
     """Atomise and plan every text, sort all windows by length, fill batches across documents, then run the REAL
-    compress() on each document's scores."""
-    scored, _ = score_docs(comp, texts, _policy_pooled)
+    compress() on each document's scores. If the pooled run fails (say a big batch runs out of memory), fall back to
+    one document at a time with a batch of one."""
+    try:
+        scored, _ = score_docs(comp, texts, _policy_pooled)
+    except Exception:  # noqa: BLE001
+        small = copy.copy(comp)
+        small.batch_size = 1
+        scored = [small.atom_scores(t) for t in texts]
     return [_Fixed(comp, s).compress(t, **kw) for t, s in zip(texts, scored)]
 
 
@@ -1356,6 +1364,17 @@ def sim_pooled_batches() -> dict:
         got = compress_many(_FakeCompressor(), chunks, **kw)
         want = [_FakeCompressor().compress(t, **kw) for t in chunks]
         assert got == want, f"kept text differs for {kw}"
+    # a lone document pooled with nothing else is the baseline; a failing pooled run falls back to batches of one
+    assert compress_many(_FakeCompressor(), [chunks[0]]) == [_FakeCompressor().compress(chunks[0])]
+
+    class _Tight(_FakeCompressor):  # "out of memory" on any batch of more than 8 rows
+        def _keep_probs(self, ids_rows, mask_rows):
+            if len(ids_rows) > 8:
+                raise MemoryError("batch too large")
+            return super()._keep_probs(ids_rows, mask_rows)
+
+    assert compress_many(_Tight(), chunks, rate=0.5) == [_FakeCompressor().compress(t, rate=0.5) for t in chunks], "fail open to the per-document path"
+
     # order independence: the batch composition changes, no document's result does
     order = list(range(len(chunks)))
     random.Random(5).shuffle(order)
@@ -1379,7 +1398,7 @@ def sim_pooled_batches() -> dict:
 
 case(
     1193,
-    claim="compress_many (plan every text, sort all windows by length, fill batches across documents, then the real compress on each document's scores) gives per-window probabilities and kept text identical to compressing each document alone, in any document order and for every compress mode, with a fraction of the ORT calls and bounded padding. Wall-clock time on 4 cores needs the real model.",
+    claim="compress_many (plan all texts, sort all windows by length, fill batches across documents, then the real compress per document) gives scores and kept text identical to compressing each document alone, in any order and for every compress mode, with a fraction of the ORT calls and a fallback to batches of one; wall-clock time needs the real model.",
     sim=sim_pooled_batches,
 )
 
@@ -1489,7 +1508,7 @@ def sim_skip_protected() -> dict:
 
 case(
     461,
-    claim="Windows whose every atom is forced (force_protected / keep_structure) are not scored: compress() output, kept count and total are byte-identical to the baseline for every rate, threshold, unit and measure mode, on numeric tables, path listings, plain hex and a 3000-char token; windows with any unprotected atom are always scored.",
+    claim="Windows whose atoms are all forced (force_protected / keep_structure) are not scored, and compress() output, kept count and total are byte-identical to scoring them for every rate, threshold, unit and measure mode; a window with any unprotected atom is always scored.",
     sim=sim_skip_protected,
 )
 
@@ -1632,7 +1651,7 @@ def sim_reglue() -> dict:
 
 case(
     1138,
-    claim="After deletions, a kept atom that was glued to the deleted atoms before it stays glued unless the run would then fuse words (re-atomising the output must give exactly the kept atoms), and a deleted run keeps newline over tab over space: CJK characters, kept punctuation and tab-separated columns are no longer padded with spaces, checked against the real atomize/detok on 480 random keep masks. Token-count effect on a real tokenizer is not measured here.",
+    claim="After deletions a kept atom that was glued to the deleted atoms before it stays glued unless the output would then read back as different atoms, and a deleted run keeps newline over tab over space, so CJK, kept punctuation and tab columns are not padded with spaces; checked against the real atomize/detok on 480 random keep masks (token effect on a real tokenizer not measured).",
     sim=sim_reglue,
 )
 
@@ -1828,7 +1847,7 @@ def sim_cache_prefix() -> dict:
 
 case(
     256,
-    claim="Sorting tools by name, sorting object keys (never arrays) and moving the system prompt's date line and gitStatus block into a trailing block after the breakpoint makes the tools+system prefix byte-identical across requests that differ only in tool order, key order, date and git state, while the tool set, array order inside schemas, messages, ids and every line of system text are preserved, real differences stay misses, and unexpected requests pass through unchanged. Premise: the model tolerating a different tool order.",
+    claim="Tools sorted by name, object keys sorted (arrays never), and the system prompt's date line and gitStatus block moved to a trailing block after the breakpoint make the tools+system prefix byte-identical across requests that differ only in those; the tool set, array order in schemas, messages and all system text are preserved and unexpected requests pass through unchanged.",
     sim=sim_cache_prefix,
 )
 
@@ -1966,7 +1985,7 @@ def sim_billing_header() -> dict:
 
 case(
     1384,
-    claim="Removing the x-anthropic-billing-header line (strict format, system[0] only, not for first-party upstreams) from requests sent behind a gateway lets a prefix cache reuse the whole shared history instead of nothing, whether the header varies per turn or per session; the rest of the system blocks, tools and messages are unchanged, look-alike text stays, and malformed bodies pass through. The env var CLAUDE_CODE_ATTRIBUTION_HEADER exists in Claude Code 2.1.318's binary; whether a given gateway strips the line is not testable offline.",
+    claim="Removing the x-anthropic-billing-header line (strict format, system[0] only, never for a first-party upstream) lets a prefix cache reuse the shared history instead of nothing, whether the header varies per turn or per session, and leaves the other system blocks, tools and messages unchanged; whether a given gateway strips it is not testable offline.",
     sim=sim_billing_header,
 )
 
@@ -2068,7 +2087,7 @@ def sim_doc_order() -> dict:
 
 case(
     767,
-    claim="Sorting retrieved chunks by (source, offset) instead of by score keeps the set of chunks and every chunk's bytes, and across 30 drifting follow-ups shares more than 1.5x the leading bytes of the previous context; the relevance order is lost unless a footer after the last chunk carries it (which then costs no shared prefix), and on some follow-ups document order shares less prefix than score order, so a per-request choice is the safe policy. Reader accuracy under document order is not testable here.",
+    claim="Sorting retrieved chunks by (source, offset) keeps every chunk byte for byte and, over 30 drifting follow-ups, shares over 1.5x more leading bytes with the previous context than score order does; relevance rank survives only if a footer carries it, and some follow-ups get worse, so a per-request choice is checked too.",
     sim=sim_doc_order,
 )
 
@@ -2329,6 +2348,25 @@ def sim_replay() -> dict:
         _run_job(px, env, prompt="the log contains ⟪ts:0⟫ literally")
     assert px.hits == 1 and up.calls == 3, "placeholder-like text switches to exact keys: only the identical first request replays"
 
+    # negative control: canonical keys WITHOUT substituting this run's values would replay a stale scratch dir into a command
+    class _NaiveReplay(ReplayProxy):
+        @staticmethod
+        def _canon_response(resp, c):
+            return _dumps({"content": resp["content"], "stop_reason": resp["stop_reason"]})
+
+        @staticmethod
+        def _render(ent, c, key):
+            return {"id": "msg_x", "role": "assistant", "model": "replay", **ent}
+
+    naive_store: dict = {}
+    _run_job(_NaiveReplay(naive_store, _Upstream(12)), env1)
+    try:
+        _run_job(_NaiveReplay(naive_store, _Upstream(13)), env2)
+    except AssertionError as e:
+        assert "stale scratch dir" in str(e)
+    else:
+        raise AssertionError("negative control: replaying a recorded command unchanged must hit the stale-directory check")
+
     # failure handling: corrupt entry, bad upstream responses, a failing store, canonicalisation errors
     st3 = {k: "not json" for k in store}
     up = _Upstream(8)
@@ -2360,6 +2398,6 @@ def sim_replay() -> dict:
 
 case(
     1036,
-    claim="A proxy that keys stored responses by the hash of the request with volatile values (timestamps, tmp dirs, durations, tool ids; not user-authored text) abstracted into numbered placeholders replays all 4 turns of a re-run that differs only in those values, substituting the new run's own values so the transcript equals the live one; a different commit replays only until the first request that carries it; changed parameters, user-text differences, truncated or non-canonicalisable responses and corrupt entries never replay.",
+    claim="Keying stored responses by the hash of the request with volatile values (timestamps, tmp dirs, durations, tool ids; never user-authored text) abstracted to numbered placeholders replays all 4 turns of a re-run that differs only in those values, with the new run's own values substituted so the transcript equals the live one; real differences, changed parameters, truncated responses and corrupt entries never replay.",
     sim=sim_replay,
 )

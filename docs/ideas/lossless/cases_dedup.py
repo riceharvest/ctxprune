@@ -288,6 +288,8 @@ def sim_reread() -> dict:
         assert seen == raw, "a different range is a different key: shown in full"
         raw, seen = read(offset=10, limit=20)
         assert is_stub(seen), "same range again is stubbed"
+        raw, seen = read()
+        assert is_stub(seen), "each range has its own entry: the full read is still stubbed after a ranged read in between"
         ws.put("b.py", src)
         raw, seen = read("b.py")
         assert seen == raw, "same bytes under another path are not this idea's business (#140 does that)"
@@ -795,12 +797,20 @@ def sim_overlap() -> dict:
         g3 = fake_grep(ws, r"def alpha_\d")
         out3 = s.step("Grep", {"pattern": "def alpha_\\d"}, g3)
         assert out3 == g3, "same text on other line numbers is not 'already shown'"
+        # a line edited in place (same line number, new text): its key now has two texts, so it is never abbreviated
+        ws.put("src/a.py", ws.get("src/a.py").replace("def alpha_2(a, b=0):", "def alpha_2(a, b=1):"))
+        g4 = fake_grep(ws, r"def alpha_\d")
+        out4 = s.step("Grep", {"pattern": "def alpha_\\d"}, g4)
+        assert expand_hits(s, out4) == g4 and "b=1" in out4
+        out5 = s.step("Grep", {"pattern": "def alpha_\\d"}, g4)
+        assert expand_hits(s, out5) == g4 and "src/a.py" in out5 and "alpha_2(a, b=1)" in out5, "ambiguous key stays literal, the rest may be keys"
+        assert out5.count(MARK) >= 1 and len(out5) < len(g4), "other hits repeat as keys"
         # unparsable lines and hostile text pass through
         odd = "Binary file src/x.bin matches\nsrc/a.py:3:[ctxprune: already shown: src/a.py:3]\n"
         assert s.step("Grep", {"pattern": "x"}, odd) == odd
         s.compact()
-        out4 = s.step("Grep", {"pattern": "def alpha_\\d"}, g3)
-        assert out4 == g3, "after compaction the hits are not in context any more"
+        out6 = s.step("Grep", {"pattern": "def alpha_\\d"}, g4)
+        assert out6 == g4, "after compaction the hits are not in context any more"
         raw, seen = read("src/a.py", 1, 30)
         assert seen == raw
         hook.shown = None

@@ -589,7 +589,7 @@ DOUBLE = pretty({"outer": json.dumps({"inner": json.dumps({"k": [1, 2, {"deep": 
 
 case(
     128,
-    claim="Redundant string escapes (\\uXXXX for printable characters, \\/) are written as the characters, and a string value that is itself a JSON object or array is inlined as structure inside {\"§json\": ...}; every value, number spelling, duplicate key and key order is preserved.",
+    claim="Redundant string escapes (\\uXXXX for printable characters, \\/) are written as the characters, and a string value that is itself a JSON object or array is inlined as structure inside {\"§json\": ...}; every value, number spelling, duplicate key and key order is preserved, and input that already uses the marker key is escaped with a \"§raw\" prefix.",
     loses="the exact text of an inlined JSON string (its whitespace and escape spelling; only its parsed value survives), whitespace between tokens, and the spelling of \\uXXXX / \\/ escapes; \\r\\n escapes stay escaped because a raw newline cannot live inside a JSON string",
     encode=enc128,
     equivalent=oracle128,
@@ -864,13 +864,14 @@ case(
         Fixture("fewer than five records", "\n".join(compact(r) for r in pino_logs(4)) + "\n", False),
         Fixture("a blank line inside NDJSON", "\n".join(compact(r) for r in pino_logs(8)).replace("\n", "\n\n", 1) + "\n", False),
         Fixture("a key missing from one record is not hoisted", "\n".join(compact(r) for r in pino_logs(16, lacking=5)) + "\n", True),
+        Fixture("a key that is constant on only 60% of the records", "\n".join(compact({"id": i, "kind": "a" if i % 5 < 3 else "b", "msg": f"message number {i}"}) for i in range(20)) + "\n", False),
         Fixture("constant key at different positions", "\n".join(compact({"a": i, "k": 1} if i % 2 else {"k": 1, "a": i}) for i in range(12)) + "\n", False),
         Fixture("duplicate key inside a record", "\n".join(['{"k":1,"k":2,"a":%d}' % i for i in range(10)]) + "\n", None),
         Fixture("text that starts like the header", "§hoist nd [[0,\"a\",1]]\n{\"b\":1}\n", None),
         Fixture("constants that need escaping", "\n".join(compact({"svc": "a\"b\\c ü", "n": i, "z": 1.0}) for i in range(10)) + "\n", True),
     ],
     min_gain=0.1,
-    idempotent=False,
+    idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -979,7 +980,7 @@ case(
         Fixture("keys spelled differently but equal", compact({"T": [{"Key": "a", "Value": 1}, {"Key": "\\u0061", "Value": 2}]}).replace("\\\\u", "\\u"), None),
     ],
     min_gain=0.15,
-    idempotent=False,
+    idempotent=False,  # encoded output contains the marker, so re-encoding escapes it (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1119,7 +1120,7 @@ def sim_entity_cache():
     epochs = lambda: f"e{next(counter)}"  # noqa: E731  deterministic epoch ids
     with tempfile.TemporaryDirectory() as d:
         state = os.path.join(d, "gh.json")
-        cache, reader = EntityCache(state, window=4, epochs=epochs), Reader(window=4)
+        cache, reader = EntityCache(state, window=8, epochs=epochs), Reader(window=8)
         tally = {"orig": 0, "sent": 0}
 
         def call(server, payload, cache=cache, reader=reader, expect_ref=None):
@@ -1145,11 +1146,11 @@ def sim_entity_cache():
         assert sent < 0.5 * base, f"three-call session should halve the bytes (sent {sent} of {base})"
 
         # (c) it must NOT apply -------------------------------------------------------------------------------
-        o4 = call("jira", {"items": [gh_issue(0)]}, expect_ref=False)  # same bytes, other server: never a ref into github's output
-        assert o4.startswith("§call ")
         changed = dict(gh_issue(2), milestone=dict(MILESTONE, open_issues=8))  # one changed field makes it a new object
-        o5 = call("github", changed)
-        assert '"open_issues":8' in o5 and '"open_issues":7' not in o5, "a changed milestone is sent in full, not as a ref to the old one"
+        o4 = call("github", changed)
+        assert '"open_issues":8' in o4 and '"open_issues":7' not in o4, "a changed milestone is sent in full, not as a ref to the old one"
+        o5 = call("jira", {"items": [gh_issue(0)]}, expect_ref=False)  # same bytes, other server: never a ref into github's output
+        assert o5.startswith("§call ")
         small = pretty({"items": [{"id": 1}, {"id": 1}, {"id": 1}]}, 1)  # below the size floor
         assert cache.transform("github", small) == small
         for odd in ("plain text, not json", '{"error": "rate limited"', '{"$see": "x", "pad": "' + "x" * 100 + '"}',
@@ -1613,7 +1614,7 @@ volumes:
 
 case(
     36,
-    claim="Full-line comments, trailing comments (TOML and YAML only) and blank lines are removed from TOML, INI and YAML; a # inside a quoted string, a URL fragment, a multi-line string or a block scalar is never touched, and every parser that reads the original (tomllib, configparser, a YAML-subset loader) reads the result identically.",
+    claim="Full-line comments, trailing comments (TOML and YAML only) and blank lines are removed from TOML, INI and YAML (block maps and sequences, quoted and plain scalars, | and > block scalars; other YAML is left alone); a # inside a quoted string, a URL fragment, a multi-line string or a block scalar is never touched, and every parser that reads the original (tomllib, configparser, a YAML-subset loader) reads the result identically.",
     loses="comments, blank lines (before a line that starts at column 0) and spaces before a trailing comment; INI trailing comments are not comments to configparser, so they stay",
     encode=lambda t: guarded(t, strip_config),
     equivalent=oracle36,
@@ -2034,13 +2035,13 @@ case(
         Fixture("prose, git sha, short hex lists", "commit 3f2a9c4e1b7d8a60f5c2e9b3a1d4c7e8f0a2b6c9\nthe be ad fa ce de words, and #ff00aa colours\nde ad be ef\n", False),
         Fixture("MAC, IPv6, UUID", "link/ether 00:1a:2b:3c:4d:5e\ninet6 2001:db8::ff00:42:8329\nid 550e8400-e29b-41d4-a716-446655440000\n", False),
         Fixture("decimal numbers that happen to be two digits", "ids: 10 20 30 40 50 60 70 80 90\ncounts: 11 12 13 14 15 16 17 18\n", False),
-        Fixture("text with the sigil", "price 5§ " + hexdump_c(random.Random(4).randbytes(48)), None),
+        Fixture("text with the sigil next to hex digits", "price 5§abcd and §:00ff and §w1234\n" + hexdump_c(random.Random(4).randbytes(48)), None),
         Fixture("text that starts like encoder output", "§hex\n§48656c6c6f20776f\nnot encoded\n", None),
         Fixture("upper and mixed case, run at EOF, glued neighbours", "DE AD BE EF 00 11 22 33\nzzaa bb cc dd ee ff gg\nAa Bb cC Dd eE Ff 1234\n0A 0B 0C 0D 0E 0F", None),
         Fixture("zero fill and a repeated-line star", "00000000  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|\n*\n00001000\n", None),
     ],
     min_gain=0.05,
-    idempotent=False,
+    idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2087,7 +2088,7 @@ class _CodeView(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.depth, self.pres, self.outside, self.skip = 0, [], [], None
+        self.depth, self.pres, self.outside, self.skip, self.closed_lineno_tds = 0, [], [], None, 0
 
     def handle_starttag(self, tag, attrs):
         classes = (dict(attrs).get("class") or "").split()
@@ -2105,6 +2106,7 @@ class _CodeView(HTMLParser):
             if tag == self.skip[0]:
                 self.skip[1] -= 1
                 if self.skip[1] == 0:
+                    self.closed_lineno_tds += tag == "td"
                     self.skip = None
         elif tag == "pre" and self.depth:
             self.depth -= 1
@@ -2118,7 +2120,14 @@ def code_view(html_text):
     v = _CodeView()
     v.feed(html_text)
     v.close()
-    return ["".join(p) for p in v.pres], "".join(v.outside)
+    return ["".join(p) for p in v.pres], "".join(v.outside), v.closed_lineno_tds
+
+
+def oracle323(x, e):
+    """Same <pre> texts and same text outside them (line-number cells ignored), and no complete line-number cell is left."""
+    px, ox, _ = code_view(x)
+    pe, oe, left = code_view(e)
+    return px == pe and ox == oe and left == 0
 
 
 _PYTOK = re.compile(r"""(?P<c>\#[^\n]*)|(?P<s>"[^"\n]*"|'[^'\n]*')|(?P<k>\b(?:def|return|import|from|for|in|if|else|class|raise|with|as|None|True|False)\b)"""
@@ -2175,7 +2184,7 @@ case(
     claim="Inside <pre> blocks whose only markup is <span> and <code>, the tags are removed (entities left as written) and line-number cells and spans are dropped; paragraphs, links, other markup and blocks with links, images or breaks are untouched.",
     loses="the class and style attributes of the highlighter spans, and line numbers",
     encode=lambda t: guarded(t, flatten_highlighted),
-    equivalent=lambda x, e: code_view(x) == code_view(e),
+    equivalent=oracle323,
     fixtures=[
         Fixture("Pygments", PYG, True),
         Fixture("highlight.js", HLJS, True),
@@ -2353,7 +2362,8 @@ case(
         Fixture("contents-style blob inside a Secret", SECRET_WITH_BLOB, False),
         Fixture(".env file via the contents API", compact(contents_api(".env", b"API_KEY=abc123\nDEBUG=1\n" * 8)), False),
         Fixture("private key file via the contents API", compact(contents_api("deploy/id_ed25519", b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"b3BlbnNzaC1rZXktdjEAAAAA" * 8 + b"\n-----END OPENSSH PRIVATE KEY-----\n")), False),
-        Fixture("binary content (NUL bytes)", compact(contents_api("data.bin", bytes(range(0, 90)))), False),
+        Fixture("binary content (a few NUL bytes)", compact(contents_api("data.bin", bytes(range(0, 40)))), False),
+        Fixture("mostly text with one NUL and a control character", compact(contents_api("notes.dat", ("plain text line number one\n" * 10).encode() + b"\x00\x01 tail\n")), False),
         Fixture("invalid UTF-8 (latin-1 text)", compact(contents_api("legacy.txt", ("café résumé naïve " * 12).encode("latin-1"))), False),
         Fixture("base64 that is not canonical (no padding, odd wrap)", compact({"content": base64.b64encode(b"hello world, plain text!!").decode().rstrip("=") + "\n", "encoding": "base64"}), False),
         Fixture("not JSON", "content: aGVsbG8=\nencoding: base64\n", False),
@@ -2364,7 +2374,7 @@ case(
         Fixture("the encoder's own marker in the input", compact({"content": "hello", "encoding": B64ENC + "60/1"}), None),
     ],
     min_gain=0.1,
-    idempotent=False,
+    idempotent=False,  # encoded output contains the marker, so re-encoding escapes it (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2478,7 +2488,7 @@ case(
         Fixture("CRLF CSV", df_csv(14, eol="\r\n"), True),
         Fixture("no constant column, no index", "a,b,c\n1,x,3\n2,y,4\n3,z,5\n4,w,6\n", False),
         Fixture("index column that does not start at 0", "".join(f"{i + 1},v{i},{i * 3}\n" for i in range(8)).join(["i,a,b\n", ""]), False),
-        Fixture("quoted 0 is not the default index", ',a\n"0",x\n"1",y\n"2",z\n"3",w\n', False),
+        Fixture("quoted 0 is not the default index", ",a,b\n" + "".join(f'"{i}",x{i},y{i % 3}\n' for i in range(14)), False),
         Fixture("ragged rows", "a,b,c\n1,2\n3,4,5\n6,7,8\n9,9,9\n", False),
         Fixture("only two data rows", "a,b,c\n1,1,x\n1,1,y\n", False),
         Fixture("prose with commas", "Well, it works, mostly.\nHowever, not always, as seen.\nSo, test, test, test.\nOk, done, here, now.\n", False),
@@ -2490,7 +2500,7 @@ case(
         Fixture("no final newline", df_csv(12).rstrip("\n"), True),
     ],
     min_gain=0.05,
-    idempotent=False,
+    idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2709,9 +2719,9 @@ case(
         Fixture("grid without its closing rule (truncated)", SPARK.split("\nonly")[0].rsplit("\n", 1)[0] + "\n", False),
         Fixture("ragged row", "+---+---+\n| a | b |\n+---+---+\n| 1 | 2 | 3 |\n+---+---+\n", False),
         Fixture("CRLF output", SPARK.replace("\n", "\r\n"), False),
-        Fixture("a cell holding a tab", "+----+----+\n| a  | b  |\n+----+----+\n| x\ty | z  |\n+----+----+\n", None),
+        Fixture("a cell holding a tab", "+-----+----+\n| a   | b  |\n+-----+----+\n| x\ty | z  |\n+-----+----+\n", None),
         Fixture("header only (empty result)", "+----+----+\n| id | nm |\n+----+----+\n+----+----+\n", None),
-        Fixture("empty cells, wide characters", "+----+------+\n| a  | b    |\n+----+------+\n|    | 日本 |\n| 1  |      |\n+----+------+\n", None),
+        Fixture("empty cells, wide characters", "+----+------+\n| a  | b    |\n+----+------+\n|    | 日本   |\n| 1  |      |\n+----+------+\n", None),
         Fixture("grid in the middle of other text", "before\n" + MYSQL + "after\n", True),
     ],
     min_gain=0.1,

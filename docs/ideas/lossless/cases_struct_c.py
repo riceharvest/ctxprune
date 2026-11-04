@@ -2156,8 +2156,10 @@ case(
 
 
 # ===============================================================================================================
-# #1245 Drop redundant xmlns redeclarations. Equivalent: canonical XML (ElementTree.canonicalize, C14N 2.0) is
-# identical; the encoder is a start-tag scanner with a namespace scope stack, applied only to well-formed XML.
+# #1245 Drop redundant xmlns redeclarations. Equivalent: the expat-level infoset is identical (expanded names, attributes,
+# the in-scope namespace map of every element, text, comments, PIs). ElementTree.canonicalize is not used as the oracle:
+# its C14N 2.0 writer mis-prints xmlns="" and merges two prefixes bound to one URI. The encoder is a start-tag scanner
+# with a namespace scope stack, applied only to well-formed XML.
 
 _XTOK = re.compile(
     r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>|</[^\s>]+\s*>"
@@ -2170,7 +2172,7 @@ def encode_xmlns(text):
     if "<!DOCTYPE" in text or "<!ENTITY" in text:
         return text
     ET.fromstring(text)  # only well-formed documents
-    out, stack, scope, pos, changed = [], [], {"": ""}, 0, False
+    out, stack, scope, pos, changed = [], [], {}, 0, False
     for m in _XTOK.finditer(text):
         out.append(text[pos:m.start()])
         pos = m.end()
@@ -2186,9 +2188,9 @@ def encode_xmlns(text):
             an, av = a.group(1), a.group(2)[1:-1]
             if an == "xmlns" or an.startswith("xmlns:"):
                 prefix = "" if an == "xmlns" else an[6:]
-                if local.get(prefix) == av:
+                if av and local.get(prefix) == av:
                     changed = True
-                    continue  # redeclares the binding already in scope
+                    continue  # redeclares the binding already in scope (xmlns="" undeclarations are always kept)
                 local[prefix] = av
             kept.append(a.group(0))
         out.append(f"<{name}{''.join(kept)}{ws}{slash}>")
@@ -2199,11 +2201,35 @@ def encode_xmlns(text):
     return "".join(out) if changed else text
 
 
+def _xml_infoset(text):
+    """Expat-level infoset: per element its expanded name, attributes and the full in-scope namespace map, plus
+    text, tail, comments and processing instructions in document order."""
+    scope, undo, seq = {}, [], []
+    root = None
+    for ev, obj in ET.iterparse(io.StringIO(text), events=("start-ns", "end-ns", "start", "comment", "pi")):
+        if ev == "start-ns":
+            undo.append((obj[0], scope.get(obj[0])))
+            scope[obj[0]] = obj[1]
+        elif ev == "end-ns":
+            prefix, old = undo.pop()
+            if old is None:
+                scope.pop(prefix, None)
+            else:
+                scope[prefix] = old
+        elif ev == "start":
+            root = obj if root is None else root
+            ns = {k: v for k, v in scope.items() if not (k == "" and v == "")}  # xmlns="" equals 'no default namespace'
+            seq.append(("start", obj.tag, tuple(sorted(obj.attrib.items())), tuple(sorted(ns.items()))))
+        else:
+            seq.append((ev, obj.text if ev == "comment" else obj))
+    return seq, [(e.tag, e.text, e.tail) for e in root.iter()]
+
+
 def _equiv_xml(a, b):
     if a == b:
         return True
     try:
-        return ET.canonicalize(a, with_comments=True) == ET.canonicalize(b, with_comments=True)
+        return _xml_infoset(a) == _xml_infoset(b)
     except ET.ParseError:
         return False
 
@@ -2219,8 +2245,8 @@ _XML_SCOPES = ('<a xmlns="u" xmlns:p="1"><b xmlns="v" xmlns:p="2"><c xmlns="v" x
                '<f xmlns=""/><g xmlns="" xmlns:q=\'3\'><h xmlns:q="3"/></g></a>')
 case(
     1245,
-    claim="An xmlns or xmlns:prefix declaration whose value equals the binding already in scope is removed from the start tag (the scope stack is rebuilt per element); every other byte, including comments, CDATA, text and attribute layout, is kept, and the canonical XML of both texts is identical.",
-    loses="redundant namespace declarations only (they do not exist in the canonical form); documents with a DOCTYPE or that are not well-formed are left untouched",
+    claim="An xmlns or xmlns:prefix declaration whose non-empty value equals the binding already in scope is removed from the start tag (the scope stack is rebuilt per element); every other byte, including comments, CDATA, text and attribute layout, is kept, and the parsed infoset (element and attribute names, in-scope namespace map of every element, text, comments) of both texts is identical.",
+    loses="redundant namespace declarations only (they are not part of the infoset); documents with a DOCTYPE or that are not well-formed are left untouched",
     encode=encode_xmlns,
     equivalent=_equiv_xml,
     fixtures=lambda: [

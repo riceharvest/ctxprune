@@ -374,7 +374,7 @@ _DISTINCT_DAYS = "".join(f"2026-0{d}-1{d}T10:00:00Z INFO  [w] heartbeat\n" for d
 
 case(
     23,
-    claim="The most common date+separator among timestamped lines moves to one header line; lines that start with hh:mm:ss get it back on decode, lines of other dates and untimed lines are untouched, and the clock text is kept to the millisecond.",
+    claim="The most common date+separator among timestamped lines moves to one header line; lines that start with hh:mm:ss get it back on decode, lines of other dates and untimed lines are untouched, and the time text is kept exactly as written.",
     encode=ts_encode,
     decode=ts_unencode,
     fixtures=[

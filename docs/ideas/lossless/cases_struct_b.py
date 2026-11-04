@@ -1101,13 +1101,13 @@ def _yblank(l: str) -> bool:
 
 _YK = re.compile(r"^( *(?:- +)*)([A-Za-z_][\w.\-/]*):$")
 _YI = re.compile(r"^( *)- +(\S.*?) *$")
-_YDASH = re.compile(r"^( *)-(?: |$)")
+_YDASH = re.compile(r"^( *)-(?:\s|$)")
 
 
 def _flow_plain(s: str) -> bool:
     if not s or s[0] in "&*!|>'\"%@`[]{},#?:" or s == "-" or s.startswith("- "):
         return False
-    return not any(c in s for c in ",[]{}:\t") and " #" not in s
+    return not any(c in s for c in ",[]{}:\t\r\"'") and " #" not in s
 
 
 def _yseq_at(lines: list[str], i: int, c: int):
@@ -1351,7 +1351,6 @@ def _doc_with(block: str, times: int, tag: str) -> str:
     return "".join(f"svc-{tag}{k}:\n  meta:\n    labels:\n{block}  name: n{k}\n" for k in range(times))
 
 
-_BLK = "      app: web\n      tier: frontend\n      env: production\n      team: platform\n"
 _BLK_IN = "    app: web\n    tier: frontend\n    env: production\n    team: platform\n"
 
 case(
@@ -2089,8 +2088,6 @@ case(
 # right edges of the header words (pandas right-justifies), so strings with spaces survive; an optional
 # `[N rows x M columns]` footer is kept. Oracle: the cell matrix, plus the word sequence of every row (independent of columns).
 
-_DF_FOOT = re.compile(r"\[\d+ rows x \d+ columns\]")
-
 
 def _df_parse(x: str):
     """-> (header names, rows of (index, cells), footer (separator, text) or None, trailing newline) or None."""
@@ -2108,10 +2105,13 @@ def _df_parse(x: str):
     chunks = []
     for bi, b in enumerate(blocks):
         lines = [l.rstrip() for l in b.split("\n")]
-        wrapped = bi < len(blocks) - 1
-        if any(l.endswith("\\") != wrapped for l in lines):
+        if bi < len(blocks) - 1:
+            if not all(l.endswith(" \\") for l in lines):  # pandas' marker is a space and a backslash
+                return None
+            lines = [l[:-2].rstrip() for l in lines]
+        elif any(l.endswith("\\") for l in lines):
             return None
-        chunks.append([l[:-1].rstrip() if wrapped else l for l in lines])
+        chunks.append(lines)
     n = len(chunks[0])
     if n < 2 or any(len(c) != n for c in chunks):
         return None
@@ -2362,7 +2362,7 @@ _REC_FOOT = re.compile(r"\(\d+ rows?\)|\d+ rows? in set.*|")
 
 
 def _rec_parse(x: str):
-    """-> (records [[(name, value)]], footer lines, trailing newline) or None."""
+    """-> (records [[(name, value)]], raw footer text or None, trailing newline) or None."""
     if "\t" in x:
         return None
     tail = x.endswith("\n")
@@ -2370,7 +2370,7 @@ def _rec_parse(x: str):
     recs, i, flavor = [], 0, None
     while i < len(lines):
         ps, my = _PSQL.fullmatch(lines[i]), _MYSQL.fullmatch(lines[i])
-        if not (ps or my) or (flavor and flavor != bool(ps)) or int((ps or my).group(1)) != len(recs) + 1:
+        if not (ps or my) or (flavor is not None and flavor != bool(ps)) or int((ps or my).group(1)) != len(recs) + 1:
             break
         flavor = bool(ps)
         pos, fields, i = lines[i].index("+") if ps else None, [], i + 1
@@ -2380,7 +2380,6 @@ def _rec_parse(x: str):
                 if len(l) <= pos or l[pos] != "|" or l[pos + 1:pos + 2] not in (" ", "") or not l[:pos].strip():
                     break
                 name, val = l[:pos].strip(), l[pos + 2:]
-                width = pos
                 if l[:pos] != name.ljust(pos - 1) + " ":
                     return None
             else:
@@ -2399,7 +2398,7 @@ def _rec_parse(x: str):
     foot = lines[i:]
     if not recs or not all(_REC_FOOT.fullmatch(l) for l in foot):
         return None
-    return recs, foot, tail
+    return recs, ("\n".join(foot) if foot else None), tail
 
 
 def records_fold(x: str) -> str:
@@ -2415,7 +2414,7 @@ def records_fold(x: str) -> str:
             j += 1
         blocks.append("\n".join(["\t".join(cols)] + ["\t".join(v for _, v in recs[t]) for t in range(i, j)]))
         i = j
-    res = "\n\n".join(blocks + (["\n".join(foot)] if foot else [])) + ("\n" if tail else "")
+    res = "\n\n".join(blocks + ([foot] if foot is not None else [])) + ("\n" if tail else "")
     return res if len(res) < len(x) else x
 
 
@@ -2427,11 +2426,12 @@ def _rec_equiv(a: str, b: str) -> bool:
         return False
     recs, foot, tail = p
     blocks = b[: len(b) - tail].split("\n\n")
-    got_foot: list[str] = []
-    if foot:
-        got_foot = blocks.pop().split("\n")
+    tables = 0
+    while tables < len(blocks) and "\t" in blocks[tables].split("\n")[0]:
+        tables += 1  # a table's header line always has a tab (2+ columns); the footer never does
+    got_foot = "\n\n".join(blocks[tables:]) if tables < len(blocks) else None
     got = []
-    for blk in blocks:
+    for blk in blocks[:tables]:
         lines = blk.split("\n")
         cols = lines[0].split("\t")
         for row in lines[1:]:

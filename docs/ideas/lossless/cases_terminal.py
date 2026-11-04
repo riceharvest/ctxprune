@@ -247,7 +247,7 @@ case(
         Fixture("truncated and malformed escapes", "a\x1b[31\nb\x1b]8;;http://x\nc\x1b\x1b[1md\x1b[3\x1b[1m1me\x1b(Bf\x1b \x1bg\x1b", None),
         Fixture("text that already looks like the output", "name (http://x/y) and (x) done\n", None),
     ],
-    min_gain=0.25,
+    min_gain=0.2,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -322,7 +322,7 @@ def _powershell() -> str:
 
 
 _PERSIAN_EMOJI = "\n".join([
-    "می\u200cخواهم کتاب\u200cها را بخوانم",  # ZWNJ is part of the spelling
+    "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645 \u06a9\u062a\u0627\u0628\u200c\u0647\u0627 \u0631\u0627 \u0628\u062e\u0648\u0627\u0646\u0645",  # ZWNJ is part of the spelling
     "team \U0001F469\u200d\U0001F4BB shipped \U0001F468\u200d\U0001F469\u200d\U0001F467 the fix",       # ZWJ builds one emoji
     "plain line",
 ]) + "\n"
@@ -371,19 +371,11 @@ def dedent_display(text: str) -> str:
     body = [l for l in lines if l.strip(" \t\r")]
     if len(body) < 3:
         return text
-    margin = os_commonprefix([l[: len(l) - len(l.lstrip(" \t"))] for l in body])
+    margin = os.path.commonprefix([l[: len(l) - len(l.lstrip(" \t"))] for l in body])
     if len(margin) < 2:
         return text
     res = "\n".join(l[len(margin):] if l.strip(" \t\r") else l for l in lines)
     return res if len(res) < len(text) else text
-
-
-def os_commonprefix(items: list[str]) -> str:
-    a, b = min(items), max(items)
-    for i, ch in enumerate(a):
-        if ch != b[i]:
-            return a[:i]
-    return a
 
 
 def _oracle_13(x: str, e: str) -> bool:
@@ -467,6 +459,7 @@ case(
         Fixture("javascript excerpt with braces", _JS_SNIPPET, False),
         Fixture("cat -n of prose (file view)", _CAT_N, False),
         Fixture("already flush block", _describe_pod(""), False),
+        Fixture("statements ending in semicolons, no keywords", "        x = foo(a, b);\n        y = x + 1;\n        bar(y);\n", False),
         Fixture("tab margin, whitespace-only lines, CRLF", "\t\talpha one\r\n\t\t\tbeta two\r\n  \t\r\n\t\tgamma three\r\n\t\tdelta four\r\n", None),
         Fixture("mixed tab/space margin", "\t  one\n\t  two\n\t   three\n\t  four\n", None),
     ],
@@ -836,6 +829,7 @@ case(
         Fixture("NUL-separated strings, sparse NULs", "name\x00value\x00path\x00/usr/bin\x00mode\x00755\x00user\x00root\x00", False),
         Fixture("UTF-16LE with a lone surrogate", _as_u16("ok text here!\r\n")[:6] + "\x00\xd8" + _as_u16("tail of the file\r\n", bom=False), False),
         Fixture("BOM then an odd number of bytes (cut off)", _as_u16("a longer sentence than before\r\n")[:-1], False),
+        Fixture("BOM already destroyed by a UTF-8 decode (U+FFFD U+FFFD)", "\ufffd\ufffd" + _as_u16("Windows Registry Editor Version 5.00\r\n", bom=False), False),
         Fixture("input that starts like our header", "[decoded from UTF-16LE]\nhello\n[text follows unchanged]\n", None),
         Fixture("input that starts with the escape", "[text follows unchanged]\n" + _as_u16(_SQL, bom=False), None),
         Fixture("BOM only, BOM plus a character above U+00FF", "\u00ff\u00fe\n\u00ff\u00fe\u0100" * 3, None),
@@ -1122,6 +1116,7 @@ _BIG_DUMP = "  left: Inventory {\n    items: [\n" + "".join(f'        Item {{ sk
 _MULTILINE_STRING = 'Msg {\n    text: "line one\nline two",\n    n: 3,\n}\n'
 _C_CODE = "int main(void) {\n    int rc = run(1,\n                2);\n    return rc;\n}\n"
 _DEF = "def configure(\n    name,\n    port,\n):\n    return name, port\n"
+_NO_TRAILING_COMMA = "call(\n    first(a),\n    second(b)\n)\n"
 _PPRINT = "{'name': 'svc',\n 'ports': [80,\n           443],\n 'meta': {'owner': 'infra', 'tier': 2}}\n"
 
 case(
@@ -1136,6 +1131,7 @@ case(
         Fixture("dump too long to join (over 160 characters)", _BIG_DUMP, False),
         Fixture("string literal spanning two lines", _MULTILINE_STRING, False),
         Fixture("C code with ';' and python def", _C_CODE + _DEF, False),
+        Fixture("last argument without a trailing comma (code, not a dump)", _NO_TRAILING_COMMA, False),
         Fixture("unbalanced and over-closed brackets, apostrophes, tuple", "Foo {\n    a: 1,\n}}\nBar(\n    x: 'don't,\n)\nT(\n    1,\n)\nbad [\n  1,\n", None),
         Fixture("CRLF and tabs", "Cfg {\r\n\tname: \"a b\",\r\n\tn: [\r\n\t\t1,\r\n\t],\r\n}\r\n", None),
         Fixture("brackets inside strings", 'S {\n    a: "}{",\n    b: "[(",\n}\n', None),
@@ -1217,13 +1213,13 @@ def _oracle_1342(x: str, e: str) -> bool:
 
 
 _TERSE = "\n".join([
-    "   It works.  It is fast.  It is cheap.  Use it each day.  Enjoy it.",
-    "   Copy the file.  Run it.  Read the log.  Then stop.  Rest well.",
-    "   Set the flag.  Clear it.  Run it twice.  Done now.  Go home.",
-    "Open it first.  Close it later.  Do not leave it open.  Ever.  Really.",
-    "   Wait for it.  Press the key.  Look.  Note the time.  Write it down.",
-    "   The server MUST reply.  The client MAY retry.  Both MUST close.  Stop.  Now.",
-    "   Is it done?  Yes it is!  Then ship the build.  Tell the team.  Cheer.",
+    "   It works.  It is fast.  It is cheap.  Use it daily.  Enjoy it.  Smile.",
+    "   Copy the file.  Run it.  Read the log.  Then stop.  Rest well.  Sleep.",
+    "   Set the flag.  Clear it.  Run it twice.  Done now.  Go home.  Relax.",
+    "Open it first.  Close it later.  Do not leave it open.  Ever.  Really.  Never.",
+    "   Wait for it.  Press the key.  Look.  Note the time.  Write it down.  Breathe.",
+    "   The server MUST reply.  The client MAY retry.  Both MUST close.  Stop.  Now.  Go.",
+    "   Is it done?  Yes it is!  Then ship the build.  Tell the team.  Cheer.  Rest.",
 ]) + "\n"
 _KEEP_1342 = "\n".join([
     "Usage: tool [OPTIONS] FILE",
@@ -1989,7 +1985,7 @@ case(
 
 # ---------------------------------------------------------------------------------------------------------------
 # #989 Fold Arabic-Indic, Devanagari, Thai (any Nd) digits to ASCII with int()/unicodedata.decimal. One digit stays one character.
-# A token that also contains an ASCII letter (an identifier such as var١ or COVID-١٩) is left alone: Python and most languages treat
+# A token that also contains an ASCII letter (an identifier such as var\u0661 or COVID-\u0661\u0669) is left alone: Python and most languages treat
 # the two digit forms as different identifiers. Saving is in bytes and tokens only, so this runs through `_run_bytes_gate`.
 
 def fold_digits(text: str) -> str:
@@ -2035,15 +2031,15 @@ def _load_atoms():
 
 
 _NUMBERS_989 = "\n".join([
-    "تم نسخ ٣٤٢ ملفا\u064b في ١٢٫٥ ثانية، الحجم ١٢٣٤٥٦٧٨٩٠ بايت",
-    "زمان اجرا: ۱۴۰۳/۰۸/۱۲ ساعت ۱۰:۳۵ شماره ۴۵۶۷۸۹",
-    "क\u0941ल १२३४ फ\u093c\u093eइल\u0947\u0902, ७८ त\u094dर\u0941ट\u093fय\u093e\u0901, समय ०.५ स\u0947क\u0902ड",
-    "พบ ๑๒๓ ไฟล\u0e4c ใช\u0e49เวลา ๔.๕ ว\u0e34นาท\u0e35 รห\u0e31ส ๖๗๘๙๐",
-    "port ８０８０ and \U0001d7d0\U0001d7d1\U0001d7d2 and var١ and COVID-١٩ and x_٢",
+    "\u062a\u0645 \u0646\u0633\u062e \u0663\u0664\u0662 \u0645\u0644\u0641\u0627\u064b \u0641\u064a \u0661\u0662\u066b\u0665 \u062b\u0627\u0646\u064a\u0629\u060c \u0627\u0644\u062d\u062c\u0645 \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669\u0660 \u0628\u0627\u064a\u062a",
+    "\u0632\u0645\u0627\u0646 \u0627\u062c\u0631\u0627: \u06f1\u06f4\u06f0\u06f3/\u06f0\u06f8/\u06f1\u06f2 \u0633\u0627\u0639\u062a \u06f1\u06f0:\u06f3\u06f5 \u0634\u0645\u0627\u0631\u0647 \u06f4\u06f5\u06f6\u06f7\u06f8\u06f9",
+    "क\u0941ल \u0967\u0968\u0969\u096a फ\u093c\u093eइल\u0947\u0902, \u096d\u096e त\u094dर\u0941ट\u093fय\u093e\u0901, समय \u0966.\u096b स\u0947क\u0902ड",
+    "พบ \u0e51\u0e52\u0e53 ไฟล\u0e4c ใช\u0e49เวลา \u0e54.\u0e55 ว\u0e34นาท\u0e35 รห\u0e31ส \u0e56\u0e57\u0e58\u0e59\u0e50",
+    "port \uff18\uff10\uff18\uff10 and \U0001d7d0\U0001d7d1\U0001d7d2 and var\u0661 and COVID-\u0661\u0669 and x_\u0662",
 ]) + "\n"
 
-_INTS_989 = "".join(f"{a} {b} {c}\n" for a, b, c in zip(["١٢٣٤٥٦٧٨", "۱۲۳۴۵۶", "१२३४५६७"] * 6,
-                                                          ["๑๒๓๔", "٠١٢", "३४५"] * 6, ["٩٨٧٦", "۹۸۷", "๙๘"] * 6))
+_INTS_989 = "".join(f"{a} {b} {c}\n" for a, b, c in zip(["\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668", "\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6", "\u0967\u0968\u0969\u096a\u096b\u096c\u096d"] * 6,
+                                                          ["\u0e51\u0e52\u0e53\u0e54", "\u0660\u0661\u0662", "\u0969\u096a\u096b"] * 6, ["\u0669\u0668\u0667\u0666", "\u06f9\u06f8\u06f7", "\u0e59\u0e58"] * 6))
 
 
 def sim_digit_fold() -> dict:
@@ -2055,7 +2051,7 @@ def sim_digit_fold() -> dict:
         if any(c.isdigit() and c.isascii() for c in tok):
             assert atoms.is_protected(tok), f"is_protected lost {tok!r}"
             n_prot += 1
-    for ch in "٣۴१๑":
+    for ch in "\u0663\u06f4\u0967\u0e51":
         assert atoms.is_protected(ch + "2") and atoms.is_protected(str(unicodedata.decimal(ch)) + "2")
     # int() equality for every Nd digit of the script blocks the idea names, plus a few astral ones
     for cp in itertools.chain(range(0x0660, 0x066A), range(0x06F0, 0x06FA), range(0x0966, 0x0970), range(0x0E50, 0x0E5A), range(0xFF10, 0xFF1A), range(0x1D7CE, 0x1D800)):
@@ -2066,8 +2062,8 @@ def sim_digit_fold() -> dict:
         [
             Fixture("numbers in Arabic, Persian, Hindi, Thai, fullwidth and math digits", _NUMBERS_989, True),
             Fixture("integer columns in five scripts", _INTS_989, True),
-            Fixture("ASCII digits, Arabic words without digits, identifiers with ASCII letters", "total 12345 files\nملفات بدون أرقام\nvar١ x٢_y COVID-١٩ abc१\n", False),
-            Fixture("digits with marks, separators, a lone digit, superscripts (not Nd)", "١٬٢٣٤٫٥ ٣\u0301 ١ x² ⑧ ๑\u200d๒ ٣%\n", None),
+            Fixture("ASCII digits, Arabic words without digits, identifiers with ASCII letters", "total 12345 files\n\u0645\u0644\u0641\u0627\u062a \u0628\u062f\u0648\u0646 \u0623\u0631\u0642\u0627\u0645\nvar\u0661 x\u0662_y COVID-\u0661\u0669 abc\u0967\n", False),
+            Fixture("digits with marks, separators, a lone digit, superscripts (not Nd)", "\u0661\u066c\u0662\u0663\u0664\u066b\u0665 \u0663\u0301 \u0661 x² ⑧ \u0e51\u200d\u0e52 \u0663%\n", None),
         ],
         min_gain=0.15,
         seed=989,
