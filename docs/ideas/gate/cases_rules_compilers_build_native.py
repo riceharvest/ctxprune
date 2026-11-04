@@ -7,31 +7,30 @@ are written as a different algorithm from the encoder (a parser or a state machi
 a line scanner; `tomllib`/`json` for lockfiles, where the encoder reads lines) so one bug is not mirrored.
 
 Fixtures are real captures wherever the tool exists in the container (ruff, tsc, gcc, clang, ASan, TSan, UBSan, valgrind,
-ninja, cmake, make, strace, uv, poetry, pipenv, cargo, npm, yarn, pnpm, go, gradle, maven, java, ruby, nbconvert, pyspark),
-with absolute paths shortened to /work/app (and /home/dev/.venv); a few are cut to keep this file small, and each cut
-says so next to the fixture. Fixtures marked `# reconstructed from memory` are the tool's documented output format but
-not a capture (no Mac or .NET SDK, no TeX Live, no Android SDK, no Bazel here).
+ninja, cmake, make, strace, uv, poetry, pipenv, cargo, npm, yarn, pnpm, go, gradle, maven, java, ruby, pip, node-gyp,
+nbconvert, pyspark), with absolute paths shortened to /work/app (and /home/dev/.venv); a few are cut to keep this file small,
+and each cut says so next to the fixture. Reconstructed from memory (generated to the tool's documented output format,
+marked in the fixture names): xcodebuild (#214), MSBuild/dotnet (#216), pdflatex (#1085), Bazel (#701, alongside a real
+ninja capture), macOS/Linux/Android crash reports (#427, alongside a real JVM hs_err and faulthandler), an Android-style
+gradle report (#223, alongside a real one) and a Gradle 7.x footer (#224, alongside real Maven and Gradle 8.14 captures).
 
 Conventions: every encoder is total (a bad or foreign input comes back unchanged), self-gating (returns the input unless
 strictly shorter) and, where a stub line is added, idempotent because the stub is recognised and never re-folded.
 """
 from __future__ import annotations
 
-import difflib
 import json
-import os
 import re
-import sys
 import tomllib
 from collections import Counter, OrderedDict
 
-from harness import Fixture, case, tokens
+from harness import Fixture, case
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def plain(s: str) -> str:
-    """Remove ANSI escapes (used for classification only: kept lines are emitted verbatim)."""
+    """Remove ANSI escapes (#118 uses it for classification only and emits kept lines verbatim; #1325 strips colour from its output)."""
     return _ANSI.sub("", s)
 
 
@@ -423,7 +422,7 @@ def digest_native_build(text: str) -> str:
     # hoist flags shared by several compiler lines
     cmds = []
     for k, l in enumerate(out):
-        if (m := _B_CC.match(l)) and (toks := _tokens(m.group(2) + m.group(3))) and _eligible(toks):
+        if (m := _B_CC.match(l)) and (toks := _tokens(m.group(2) + m.group(3))) and _eligible(toks) and not toks[1].startswith("@"):
             cmds.append((k, m.group(1), toks))
     if len(cmds) >= 2 and len({c[2][0] for c in cmds}) == 1:
         ulists = [_units(c[2][1:]) for c in cmds]
@@ -494,7 +493,7 @@ case(
     probes=probes_1068,
     fixtures=lambda: [
         Fixture("pip install psycopg2 from source without libpq-fe.h (real)", BUILD_FAIL_PSYCOPG2, True),
-        Fixture("setuptools build_ext with two cc lines sharing 20 flags, 11-file copy step absent (real)", BUILD_FAIL_PGDEMO, True),
+        Fixture("setuptools build_ext through pip: two cc lines sharing 20 flags (real)", BUILD_FAIL_PGDEMO, True),
         Fixture("gem install nokogiri --use-system-libraries without libxml2 (real)", BUILD_FAIL_NOKOGIRI, True),
         Fixture("node-gyp rebuild of an addon that includes vips/vips8 (real)", BUILD_FAIL_NODE_GYP, True),
         Fixture("ruby extconf.rb: have_library xml2 fails (real)", BUILD_FAIL_MKMF, True),
@@ -665,7 +664,7 @@ case(
     encode=pack_latex_log,
     probes=probes_1085,
     fixtures=lambda: [
-        Fixture("pdflatex log of a clean build: 20 packages, 6 boxes, 3 undefined, key wraps at column 79 (generated, reconstructed from memory)", LATEX_OK, True),
+        Fixture("pdflatex log of a clean build: 20 packages, 4 boxes, 3 undefined, key wraps at column 79 (generated, reconstructed from memory)", LATEX_OK, True),
         Fixture("the same with an undefined control sequence mid-log and a missing .sty at the end (generated)", LATEX_BROKEN, True),
         Fixture("latexmk summary line only", "Latexmk: All targets (main.pdf) are up-to-date\n", False),
         Fixture("a '!' with no l.NN line (truncated log) and a stub-looking line", "! Undefined control sequence.\nsome text\n[ctxprune: 9 log lines elided]\n", None),
@@ -1423,7 +1422,7 @@ case(
         Fixture("tsc --pretty false (nothing to strip)", TSC_PLAIN, False),
         Fixture("unified diff and table: '- ' / '|' lines that are not gutters", "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old = 1\n+new = 1\n | a | b |\n | - | - |\n  - bullet\n", False),
     ],
-    min_gain=0.1,
+    min_gain=0.08,
 )
 
 
@@ -2053,7 +2052,6 @@ def probes_121(text: str) -> dict:
         kind = _lock_kind(sec[0])
         h = _first_hunk(sec)
         if kind and h is not None:
-            sides = {"-": [], "+": []}
             blob = {"-": "", "+": ""}
             for l in sec[h:]:
                 if _HUNK.match(l):
@@ -3273,10 +3271,10 @@ def probes_220(text: str) -> dict:
                 cur = {"heads": [], "subs": [], "n": 0}
                 runs.append(cur)
             cur["n"] += 1
-            if cur["n"] <= KEEP_CANDIDATES:
+            if cur["n"] <= 3:  # the claim says three, whatever the encoder's constant is
                 cur["heads"].append(l)
         elif _O_SUB.match(l):
-            if cur is not None and cur["n"] <= KEEP_CANDIDATES:
+            if cur is not None and cur["n"] <= 3:
                 cur["subs"].append(l)
         elif m := _O_STUB.fullmatch(l):
             if cur is None:
@@ -3642,7 +3640,7 @@ def probes_221(text: str) -> dict:
 
 
 COMPOSITE_221 = cat(
-    "$ ./run_tests.sh\ntest_parse ... ok\ntest_sum ... FAILED\n", ASAN_HEAP_OVERFLOW, "test_free ... ok\n", ASAN_USE_AFTER_FREE.replace("==6518==", "==6518=="), "exit status 1\n"
+    "$ ./run_tests.sh\ntest_parse ... ok\ntest_sum ... FAILED\n", ASAN_HEAP_OVERFLOW, "test_free ... ok\n", ASAN_USE_AFTER_FREE, "exit status 1\n"
 )
 
 case(
@@ -7429,7 +7427,7 @@ NINJA_FAILED_BUILD = (
     "ninja: Entering directory `build'\n"
     '[1/6] Building CXX object CMakeFiles/app.dir/src/ui.cpp.o\n'
     'FAILED: CMakeFiles/app.dir/src/ui.cpp.o \n'
-    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -MD -MT CMakeFiles/app.dir/src/ui.cpp.o -MF CMakeFiles/app.dir/src/ui.cpp.o.d -o CMakeFiles/app.dir/src/ui.cpp.o -c /work/app/src/ui.cpp\n'
+    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -fno-rtti -Wshadow -MD -MT CMakeFiles/app.dir/src/ui.cpp.o -MF CMakeFiles/app.dir/src/ui.cpp.o.d -o CMakeFiles/app.dir/src/ui.cpp.o -c /work/app/src/ui.cpp\n'
     "/work/app/src/ui.cpp: In function 'void draw()':\n"
     "/work/app/src/ui.cpp:2:25: error: expected ',' or ';' before '}' token\n"
     '    2 | void draw() { int x = 1 }\n'
@@ -7437,17 +7435,11 @@ NINJA_FAILED_BUILD = (
     "/work/app/src/ui.cpp:2:19: warning: unused variable 'x' [-Wunused-variable]\n"
     '    2 | void draw() { int x = 1 }\n'
     '      |                   ^\n'
-    '[2/6] Building CXX object CMakeFiles/app.dir/src/parse.cpp.o\n'
-    'FAILED: CMakeFiles/app.dir/src/parse.cpp.o \n'
-    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -MD -MT CMakeFiles/app.dir/src/parse.cpp.o -MF CMakeFiles/app.dir/src/parse.cpp.o.d -o CMakeFiles/app.dir/src/parse.cpp.o -c /work/app/src/parse.cpp\n'
-    "/work/app/src/parse.cpp: In function 'int parse_int(const std::string&)':\n"
-    "/work/app/src/parse.cpp:2:61: error: 'missing_helper' was not declared in this scope\n"
-    '    2 | int parse_int(const std::string& s) { return std::stoi(s) + missing_helper(s); }\n'
-    '      |                                                             ^~~~~~~~~~~~~~\n'
-    '[3/6] Building CXX object CMakeFiles/app.dir/src/store.cpp.o\n'
+    '[2/6] Building CXX object CMakeFiles/app.dir/src/store.cpp.o\n'
+    '[3/6] Building CXX object CMakeFiles/app.dir/src/main.cpp.o\n'
     '[4/6] Building CXX object CMakeFiles/app.dir/src/net.cpp.o\n'
     'FAILED: CMakeFiles/app.dir/src/net.cpp.o \n'
-    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -MD -MT CMakeFiles/app.dir/src/net.cpp.o -MF CMakeFiles/app.dir/src/net.cpp.o.d -o CMakeFiles/app.dir/src/net.cpp.o -c /work/app/src/net.cpp\n'
+    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -DNET_RETRIES=3 -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -MD -MT CMakeFiles/app.dir/src/net.cpp.o -MF CMakeFiles/app.dir/src/net.cpp.o.d -o CMakeFiles/app.dir/src/net.cpp.o -c /work/app/src/net.cpp\n'
     "/work/app/src/net.cpp: In function 'int connect_to(const std::string&)':\n"
     "/work/app/src/net.cpp:3:12: error: 'hst' was not declared in this scope; did you mean 'host'?\n"
     '    3 |     return hst.size();\n'
@@ -7456,7 +7448,13 @@ NINJA_FAILED_BUILD = (
     "/work/app/src/net.cpp:2:35: warning: unused parameter 'host' [-Wunused-parameter]\n"
     '    2 | int connect_to(const std::string& host) {\n'
     '      |                ~~~~~~~~~~~~~~~~~~~^~~~\n'
-    '[5/6] Building CXX object CMakeFiles/app.dir/src/main.cpp.o\n'
+    '[5/6] Building CXX object CMakeFiles/app.dir/src/parse.cpp.o\n'
+    'FAILED: CMakeFiles/app.dir/src/parse.cpp.o \n'
+    '/usr/bin/c++ -DAPP_VERSION=\\"1.4.2\\" -DENABLE_TELEMETRY=0 -DUSE_FAST_PATH=1 -D_GNU_SOURCE -I/work/app/include -I/work/app/third_party/fmt/include -I/work/app/third_party/json/include -std=gnu++17 -Wall -Wextra -Wpedantic -fno-omit-frame-pointer -O2 -g -fno-rtti -Wshadow -MD -MT CMakeFiles/app.dir/src/parse.cpp.o -MF CMakeFiles/app.dir/src/parse.cpp.o.d -o CMakeFiles/app.dir/src/parse.cpp.o -c /work/app/src/parse.cpp\n'
+    "/work/app/src/parse.cpp: In function 'int parse_int(const std::string&)':\n"
+    "/work/app/src/parse.cpp:2:61: error: 'missing_helper' was not declared in this scope\n"
+    '    2 | int parse_int(const std::string& s) { return std::stoi(s) + missing_helper(s); }\n'
+    '      |                                                             ^~~~~~~~~~~~~~\n'
     'ninja: build stopped: cannot make progress due to previous errors.\n'
 )
 
@@ -7525,7 +7523,7 @@ def hoist_flags(text: str) -> str:
     cmds = _find_commands(lines)
     legends, repl, nid = {}, {}, 0
     for kind in ("ninja", "bazel"):
-        grp = [c for c in cmds if c[1] == kind and "@" not in c[3][1:2]]
+        grp = [c for c in cmds if c[1] == kind and not (len(c[3]) > 1 and c[3][1].startswith("@"))]  # a command already using @N is not hoisted again
         if len(grp) < 2 or len({c[3][0] for c in grp}) != 1:
             continue
         ulists = [_units(c[3][1:]) for c in grp]

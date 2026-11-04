@@ -79,6 +79,13 @@ def tokens(text: str) -> int:
     return len(_PIECE.findall(text))
 
 
+def exact_tokens() -> bool:
+    """True when token counts are real o200k counts (tiktoken installed and its vocabulary loadable). Assertions about the
+    MAGNITUDE of a token saving belong behind this; structure and fidelity assertions must hold with the proxy as well."""
+    _load_o200k()
+    return TOKENIZER == "o200k"
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # mutation fuzzing
 

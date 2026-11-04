@@ -27,6 +27,12 @@ from dataclasses import dataclass, field
 from harness import Fixture, case, tokens
 
 
+def _exact_tokens() -> bool:
+    import harness
+
+    return harness.exact_tokens()
+
+
 def _lcg(seed: int):
     """Tiny deterministic generator so fixtures are stable without importing random."""
     s = seed
@@ -1441,7 +1447,8 @@ def sim_locale1228() -> dict:
         for tool in ("git", "gcc"):
             saved.setdefault(lang, 0)
             saved[lang] += tokens(_CAT[tool][lang]) - tokens(_CAT[tool]["en"])
-        assert saved[lang] > 0, f"English must cost fewer tokens than {lang}"
+        if _exact_tokens():  # non-Latin text is one proxy piece per character, so the comparison is only meaningful on o200k
+            assert saved[lang] > 0, f"English must cost fewer tokens than {lang}"
     # LANGUAGE alone would also work, but only the pair is safe: with LC_ALL=C.UTF-8 alone a system LANGUAGE still wins (it is ignored only for exactly 'C')
     assert messages_lang({"LANG": "de_DE.UTF-8", "LC_ALL": "C.UTF-8", "LANGUAGE": "de"}) == "de"
     assert messages_lang({"LANG": "de_DE.UTF-8", "LC_ALL": "C.UTF-8", "LANGUAGE": "en"}) == "en"
