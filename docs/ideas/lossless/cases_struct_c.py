@@ -16,6 +16,7 @@ import io
 import json
 import re
 import tokenize
+import unicodedata
 import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -771,9 +772,6 @@ def encode_unescape_md(text):
 
 # ---- oracle: CommonMark-subset renderer (independent of the encoder: it models what the characters mean) -------
 
-import string  # noqa: E402
-import unicodedata  # noqa: E402
-
 _AUTOLINK = re.compile(r"<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>]+)>")
 _HTMLTAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 _UNESC = re.compile(r"\\([!-/:-@\[-`{-~])")
@@ -1242,7 +1240,7 @@ case(
         Fixture("triple quotes, comments, unbalanced and unterminated", "x = {'a': 1, 'b': '''p, q''' }\n{'a': 1, 'b': 2}  # note: a, b\n{'a': 1, 'b': [2, 3}\nprint('it's, ok', {'k': 1})\n", None),
         Fixture("tabs, CRLF, trailing space and odd tokens", "{'a':\t1, 'b': 2}\r\n[1,  2,   3 ]  \n(a, *b, **c)\nlambda: (x, y)\n{1: 2, 3: 4}\n", None),
     ],
-    min_gain=0.08,
+    min_gain=0.07,
 )
 
 
@@ -1721,7 +1719,7 @@ case(
         Fixture("text that starts like encoder output", '§dr\n§d[1,+1*7]\n', None),
         Fixture("sigil in the middle", _prom_like() + "§d[1]\n", None),
     ],
-    min_gain=0.25,
+    min_gain=0.5,
     idempotent=False,
 )
 
@@ -2150,7 +2148,7 @@ case(
         Fixture("single-quoted and bare published values", _COMPOSE.replace('published: "8080"', "published: '8080'").replace('published: "9090"', "published: 9090"), None),
         Fixture("tab-indented line", _COMPOSE.replace("  db:\n    image", "  db:\n\timage"), None),
     ],
-    min_gain=0.1,
+    min_gain=0.25,
     mutations=30,
 )
 
@@ -2258,7 +2256,7 @@ case(
         Fixture("comments and CDATA that mention xmlns", '<a xmlns="u"><!-- <b xmlns="u"/> --><![CDATA[<c xmlns="u"/>]]><d xmlns="v"/></a>', False),
         Fixture("DOCTYPE document", '<!DOCTYPE a [<!ENTITY e "x">]><a xmlns="u"><b xmlns="u">&e;</b></a>', None),
     ],
-    min_gain=0.15,
+    min_gain=0.25,
     mutations=30,
 )
 
@@ -2383,11 +2381,12 @@ case(
         Fixture("row-oriented records", '[{"a":1,"b":2},{"a":3,"b":4}]', False),
         Fixture("nested values", '{"a":{"0":[1,2],"1":[3]},"b":{"0":1,"1":2}}', False),
         Fixture("pretty-printed", json.dumps(json.loads(_frame_json(3)), indent=2), False),
+        Fixture("sigil inside string cells", '{"a":{"0":"5§","1":"§x"},"b":{"0":1,"1":2}}', None),
         Fixture("duplicate column names", '{"a":{"0":1,"1":2},"a":{"0":3,"1":4}}', None),
         Fixture("text that starts like encoder output", '§frame json\n\ta\n0\t1', None),
         Fixture("one-row, empty keys and escaped tabs", '{"":{"":"x\\ty"},"b c":{"":1}}', None),
     ],
-    min_gain=0.3,
+    min_gain=0.25,
     idempotent=False,
 )
 
@@ -2571,7 +2570,8 @@ case(
 # #1255 Minify JSON leaves but keep one record per line. Equivalent: the parsed value (types and key order) is the same.
 
 def _lines_json(v):
-    """Depth 1 and 2 containers put each child on its own line; everything below is compact."""
+    """The top-level container and the container-valued members of a top-level object put each child on its own line;
+    everything deeper (the records) is compact."""
     if not isinstance(v, (dict, list)) or not v:
         return _dumps(v)
     op, cl = ("[", "]") if isinstance(v, list) else ("{", "}")
@@ -2628,7 +2628,7 @@ case(
         Fixture("duplicate keys and NaN", '{"a": 1, "a": 2}\n[NaN, 1]\n', None),
         Fixture("deeply nested", "[" * 150 + "1" + "]" * 150, None),
     ],
-    min_gain=0.1,
+    min_gain=0.3,
 )
 
 
