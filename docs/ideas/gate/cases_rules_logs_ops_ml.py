@@ -10,8 +10,16 @@ from the encoder wherever that is practical) and says what is lost in `loses=`. 
   the probes split on ' ' only, so both sides agree on what a field is.
 * Probes read the *virtual* log: a fold marker "[... N lines folded ...]" stands for N lines, so positions ("how many
   lines before the first error") and totals are comparable between the original and the folded text.
-* Fixtures come from seeded generators (deterministic) in the shape of the real tool output; a few are captured from
-  tools installed here (vmstat) and the rest are reconstructed from memory of the tool's format and say so.
+* Fixtures come from seeded generators (deterministic) in the shape of the real tool output; one is captured from a tool
+  installed here (vmstat) and the rest are reconstructed from memory of the tool's format (each generator says so).
+* Two fixes the fuzzer forced on several rules: a line that carries two records (two writers, or a merged line) is never
+  folded away unless the whole line is the boilerplate, and a rule that drops a line must not leave a configuration its own
+  second pass would drop again (idempotence), e.g. a run of repeated Django reason lines.
+* #1163 (user-agent legend plus dash-field removal) turned out to be lossless and is a roundtrip case, not a rule.
+* Narrower than the idea text: #417 handles torchrun and Open MPI prefixes, not Ray's '(pid=..., ip=...)'; #124 has no Rails
+  db:migrate folding; #979 and #1330 cover vulners/ssl-enum-ciphers/ssl-cert and pg_settings/SHOW VARIABLES only (no redis);
+  #1328 covers W&B and Airflow, not Comet, Neptune or ClearML; #978 folds sshd failures and cron triples, not sudo or ssh PAM
+  open/close pairs; #1163 handles combined-format lines, not IIS or ALB.
 """
 from __future__ import annotations
 
@@ -221,7 +229,7 @@ def probes_425(text: str) -> dict:
     }
 
 
-def _py_log(seed: int, n: int, events: dict[int, str], start_ms: int = 1500) -> str:
+def _py_log(seed: int, n: int, events: dict[int, str], start_ms: int = 1500) -> str:  # reconstructed from memory of the tool's output format
     """A Python-logging service log: DEBUG/INFO traffic with `events` (index -> full line) spliced in."""
     rng = random.Random(seed)
     out, ms = [], start_ms
@@ -251,7 +259,7 @@ _E425_MID = {0: "@ WARN worker.boot: config file /etc/app.toml not found, using 
              300: "@ WARN worker.pool: pool at 8/8 connections, requests are queueing"}
 
 
-def _glog_log() -> str:
+def _glog_log() -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(425)
     out = []
     for i in range(70):
@@ -291,8 +299,8 @@ case(
 #
 # Inside a run of consecutive prefixed lines, lines with the same body from different ranks join one group
 # '[ranks 0-3] body'; a rank's own order is never changed (a line may only join a group that comes after that rank's
-# previous line), and a group with a single rank is the original line, prefix included, so rank-specific lines stay
-# attributed. Unprefixed lines end a run and are never touched.
+# previous line, nor a group older than the latest alarm line), and a group with a single rank is the original line, prefix
+# included, so rank-specific lines stay attributed. Unprefixed lines end a run and are never touched.
 
 _TORCH = re.compile(r"^\[rank(0|[1-9]\d*)\]:(.*)$", A)
 _MPI = re.compile(r"^\[(0|[1-9]\d*),(0|[1-9]\d*)\]<(stdout|stderr)>:(.*)$", A)
@@ -321,11 +329,15 @@ def _rank_list(ranks: list[int]) -> str:
     return ",".join(parts)
 
 
+_ALARM417 = ("nan", "inf", "error", "exception", "traceback", "out of memory", "oom", "failed", "fatal", "warn")
+
+
 def _fold_ranks(items) -> list[str]:
     groups: list[list] = []  # [tag, body, ranks, raw line]
     last: dict = {}
+    seal = 0  # no line may join a group older than the latest alarm group: the order of an alarm against every other line is kept
     for tag, rank, body, raw in items:
-        for gi in range(last.get((tag, rank), -1) + 1, len(groups)):
+        for gi in range(max(last.get((tag, rank), -1) + 1, seal), len(groups)):
             g = groups[gi]
             if g[0] == tag and g[1] == body and rank not in g[2]:
                 g[2].append(rank)
@@ -333,7 +345,9 @@ def _fold_ranks(items) -> list[str]:
                 break
         else:
             groups.append([tag, body, [rank], raw])
-            last[(tag, rank)] = len(groups) - 1
+            last[(tag, rank)] = gi = len(groups) - 1
+        if any(k in body.lower() for k in _ALARM417):
+            seal = max(seal, last[(tag, rank)])
     out = []
     for tag, body, ranks, raw in groups:
         if len(ranks) == 1:
@@ -395,26 +409,35 @@ def probes_417(text: str) -> dict:
     per_rank: dict = defaultdict(list)
     plain: list[tuple[int, str]] = []
     n_prefixed = 0
+    seen: list = []
+    before_alarm: dict = {}  # alarm body -> the rank lines said before its first occurrence, as a multiset
     for l in lines:
+        said = []
         m = _M417.match(l)
         if m and all(isdigits(x) for p in m.group(1).split(",") for x in p.split("-")):
-            for r in _expand(m.group(1)):
-                per_rank[(m.group(2) or "", r)].append(m.group(3))
-                n_prefixed += 1
-            continue
-        s = _src_probe(l)
-        if s:
-            per_rank[(s[0], s[1])].append(s[2])
-            n_prefixed += 1
+            said = [((m.group(2) or ""), r, m.group(3)) for r in _expand(m.group(1))]
+        else:
+            s = _src_probe(l)
+            if s:
+                said = [s]
+        if said:
+            body = said[0][2]
+            if body not in before_alarm and any(k in body.lower() for k in _ALARM417):
+                before_alarm[body] = sorted(seen)
+            for tag, r, b in said:
+                per_rank[(tag, r)].append(b)
+            seen += said
+            n_prefixed += len(said)
         else:
             plain.append((n_prefixed, l))
     return {
         "lines said by each rank, in that rank's order": sorted((k, v) for k, v in per_rank.items()),
         "lines without a rank prefix (count of rank lines before it, text)": plain,
+        "for each alarm line (nan, error, oom, warning...): the rank lines said before its first occurrence": sorted(before_alarm.items()),
     }
 
 
-def _torch_run(seed: int, ranks: int, events: list, tag=lambda r: f"[rank{r}]:") -> str:
+def _torch_run(seed: int, ranks: int, events: list, tag=lambda r: f"[rank{r}]:") -> str:  # reconstructed from memory of the tool's output format
     """events: list of (body, only_rank) or (body, None) for all ranks; ranks shuffle within an event, like real interleaving."""
     rng = random.Random(seed)
     out = []
@@ -442,17 +465,18 @@ _EV_ALL = [
 ]
 
 
-def _ddp_nan() -> str:
+def _ddp_nan() -> str:  # reconstructed from memory of the tool's output format
     ev = list(_EV_ALL)
-    ev += [("step 20 loss=2.1177", 0), ("step 30 loss=1.9024", 0)]
+    ev += [("step 20 loss=2.1177", 0), ("step 30 loss=1.9024", 0), ("allreduce bucket 3 done in 0.31s", 0)]
     ev += [("Epoch 0: step 40 grad_norm=nan (non-finite gradient, skipping update)", 2)]
+    ev += [("allreduce bucket 3 done in 0.31s", 1), ("allreduce bucket 3 done in 0.31s", 3)]  # the same line, said by other ranks after the NaN
     ev += [("step 50 loss=nan", 2), ("step 50 loss=1.8312", 0)]
     ev += [("checkpoint saved to out/ckpt-50.pt", 0), (_UW, None), ("Epoch 1: starting, lr=3e-4, batch=32 per rank", None), (lambda r: f"step 60 loss={1.8 + 0.0002 * r:.4f}", None)]
     ev += [("Training finished: 2 epochs, best loss 1.8312", 0)]
     return _torch_run(417, 4, ev)
 
 
-def _ddp_oom() -> str:
+def _ddp_oom() -> str:  # reconstructed from memory of the tool's output format
     ev = list(_EV_ALL)
     ev += [(lambda r: f"step 20 loss={2.1 + 0.0004 * r:.4f}", None)]
     tb = ["Traceback (most recent call last):", '  File "/work/train.py", line 91, in <module>', "    loss.backward()"]
@@ -462,7 +486,7 @@ def _ddp_oom() -> str:
     return _torch_run(419, 4, ev)
 
 
-def _mpi_run() -> str:
+def _mpi_run() -> str:  # reconstructed from memory of the tool's output format
     tag = lambda r: f"[1,{r}]<stdout>:"  # noqa: E731
     ev = [("rank 5: CUDA error: an illegal memory access was encountered", 5)]
     ev += [("Initializing MPI world of 8 ranks", None), ("Warning: UCX transport not available, falling back to TCP", None), (lambda r: f"rank {r} local batch 16 shard {r}", None)]
@@ -473,8 +497,8 @@ def _mpi_run() -> str:
 
 case(
     417,
-    claim="Within a run of rank-prefixed lines (torchrun '[rankN]:', Open MPI '[job,rank]<stdout>:'), identical bodies from different ranks join one '[ranks 0-3] body' line; each rank's own line order, every rank-specific line (still carrying its own prefix) and every unprefixed line are unchanged.",
-    loses="the interleaving order of different ranks' lines inside a run, and which of several equal lines a rank printed first relative to other ranks",
+    claim="Within a run of rank-prefixed lines (torchrun '[rankN]:', Open MPI '[job,rank]<stdout>:'), identical bodies from different ranks join one '[ranks 0-3] body' line; each rank's own line order, every rank-specific line (still carrying its own prefix), every unprefixed line and the order of every line against the first nan/error/OOM/warning line are unchanged.",
+    loses="the interleaving order of different ranks' lines inside a run (except against alarm lines: nan, inf, error, exception, traceback, out of memory, failed, fatal, warn), and which of several equal lines a rank printed first relative to other ranks",
     encode=fold_ranks,
     probes=probes_417,
     fixtures=lambda: [
@@ -596,7 +620,7 @@ def probes_411(text: str) -> dict:
     }
 
 
-def _train_log(nan_at: int | None = None, steps: int = 400, seed: int = 411, overfit: bool = False) -> str:
+def _train_log(nan_at: int | None = None, steps: int = 400, seed: int = 411, overfit: bool = False) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(seed)
     out = ["Training started: model=gpt-mini lr=3e-4 batch=32 steps=%d" % steps]
     for s in range(1, steps + 1):
@@ -782,7 +806,7 @@ def probes_413(text: str) -> dict:
     }
 
 
-def _spark_log(fail_task: int | None = None, per_stage: int = 64, seed: int = 413) -> str:
+def _spark_log(fail_task: int | None = None, per_stage: int = 64, seed: int = 413) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(seed)
     out = []
     t = [0]
@@ -982,7 +1006,7 @@ def probes_1155(text: str) -> dict:
     }
 
 
-def _boot_log(contexts: int, with_error: bool = False, two_pids: bool = False) -> str:
+def _boot_log(contexts: int, with_error: bool = False, two_pids: bool = False) -> str:  # reconstructed from memory of the tool's output format
     out = []
     banner = "\n".join(_BANNER6) + "\n :: Spring Boot ::                (v3.2.3)"
     ms = 0
@@ -1158,7 +1182,7 @@ def probes_885(text: str) -> dict:
     }
 
 
-def _dbt_run(ok: bool, debug: bool = False) -> str:
+def _dbt_run(ok: bool, debug: bool = False) -> str:  # reconstructed from memory of the tool's output format
     nodes = []
     for i, n in enumerate(["raw_customers", "raw_orders", "raw_payments"], 1):
         nodes.append((i, "seed file", f"main.{n}", "loaded seed file", f"main.{n}", "INSERT 100", 0.07 + i / 100))
@@ -1346,7 +1370,7 @@ def probes_982(text: str) -> dict:
     }
 
 
-def _ffuf_run(seed: int, n: int, real: dict, wild=("200", 4242, 12, 3), soft404=None) -> str:
+def _ffuf_run(seed: int, n: int, real: dict, wild=("200", 4242, 12, 3), soft404=None) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(seed)
     head = ["        /'___\\  /'___\\           /'___\\", "       /\\ \\__/ /\\ \\__/  __  __  /\\ \\__/", "________________________________________________", "",
             " :: Method           : GET", " :: URL              : http://target.local/FUZZ", " :: Matcher          : Response status: 200-299,301,302,307,401,403,405,500", "________________________________________________", ""]
@@ -1363,7 +1387,7 @@ def _ffuf_run(seed: int, n: int, real: dict, wild=("200", 4242, 12, 3), soft404=
     return "\n".join(out) + "\n"
 
 
-def _wfuzz_run(seed: int, n: int, real: dict) -> str:
+def _wfuzz_run(seed: int, n: int, real: dict) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(seed)
     out = ["********************************************************", "* Wfuzz 3.1.0 - The Web Fuzzer                         *", "********************************************************", "",
            "Target: http://target.local/FUZZ", f"Total requests: {n}", "", "=====================================================================",
@@ -1903,7 +1927,7 @@ def probes_809(text: str) -> dict:
     }
 
 
-def _sql_log(n: int = 70) -> str:
+def _sql_log(n: int = 70) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(809)
     out = ["2024-03-05 10:15:00.100 UTC [880] LOG:  database system is ready to accept connections"]
     ms = 100
@@ -2183,7 +2207,7 @@ def probes_978(text: str) -> dict:
     }
 
 
-def _auth_log() -> str:
+def _auth_log() -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(978)
     out = []
     t = [10 * 3600 + 15 * 60]
@@ -2459,7 +2483,7 @@ def _psql_aligned(cols, rows) -> str:
     return "\n".join(out) + "\n"
 
 
-def _pg_table(rows=_PG_ROWS, cols=_PG_COLS) -> str:
+def _pg_table(rows=_PG_ROWS, cols=_PG_COLS) -> str:  # reconstructed from memory of the tool's output format
     full = []
     for name, setting, unit, cat, desc, ctx, vt, src, boot in rows:
         sf = "/etc/postgresql/16/main/postgresql.conf" if src == "configuration file" else ""
@@ -2469,7 +2493,7 @@ def _pg_table(rows=_PG_ROWS, cols=_PG_COLS) -> str:
     return _psql_aligned(cols, [[r[k] for k in keep] for r in full])
 
 
-def _mysql_vars() -> str:
+def _mysql_vars() -> str:  # reconstructed from memory of the tool's output format
     rows = [(k, v) for k, v in _MYSQL_DEFAULTS.items()]
     over = {"innodb_buffer_pool_size": "4294967296", "max_connections": "500", "innodb_flush_log_at_trx_commit": "2", "slow_query_log": "ON", "long_query_time": "0.500000"}
     rows = [(k, over.get(k, v)) for k, v in rows]
@@ -2701,7 +2725,7 @@ def probes_415(text: str) -> dict:
     }
 
 
-def _pg_dump(with_error: bool = False) -> str:
+def _pg_dump(with_error: bool = False) -> str:  # reconstructed from memory of the tool's output format
     out = ["--", "-- PostgreSQL database dump", "--", "", "-- Dumped from database version 16.2 (Ubuntu 16.2-1.pgdg22.04+1)", "-- Dumped by pg_dump version 16.2 (Ubuntu 16.2-1.pgdg22.04+1)", "",
            "SET statement_timeout = 0;", "SET lock_timeout = 0;", "SET idle_in_transaction_session_timeout = 0;", "SET client_encoding = 'UTF8';", "SET standard_conforming_strings = on;",
            "SELECT pg_catalog.set_config('search_path', '', false);", "SET check_function_bodies = false;", "SET xmloption = content;", "SET client_min_messages = warning;", "SET row_security = off;", "",
@@ -2725,7 +2749,7 @@ def _pg_dump(with_error: bool = False) -> str:
     return "\n".join(out) + "\n"
 
 
-def _mysqldump() -> str:
+def _mysqldump() -> str:  # reconstructed from memory of the tool's output format
     out = ["-- MySQL dump 10.13  Distrib 8.0.36, for Linux (x86_64)", "--", "-- Host: localhost    Database: shop", "-- ------------------------------------------------------", "-- Server version\t8.0.36", "",
            "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;", "/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;", "/*!50503 SET NAMES utf8mb4 */;", "/*!40103 SET TIME_ZONE='+00:00' */;", ""]
     opts = "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
@@ -2831,7 +2855,7 @@ _UAS = ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) 
         "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "curl/8.4.0"]
 
 
-def _access_log(n: int = 60) -> str:
+def _access_log(n: int = 60) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(1163)
     out = []
     for i in range(n):
@@ -2995,7 +3019,7 @@ def _par_droppable(l: str) -> bool:
     return False
 
 
-def _cv_log(folds: int = 5, cand: int = 24, parallel: bool = False, fail: tuple = ()) -> str:
+def _cv_log(folds: int = 5, cand: int = 24, parallel: bool = False, fail: tuple = ()) -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(1327)
     grid = [(c, g, k) for k in ("rbf", "linear", "sigmoid") for c in (0.1, 1, 10, 100) for g in (0.01, 0.1)]
     out = [f"Fitting {folds} folds for each of {cand} candidates, totalling {folds * cand} fits"]
@@ -3206,7 +3230,7 @@ def probes_1328(text: str) -> dict:
     }
 
 
-def _wandb_log() -> str:
+def _wandb_log() -> str:  # reconstructed from memory of the tool's output format
     return "\n".join([
         "wandb: Currently logged in as: alice (acme-ml). Use `wandb login --relogin` to force relogin", "wandb: Tracking run with wandb version 0.16.3",
         "wandb: Run data is saved locally in /work/wandb/run-20240305_101501-abc123", "wandb: Run `wandb offline` to turn off syncing.", "wandb: Syncing run fancy-sunset-12",
@@ -3217,7 +3241,7 @@ def _wandb_log() -> str:
         "wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)", "wandb: Find logs at: ./wandb/run-20240305_101501-abc123/logs", "final accuracy 0.86"]) + "\n"
 
 
-def _airflow_log(fail: bool) -> str:
+def _airflow_log(fail: bool) -> str:  # reconstructed from memory of the tool's output format
     ts = lambda k: f"[2024-03-05, 10:15:{k:02d} UTC] "  # noqa: E731
     run = "manual__2024-03-05T10:15:00+00:00"
     out = [ts(1) + "{taskinstance.py:1957} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: etl.load " + run + " [queued]>",
@@ -3471,7 +3495,7 @@ def probes_419(text: str) -> dict:
     }
 
 
-def _prom_text() -> str:
+def _prom_text() -> str:  # reconstructed from memory of the tool's output format
     rng = random.Random(419)
     inst = 'job="api",instance="10.0.0.5:9100"'
     out = ["# HELP go_goroutines Number of goroutines that currently exist.", "# TYPE go_goroutines gauge", f"go_goroutines{{{inst}}} 41"]
@@ -3610,7 +3634,7 @@ def probes_416(text: str) -> dict:
     }
 
 
-def _tf_run() -> str:
+def _tf_run() -> str:  # reconstructed from memory of the tool's output format
     return "\n".join([
         "2024-03-05 10:15:01.101010: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.",
         "2024-03-05 10:15:01.402020: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered",
@@ -3629,7 +3653,7 @@ def _tf_run() -> str:
         "epoch 3 loss 0.388 acc 0.83", "final eval accuracy 0.83"]) + "\n"
 
 
-def _lightning_sklearn_run(crash: bool) -> str:
+def _lightning_sklearn_run(crash: bool) -> str:  # reconstructed from memory of the tool's output format
     out = ["GPU available: True (cuda), used: True", "TPU available: False, using: 0 TPU cores", "HPU available: False, using: 0 HPUs",
            "LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]", "💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Cloud.",
            "[train] warning (see /work/NOTES): GPU available: False for the aux model, falling back to cpu for it", "Epoch 0: 100%|██████████| 12/12 [00:01<00:00, 9.1it/s, loss=0.62]", "Epoch 1: 100%|██████████| 12/12 [00:01<00:00, 9.4it/s, loss=0.41]",
@@ -3788,7 +3812,7 @@ def probes_1069(text: str) -> dict:
     }
 
 
-def _turbo_run(mode: str) -> str:
+def _turbo_run(mode: str) -> str:  # reconstructed from memory of the tool's output format
     pk = ["@acme/config", "@acme/utils", "@acme/ui", "@acme/api", "@acme/web", "@acme/docs"]
     out = ["• Packages in scope: " + ", ".join(pk), "• Running build in 6 packages", "• Remote caching disabled"]
     if mode == "fail":
@@ -3983,7 +4007,7 @@ def probes_979(text: str) -> dict:
     }
 
 
-def _nmap_run() -> str:
+def _nmap_run() -> str:  # reconstructed from memory of the tool's output format
     cves = [("CVE-2023-38408", "9.8", "cve", True), ("CVE-2023-51385", "6.5", "cve", False), ("CVE-2018-15473", "5.3", "cve", False), ("EDB-ID:45233", "4.6", "exploitdb", True),
             ("CVE-2016-10708", "7.5", "cve", False), ("CVE-2018-20685", "5.3", "cve", False), ("CVE-2019-6110", "4.0", "cve", False), ("CVE-2019-6109", "4.0", "cve", False),
             ("CVE-2018-15919", "5.3", "cve", False), ("PACKETSTORM:173661", "9.8", "packetstorm", True), ("CVE-2020-14145", "5.9", "cve", False), ("CVE-2016-20012", "5.3", "cve", False)]
@@ -4240,7 +4264,7 @@ def probes_124(text: str) -> dict:
     }
 
 
-def _rails_log() -> str:
+def _rails_log() -> str:  # reconstructed from memory of the tool's output format
     def req(method, path, status, ms, ctrl=None, sql=(), extra=(), reason="OK", ar=None):
         out = [f'Started {method} "{path}" for 127.0.0.1 at 2024-03-05 10:15:01 +0000']
         if ctrl:
@@ -4266,7 +4290,7 @@ def _rails_log() -> str:
     return "\n".join(out) + "\n"
 
 
-def _django_log(fail: bool) -> str:
+def _django_log(fail: bool) -> str:  # reconstructed from memory of the tool's output format
     names = ["contenttypes.0001_initial", "contenttypes.0002_remove_content_type_name", "auth.0001_initial", "auth.0002_alter_permission_name_max_length", "auth.0003_alter_user_email_max_length",
              "auth.0004_alter_user_username_opts", "auth.0005_alter_user_last_login_null", "auth.0006_require_contenttypes_0002", "auth.0007_alter_validators_add_error_messages",
              "auth.0008_alter_user_username_max_length", "admin.0001_initial", "admin.0002_logentry_remove_auto_add", "sessions.0001_initial", "shop.0001_initial", "shop.0002_cart"]
@@ -4281,7 +4305,7 @@ def _django_log(fail: bool) -> str:
     return "\n".join(out) + "\n"
 
 
-def _alembic_log(fail: bool) -> str:
+def _alembic_log(fail: bool) -> str:  # reconstructed from memory of the tool's output format
     out = ["INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.", "INFO  [alembic.runtime.migration] Will assume transactional DDL.", "INFO  [alembic.runtime.migration] Running upgrade  -> a1b2c3d4, create users"]
     if fail:
         out += ["INFO  [alembic.runtime.migration] Running upgrade a1b2c3d4 -> d4e5f6a7, add email index", "sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DuplicateTable) relation \"ix_users_email\" already exists"]
@@ -4479,7 +4503,7 @@ def probes_125(text: str) -> dict:
     }
 
 
-def _webpack_out(errors: bool) -> str:
+def _webpack_out(errors: bool) -> str:  # reconstructed from memory of the tool's output format
     out = []
     for name, size, unit, flags in (("main.js", "3.1", "MiB", " [emitted] [minimized] (name: main) 1 related asset"), ("vendors.js", "812", "KiB", " [emitted] [minimized] (name: vendors)"),
                                      ("styles.css", "112", "KiB", " [emitted] (name: main)"), ("chunk-admin.js", "96.5", "KiB", " [emitted]"), ("chunk-charts.js", "64", "KiB", " [emitted]"),
@@ -4499,7 +4523,7 @@ def _webpack_out(errors: bool) -> str:
     return "\n".join(out) + "\n"
 
 
-def _next_out() -> str:
+def _next_out() -> str:  # reconstructed from memory of the tool's output format
     out = ["   ▲ Next.js 14.1.0", "", "   Creating an optimized production build ...", " ✓ Compiled successfully", " ✓ Linting and checking validity of types", " ✓ Collecting page data", " ✓ Generating static pages (8/8)", "",
            "Route (app)                              Size     First Load JS", "┌ ○ /                                    5.2 kB          92 kB", "├ ○ /_not-found                          871 B           88 kB",
            "├ λ /api/orders                          0 B                0 B", "├ ○ /dashboard                           12.4 kB        104 kB", "├ λ /orders/[id]                         3.1 kB          95 kB", "└ ○ /settings                            2.2 kB          93 kB",

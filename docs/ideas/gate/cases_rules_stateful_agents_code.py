@@ -2310,6 +2310,11 @@ def sim_579() -> dict:
         _write(os.path.join(d, "home", ".bash_profile"), "export MARK=from_profile\n")
         base = {"PATH": "/usr/local/bin:/usr/bin:/bin", "CTXPRUNE_PY": sys.executable, "CTXPRUNE_FILTER": os.path.join(d, "filter.py"), "HOME": os.path.join(d, "home")}
         on = {**base, "BASH_ENV": os.path.join(d, "hook.sh")}
+        # canary: does THIS bash read BASH_ENV right now? (it does not in privileged mode, POSIXLY_CORRECT, or behind a launcher that scrubs the
+        # environment; on this box it was observed to stop honouring it for several minutes, see the report). If it does not, say so instead of failing on sizes.
+        _write(os.path.join(d, "canary.sh"), f"echo ran > {shlex.quote(os.path.join(d, 'canary.out'))}\n")
+        _run(["bash", "-c", "true"], cwd=d, env={**base, "BASH_ENV": os.path.join(d, "canary.sh")})
+        assert os.path.exists(os.path.join(d, "canary.out")), "bash did not read BASH_ENV at all just now (privileged mode, POSIXLY_CORRECT, or a sanitising launcher): the mechanism is unavailable here, nothing below can be measured"
         cmd = 'echo build start; for i in $(seq 1 700); do echo "waiting for lock on /var/lib/dpkg/lock-frontend"; done; echo build end; echo "warn on stderr" >&2; exit 7'
         r0 = _run(["bash", "-c", cmd], cwd=d, env=base)
         r1 = _run(["bash", "-c", cmd], cwd=d, env=on)

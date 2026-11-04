@@ -6178,3 +6178,473 @@ case(
     ],
     min_gain=0.5,
 )
+
+# ===============================================================================================================
+# #1329 Fold per-row-group column stats of a Parquet dump (the repr of pyarrow's FileMetaData, RowGroupMetaData and
+# ColumnChunkMetaData printed in a loop, shape captured from pyarrow 26; the object addresses are made up). Row groups sharing the
+# modal layout (physical type, codec, encodings, dictionary flag per column) become one table with overall min/max, null and
+# value totals; row groups with another layout are listed in full. orc-tool meta and parquet-tools meta are not covered.
+
+_PQ_HEAD = re.compile(r"^<pyarrow\._parquet\.(FileMetaData|RowGroupMetaData|ColumnChunkMetaData) object at 0x[0-9a-f]+>$")
+_PQ_LINE = re.compile(r"^( +)([A-Za-z_][A-Za-z_ ()]*): ?(.*)$")
+_PQ_FOLD_HEAD = re.compile(r"^parquet: created_by (.*); (\d+) columns; (\d+) rows; (\d+) row groups; format (\S+)$")
+_PQ_COL = re.compile(r"^(?:  )?column (\S+) (\S+) (\S+) (\S+) dict=(True|False) min=(.+?) max=(.+?) nulls=(\d+) values=(\d+) compressed=(\d+) uncompressed=(\d+)(?: in (\d+) row groups)?$")
+_PQ_ROWS = re.compile(r"^rows per row group: (.+)$")
+_PQ_ODD = re.compile(r"^row group (\d+) \(rows (\d+), bytes (\d+)\) differs from the other row groups:$")
+
+
+def _pq_parse(text: str):
+    """-> (file dict, [(rg dict, [column dicts])]) or None when the dump is not exactly the expected block structure."""
+    lines = text.rstrip("\n").split("\n")
+    blocks: list[tuple[str, dict]] = []
+    for l in lines:
+        if (m := _PQ_HEAD.match(l)):
+            blocks.append((m.group(1), {}))
+            stats = False
+        elif not blocks:
+            return None
+        elif (m := _PQ_LINE.match(l)):
+            ind, k, v = len(m.group(1)), m.group(2), m.group(3)
+            if ind == 2:
+                stats = k == "statistics"
+                if k not in ("statistics", "geo_statistics"):
+                    blocks[-1][1][k] = v
+            elif ind == 6 and stats:
+                blocks[-1][1]["stat." + k] = v
+            elif ind in (4, 6):
+                pass
+            else:
+                return None
+        elif re.match(r"^ +(None|<pyarrow\._parquet\.Statistics object at 0x[0-9a-f]+>)$", l):
+            pass
+        else:
+            return None
+    if not blocks or blocks[0][0] != "FileMetaData":
+        return None
+    f = blocks[0][1]
+    try:
+        n_rg, n_col = int(f["num_row_groups"]), int(f["num_columns"])
+        rgs, i = [], 1
+        for _ in range(n_rg):
+            if i >= len(blocks) or blocks[i][0] != "RowGroupMetaData" or int(blocks[i][1]["num_columns"]) != n_col:
+                return None
+            cols = blocks[i + 1: i + 1 + n_col]
+            if len(cols) != n_col or any(b[0] != "ColumnChunkMetaData" for b in cols):
+                return None
+            for _, c in cols:
+                for k in ("path_in_schema", "physical_type", "compression", "encodings", "has_dictionary_page", "num_values", "total_compressed_size", "total_uncompressed_size", "is_stats_set"):
+                    c[k]
+                c["encodings"] = tuple(ast.literal_eval(c["encodings"]))
+                if c["is_stats_set"] == "True":
+                    for k in ("stat.has_min_max", "stat.min", "stat.max", "stat.null_count"):
+                        c[k]
+                    int(c["stat.null_count"])
+                int(c["num_values"]), int(c["total_compressed_size"]), int(c["total_uncompressed_size"])
+            rgs.append((blocks[i][1], [c for _, c in cols]))
+            i += 1 + n_col
+        if i != len(blocks) or sum(int(r["num_rows"]) for r, _ in rgs) != int(f["num_rows"]):
+            return None
+        for k in ("created_by", "num_rows", "format_version"):
+            f[k]
+    except (KeyError, ValueError, SyntaxError, IndexError):
+        return None
+    return f, rgs
+
+
+def _minmax_key(vals: list[str]):
+    try:
+        nums = [float(v) for v in vals]
+        if all(math.isfinite(x) for x in nums):
+            return lambda s: float(s)
+    except ValueError:
+        pass
+    return lambda s: s
+
+
+def _layout(cols) -> tuple:
+    return tuple((c["path_in_schema"], c["physical_type"], c["compression"], c["encodings"], c["has_dictionary_page"]) for c in cols)
+
+
+def _col_summary(chunks: list[dict]) -> tuple:
+    """(min, max, nulls, values, compressed, uncompressed) over column chunks; min/max over chunks that have them, as the original strings."""
+    mins = [c["stat.min"] for c in chunks if c["is_stats_set"] == "True" and c["stat.has_min_max"] == "True"]
+    maxs = [c["stat.max"] for c in chunks if c["is_stats_set"] == "True" and c["stat.has_min_max"] == "True"]
+    key = _minmax_key(mins + maxs)
+    return (min(mins, key=key) if mins else "None", max(maxs, key=key) if maxs else "None",
+            sum(int(c.get("stat.null_count", 0)) for c in chunks if c["is_stats_set"] == "True"), sum(int(c["num_values"]) for c in chunks),
+            sum(int(c["total_compressed_size"]) for c in chunks), sum(int(c["total_uncompressed_size"]) for c in chunks))
+
+
+def _col_line(path, ptype, codec, encs, dic, summ, indent="", k=None, g=None) -> str:
+    mn, mx, nulls, values, comp, unc = summ
+    return (f"{indent}column {path} {ptype} {codec} {','.join(encs)} dict={dic} min={json.dumps(mn)} max={json.dumps(mx)} nulls={nulls} values={values} compressed={comp} uncompressed={unc}"
+            + (f" in {k} row groups" if k is not None else ""))
+
+
+def fold_parquet(text: str) -> str:
+    parsed = _pq_parse(text) if text.startswith("<pyarrow._parquet.FileMetaData") else None
+    if parsed is None:
+        return text
+    f, rgs = parsed
+    if len(rgs) < 3 or any(l.startswith(("parquet: ", "row group ", "rows per row group")) for l in text.split("\n")):
+        return text
+    layouts = [_layout(cols) for _, cols in rgs]
+    modal = Counter(layouts).most_common(1)[0][0]
+    # most_common keeps first-seen order on ties
+    normal = [i for i, l in enumerate(layouts) if l == modal]
+    odd = [i for i in range(len(rgs)) if i not in normal]
+    out = [f"parquet: created_by {f['created_by']}; {f['num_columns']} columns; {f['num_rows']} rows; {f['num_row_groups']} row groups; format {f['format_version']}"]
+    for j, (path, ptype, codec, encs, dic) in enumerate(modal):
+        chunks = [rgs[i][1][j] for i in normal]
+        out.append(_col_line(path, ptype, codec, encs, dic, _col_summary(chunks), "  ", k=len(normal)))
+    runs = [(n, len(list(g))) for n, g in itertools.groupby(int(r["num_rows"]) for r, _ in rgs)]
+    out.append("rows per row group: " + ", ".join(f"{n} x{k}" if k > 1 else str(n) for n, k in runs))
+    for i in odd:
+        r, cols = rgs[i]
+        out.append(f"row group {i} (rows {r['num_rows']}, bytes {r['total_byte_size']}) differs from the other row groups:")
+        for c in cols:
+            out.append(_col_line(c["path_in_schema"], c["physical_type"], c["compression"], c["encodings"], c["has_dictionary_page"], _col_summary([c]), "  "))
+    res = "\n".join(out) + "\n"
+    return res if len(res) < len(text) else text
+
+
+def probes_1329(text: str) -> dict:
+    """Reader view: file facts, per column the codecs and encodings used anywhere, overall min/max, null and value totals, the row count of every row group, and which row groups differ in layout."""
+    parsed = _pq_parse(text) if text.startswith("<pyarrow._parquet.FileMetaData") else None
+    if parsed is not None:
+        f, rgs = parsed
+        file_facts = (f["created_by"], int(f["num_columns"]), int(f["num_rows"]), int(f["num_row_groups"]), f["format_version"])
+        per_col: dict[str, list] = {}
+        for _, cols in rgs:
+            for c in cols:
+                per_col.setdefault(c["path_in_schema"], []).append(c)
+        columns = {p: (ch[0]["physical_type"], sorted({c["compression"] for c in ch}), sorted({c["encodings"] for c in ch}), *_col_summary(ch)[:4]) for p, ch in per_col.items()}
+        rows = [int(r["num_rows"]) for r, _ in rgs]
+        lay = [_layout(cols) for _, cols in rgs]
+        modal = Counter(lay).most_common(1)[0][0]
+        odd = {i: [(c["path_in_schema"], c["compression"], c["encodings"]) for c in cols] for i, (_, cols) in enumerate(rgs) if lay[i] != modal} if len(rgs) >= 3 else {}
+        return {"file": file_facts, "columns (type, codecs, encodings, overall min, overall max, nulls, values)": sorted(columns.items()), "rows per row group": rows,
+                "row groups that differ in layout": sorted(odd.items()) if len(rgs) >= 3 else None}
+    lines = text.split("\n")
+    head = next((m for l in lines if (m := _PQ_FOLD_HEAD.match(l))), None)
+    if head is None:
+        return {"unparsed": text}
+    modal_cols, odd_cols, rows, cur = {}, {}, [], None
+    for l in lines:
+        if (m := _PQ_ODD.match(l)):
+            cur = int(m.group(1))
+            odd_cols[cur] = []
+        elif (m := _PQ_COL.match(l)):
+            path, ptype, codec, encs, dic, mn, mx, nulls, values, comp, unc, k = m.groups()
+            entry = (path, ptype, codec, tuple(encs.split(",")), json.loads(mn), json.loads(mx), int(nulls), int(values), int(comp), int(unc))
+            if cur is None:
+                modal_cols[path] = entry
+            else:
+                odd_cols[cur].append(entry)
+        elif (m := _PQ_ROWS.match(l)):
+            for tok in m.group(1).split(", "):
+                n, _, k = tok.partition(" x")
+                rows += [int(n)] * int(k or 1)
+    # overall per column = modal table folded with the odd row groups' own rows
+    columns = {}
+    for path, (p, ptype, codec, encs, mn, mx, nulls, values, comp, unc) in modal_cols.items():
+        codecs, encsets = {codec}, {encs}
+        mins, maxs = [mn], [mx]
+        for chunks in odd_cols.values():
+            for c in chunks:
+                if c[0] == path:
+                    codecs.add(c[2])
+                    encsets.add(c[3])
+                    mins.append(c[4])
+                    maxs.append(c[5])
+                    nulls += c[6]
+                    values += c[7]
+        real_min = [x for x in mins if x != "None"]
+        real_max = [x for x in maxs if x != "None"]
+        key = _minmax_key(real_min + real_max)
+        columns[path] = (ptype, sorted(codecs), sorted(encsets), min(real_min, key=key) if real_min else "None", max(real_max, key=key) if real_max else "None", nulls, values)
+    odd = {i: [(c[0], c[2], c[3]) for c in chunks] for i, chunks in odd_cols.items()}
+    return {"file": (head.group(1), int(head.group(2)), int(head.group(3)), int(head.group(4)), head.group(5)), "columns (type, codecs, encodings, overall min, overall max, nulls, values)": sorted(columns.items()),
+            "rows per row group": rows, "row groups that differ in layout": sorted(odd.items())}
+
+
+_PQ_TYPES = {"id": ("INT64", "None", "NONE", "numeric"), "user_id": ("INT32", "None", "NONE", "numeric"), "amount": ("DOUBLE", "None", "NONE", "numeric"),
+             "country": ("BYTE_ARRAY", "String", "UTF8", "string"), "ts": ("INT64", "Timestamp(isAdjustedToUtc=false, timeUnit=milliseconds, is_from_converted_type=false, force_set_converted_type=false)", "TIMESTAMP_MILLIS", "ts")}
+
+
+def make_parquet_dump(groups: int = 12, odd: tuple = (6,), allnull: tuple = (3,), seed: int = 12) -> str:
+    rnd = random.Random(seed)
+    sizes = [10000] * (groups - 1) + [4000]
+    out = ["<pyarrow._parquet.FileMetaData object at 0x7f14ac75f920>", "  created_by: parquet-cpp-arrow version 26.0.1", "  num_columns: 5", f"  num_rows: {sum(sizes)}", f"  num_row_groups: {groups}", "  format_version: 2.6", "  serialized_size: 11783"]
+    off = 4
+    for g in range(groups):
+        n = sizes[g]
+        out += ["<pyarrow._parquet.RowGroupMetaData object at 0x7f1492e328e0>", "  num_columns: 5", f"  num_rows: {n}", f"  total_byte_size: {n * 30 + rnd.randrange(900)}", "  sorting_columns: ()"]
+        for name, (phys, logical, conv, kind) in _PQ_TYPES.items():
+            if kind == "numeric" and name == "id":
+                mn, mx = str(g * 10000), str(g * 10000 + n - 1)
+            elif name == "user_id":
+                mn, mx = str(rnd.randrange(0, 5)), str(995 + rnd.randrange(5))
+            elif name == "amount":
+                mn, mx = f"{rnd.random() * 0.2:.2f}", f"{499 + rnd.random():.2f}"
+            elif kind == "string":
+                mn, mx = "DE", "US"
+            else:
+                mn, mx = f"2026-01-{1 + g * 3 % 28:02d} 00:00:00", f"2026-01-{1 + g * 3 % 28:02d} 23:59:30"
+            nulls = rnd.randrange(150, 260) if name == "amount" else 0
+            has = True
+            if name == "amount" and g in allnull:
+                nulls, has, mn, mx = n, False, "None", "None"
+            codec = "ZSTD" if (name == "amount" and g in odd) else "SNAPPY"
+            encs = ("PLAIN", "RLE", "RLE_DICTIONARY") if name != "ts" else ("PLAIN", "RLE", "DELTA_BINARY_PACKED") if g in odd else ("PLAIN", "RLE", "RLE_DICTIONARY")
+            comp, unc = n * 6 + rnd.randrange(3000), n * 9 + rnd.randrange(3000)
+            out += ["<pyarrow._parquet.ColumnChunkMetaData object at 0x7f1492e33c40>", "  file_offset: 0", "  file_path: ", f"  physical_type: {phys}", f"  num_values: {n}", f"  path_in_schema: {name}", "  is_stats_set: True", "  statistics:",
+                    "    <pyarrow._parquet.Statistics object at 0x7f1492e33c90>", f"      has_min_max: {has}", f"      min: {mn}", f"      max: {mx}", f"      null_count: {nulls}", "      distinct_count: None", f"      num_values: {n - nulls}",
+                    f"      physical_type: {phys}", f"      logical_type: {logical}", f"      converted_type (legacy): {conv}", "  geo_statistics:", "    None", f"  compression: {codec}", f"  encodings: {encs!r}",
+                    "  has_dictionary_page: True", f"  dictionary_page_offset: {off}", f"  data_page_offset: {off + 40000 + rnd.randrange(900)}", f"  total_compressed_size: {comp}", f"  total_uncompressed_size: {unc}",
+                    "  bloom_filter_offset: None", "  bloom_filter_length: None"]
+            off += comp + 60
+    return "\n".join(out) + "\n"
+
+
+_PQ = make_parquet_dump()
+case(
+    1329,
+    claim="A pyarrow metadata dump (file, row groups, column chunks) with 3+ row groups becomes one 'parquet: ...' line, one table line per column for the row groups that share the modal layout (overall min/max, null and value totals, sizes), "
+          "the row count of every row group and full per-column lines for row groups whose codec, encodings or dictionary flag differ; the file facts, per-column codecs, encodings, overall min/max and totals, row counts and the odd row groups are unchanged.",
+    loses="per-row-group min/max and null counts of the conforming row groups (only their overall min/max and totals remain), file and page offsets, per-chunk sizes (sums only), the statistics flags and the object addresses",
+    encode=fold_parquet,
+    probes=probes_1329,
+    fixtures=[
+        Fixture("12 row groups x 5 columns: one ZSTD/DELTA row group, one all-null chunk, a short last group", _PQ, True),
+        Fixture("6 uniform row groups", make_parquet_dump(6, odd=(), allnull=(), seed=2), True),
+        Fixture("the odd row group first", make_parquet_dump(9, odd=(0,), allnull=(), seed=3), True),
+        Fixture("the odd row group last", make_parquet_dump(9, odd=(8,), allnull=(7,), seed=4), True),
+        Fixture("2 row groups (too few to fold)", make_parquet_dump(2, odd=(), allnull=(), seed=5), False),
+        Fixture("dump cut off in the middle of a column chunk", _PQ[: len(_PQ) // 3], False),
+        Fixture("not a parquet dump", "created_by: parquet-cpp-arrow\nnum_rows: 4\n", False),
+        Fixture("text that already looks like a fold", _PQ.replace("<pyarrow._parquet.FileMetaData", "parquet: created_by x; 5 columns; 1 rows; 3 row groups; format 2.6\n<pyarrow._parquet.FileMetaData", 1), None),
+    ],
+    min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #1332 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) of PostgreSQL to an indented text tree without zero counters. One line per plan
+# node: 'Node Type key=value ...' with snake-cased keys and JSON values, in the original key order, minus the keys that carry no
+# information: false flags, null/empty values, zero '* Blocks' counters and zero I/O times and 'Rows Removed' counts (a zero
+# Actual Rows, Actual Loops or Plan Rows is information and is kept). The first line 'explain ...' carries the top-level
+# fields (Planning/Execution Time, Planning buffers). Node keys reconstructed from memory of PostgreSQL 16 output; MySQL
+# FORMAT=JSON and MongoDB explain('executionStats') have other shapes and are left alone.
+
+_PG_ZERO_KEYS = {"Rows Removed by Filter", "Rows Removed by Join Filter", "Rows Removed by Index Recheck", "Heap Fetches", "Workers Launched", "I/O Read Time", "I/O Write Time",
+                 "Temp I/O Read Time", "Temp I/O Write Time", "Local I/O Read Time", "Local I/O Write Time", "Shared I/O Read Time", "Shared I/O Write Time", "Exact Heap Blocks", "Lossy Heap Blocks"}
+
+
+def _snake(k: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", k.lower()).strip("_")
+
+
+def _droppable(k: str, v) -> bool:
+    if v is None or v is False or v == "" or v == [] or v == {}:
+        return True
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == 0 and (k.endswith(" Blocks") or k in _PG_ZERO_KEYS)
+
+
+def _pg_valid(d) -> bool:
+    if not (isinstance(d, list) and len(d) == 1 and isinstance(d[0], dict) and isinstance(d[0].get("Plan"), dict)):
+        return False
+
+    def ok(n, depth=0) -> bool:
+        if depth > 60 or not isinstance(n.get("Node Type"), str) or "=" in n["Node Type"] or "\n" in n["Node Type"] or n["Node Type"] != n["Node Type"].strip():
+            return False
+        keys = [_snake(k) for k in n if k not in ("Plans", "Node Type")]
+        if len(set(keys)) != len(keys) or any(not k or k in ("node_type", "plans") for k in keys):
+            return False
+        if "Plans" in n and (not isinstance(n["Plans"], list) or not all(isinstance(c, dict) and ok(c, depth + 1) for c in n["Plans"])):
+            return False
+        return True
+    top_keys = [_snake(k) for k in d[0] if k != "Plan"]
+    return ok(d[0]["Plan"]) and len(set(top_keys)) == len(top_keys)
+
+
+def _kv(k: str, v) -> str:
+    return f" {_snake(k)}=" + json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
+
+def explain_json_to_tree(text: str) -> str:
+    if not text.lstrip().startswith("["):
+        return text
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return text
+    if not _pg_valid(d):
+        return text
+    top = d[0]
+    first = "explain"
+    for k, v in top.items():
+        if k == "Plan":
+            continue
+        if isinstance(v, dict):
+            first += "".join(_kv(f"{k} {sk}", sv) for sk, sv in v.items() if not _droppable(sk, sv))
+        elif not _droppable(k, v):
+            first += _kv(k, v)
+    out = [first]
+
+    def walk(n: dict, depth: int) -> None:
+        out.append("  " * depth + n["Node Type"] + "".join(_kv(k, v) for k, v in n.items() if k not in ("Node Type", "Plans") and not _droppable(k, v)))
+        for c in n.get("Plans", []):
+            walk(c, depth + 1)
+    walk(top["Plan"], 0)
+    res = "\n".join(out) + ("\n" if text.endswith("\n") else "")
+    return res if len(res) < len(text) else text
+
+
+_KV_AT = re.compile(r" ([a-z0-9_]+)=")
+
+
+def _parse_kvs(s: str) -> tuple[str, dict]:
+    m = _KV_AT.search(s)
+    head = s if m is None else s[: m.start()]
+    kvs, pos, dec = {}, 0 if m is None else m.start(), json.JSONDecoder()
+    while m is not None:
+        v, end = dec.raw_decode(s, m.end())
+        kvs[m.group(1)] = v
+        m = _KV_AT.match(s, end)
+    return head, kvs
+
+
+def probes_1332(text: str) -> dict:
+    """Tree reader: every plan node's (depth, type, informative fields), the top-level fields, the slowest node by exclusive time and the worst row misestimate."""
+    nodes: list[tuple[int, str, dict]] = []
+    top: dict = {}
+    try:
+        d = json.loads(text) if text.lstrip().startswith("[") else None
+    except ValueError:
+        d = None
+    if d is not None and _pg_valid(d):
+        for k, v in d[0].items():
+            if k == "Plan":
+                continue
+            if isinstance(v, dict):
+                top.update({_snake(f"{k} {sk}"): sv for sk, sv in v.items() if not _droppable(sk, sv)})
+            elif not _droppable(k, v):
+                top[_snake(k)] = v
+
+        def walk(n, depth):
+            nodes.append((depth, n["Node Type"], {_snake(k): v for k, v in n.items() if k not in ("Node Type", "Plans") and not _droppable(k, v)}, [c for c in n.get("Plans", [])]))
+            for c in n.get("Plans", []):
+                walk(c, depth + 1)
+        raw = []
+        walk(d[0]["Plan"], 0)
+        nodes = [(a, b, c) for a, b, c, _ in nodes]
+    else:
+        lines = text.split("\n")
+        if not lines or not lines[0].startswith("explain"):
+            return {"unparsed": text}
+        try:
+            _, top = _parse_kvs(lines[0][7:] if lines[0][7:8] == " " else lines[0][7:])
+            for l in lines[1:]:
+                if not l.strip():
+                    continue
+                depth = (len(l) - len(l.lstrip(" "))) // 2
+                head, kvs = _parse_kvs(l.strip())
+                nodes.append((depth, head, kvs))
+        except (ValueError, KeyError):
+            return {"unparsed": text}
+    # derived facts from the tree and the numbers in the fields
+    excl = []
+    for i, (depth, ty, kv) in enumerate(nodes):
+        total = kv.get("actual_total_time", 0) * kv.get("actual_loops", 1)
+        kids = 0.0
+        for dd, _, k2 in nodes[i + 1:]:
+            if dd <= depth:
+                break
+            if dd == depth + 1:
+                kids += k2.get("actual_total_time", 0) * k2.get("actual_loops", 1)
+        excl.append((round(total - kids, 3), i))
+    slowest = max(excl, key=lambda x: (x[0], -x[1])) if excl and any("actual_total_time" in n[2] for n in nodes) else None
+    mis = []
+    for i, (depth, ty, kv) in enumerate(nodes):
+        if "plan_rows" in kv and "actual_rows" in kv:
+            p, a = kv["plan_rows"], kv["actual_rows"]
+            mis.append((round(max((a + 1) / (p + 1), (p + 1) / (a + 1)), 3), i))
+    worst = max(mis, key=lambda x: (x[0], -x[1])) if mis else None
+    return {
+        "top-level fields": top,
+        "plan nodes (depth, node type, fields)": nodes,
+        "slowest node by exclusive time (ms, preorder index, type, relation)": None if slowest is None else (slowest[0], slowest[1], nodes[slowest[1]][1], nodes[slowest[1]][2].get("relation_name")),
+        "worst row misestimate (ratio, index, type, plan rows, actual rows)": None if worst is None else (worst[0], worst[1], nodes[worst[1]][1], nodes[worst[1]][2]["plan_rows"], nodes[worst[1]][2]["actual_rows"]),
+    }
+
+
+def _pg_node(ntype: str, rel=None, alias=None, join=None, rows=100, actual=100, loops=1, start=0.1, total=1.0, cost=(0.0, 10.0), width=36, hit=0, read=0, extra=None, kids=None, parent=None, analyze=True) -> dict:
+    n = {"Node Type": ntype}
+    if parent:
+        n["Parent Relationship"] = parent
+    n["Parallel Aware"] = False
+    n["Async Capable"] = False
+    if rel:
+        n["Relation Name"], n["Schema"], n["Alias"] = rel, "public", alias or rel
+    if join:
+        n["Join Type"] = join
+    n["Startup Cost"], n["Total Cost"], n["Plan Rows"], n["Plan Width"] = cost[0], cost[1], rows, width
+    if analyze:
+        n["Actual Startup Time"], n["Actual Total Time"], n["Actual Rows"], n["Actual Loops"] = start, total, actual, loops
+    n.update(extra or {})
+    if analyze:
+        n["Shared Hit Blocks"], n["Shared Read Blocks"], n["Shared Dirtied Blocks"], n["Shared Written Blocks"] = hit, read, 0, 0
+        n["Local Hit Blocks"] = n["Local Read Blocks"] = n["Local Dirtied Blocks"] = n["Local Written Blocks"] = 0
+        n["Temp Read Blocks"] = n["Temp Written Blocks"] = 0
+    if kids:
+        n["Plans"] = kids
+    return n
+
+
+def make_explain(analyze: bool = True, misestimate: bool = True) -> str:
+    a = analyze
+    plan = _pg_node("Limit", rows=50, actual=50, start=1510.2, total=1510.9, cost=(1203.3, 1203.4), analyze=a, hit=2, kids=[
+        _pg_node("Sort", rows=50, actual=50, start=1510.2, total=1510.3, cost=(1203.3, 1203.5), width=88, analyze=a, parent="Outer", extra={"Sort Key": ["o.created_at DESC"], "Sort Method": "top-N heapsort", "Sort Space Used": 32, "Sort Space Type": "Memory"}, kids=[
+            _pg_node("Nested Loop", join="Inner", rows=1 if misestimate else 48210, actual=48210, start=2.1, total=1480.4, cost=(12.2, 1199.0), width=88, analyze=a, parent="Outer", extra={"Inner Unique": True}, hit=190211, read=312, kids=[
+                _pg_node("Hash Join", join="Inner", rows=40000, actual=48210, start=2.0, total=210.5, cost=(10.0, 900.0), width=64, analyze=a, parent="Outer", extra={"Inner Unique": False, "Hash Cond": "(o.customer_id = c.id)"}, hit=5200, read=12, kids=[
+                    _pg_node("Seq Scan", rel="orders", alias="o", rows=40000, actual=48210, start=0.05, total=95.7, cost=(0.0, 720.0), analyze=a, parent="Outer", extra={"Filter": "(status = 'paid'::text)", "Rows Removed by Filter": 11790}, hit=3200, read=8),
+                    _pg_node("Hash", rows=2000, actual=2000, start=1.8, total=1.8, cost=(55.0, 55.0), width=36, analyze=a, parent="Inner", extra={"Hash Buckets": 2048, "Original Hash Buckets": 2048, "Hash Batches": 1, "Original Hash Batches": 1, "Peak Memory Usage": 142}, hit=40, kids=[
+                        _pg_node("Seq Scan", rel="customers", alias="c", rows=2000, actual=2000, start=0.02, total=0.9, cost=(0.0, 55.0), analyze=a, parent="Outer", hit=40)])]),
+                _pg_node("Index Scan", rel="order_items", alias="i", rows=1, actual=3, loops=48210, start=0.004, total=0.027, cost=(0.4, 0.9), width=24, analyze=a, parent="Inner", extra={"Scan Direction": "Forward", "Index Name": "order_items_order_id_idx", "Index Cond": "(order_id = o.id)"}, hit=140000, read=300)])])])
+    top = {"Plan": plan, "Planning": {"Shared Hit Blocks": 187, "Shared Read Blocks": 0, "Shared Dirtied Blocks": 0, "Shared Written Blocks": 0, "Local Hit Blocks": 0, "Local Read Blocks": 0, "Local Dirtied Blocks": 0,
+                                        "Local Written Blocks": 0, "Temp Read Blocks": 0, "Temp Written Blocks": 0}, "Planning Time": 1.213}
+    if a:
+        top["Triggers"] = []
+        top["Execution Time"] = 1523.771
+    else:
+        del top["Planning"]
+    return json.dumps([top], indent=2) + "\n"
+
+
+def make_parallel() -> str:
+    gather = _pg_node("Gather", rows=1000, actual=1210, start=40.0, total=95.0, cost=(1000.0, 24000.0), analyze=True, extra={"Workers Planned": 2, "Workers Launched": 2, "Single Copy": False}, kids=[
+        _pg_node("Parallel Seq Scan", rel="events", alias="e", rows=500, actual=403, loops=3, start=0.02, total=30.5, cost=(0.0, 23000.0), analyze=True, parent="Outer", extra={"Filter": "(kind = 'click'::text)", "Rows Removed by Filter": 91234}, hit=900, read=50)])
+    gather["Parallel Aware"] = False
+    return json.dumps([{"Plan": gather, "Planning Time": 0.31, "Triggers": [], "Execution Time": 96.4}], indent=2) + "\n"
+
+
+_EXPLAIN = make_explain()
+case(
+    1332,
+    claim="A PostgreSQL EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) plan becomes one 'Node Type key=value ...' line per node, indented by depth, without false flags, empty values, zero buffer counters and zero 'Rows Removed' counts; "
+          "every other field of every node (costs, rows, loops, times, conditions, sort details, non-zero buffers), the top-level fields, the slowest node by exclusive time and the worst row misestimate are unchanged.",
+    loses="which false flags and zero counters were present in the JSON (a missing key reads as zero or false), JSON key order is kept but whitespace and nesting syntax are gone",
+    encode=explain_json_to_tree,
+    probes=probes_1332,
+    fixtures=[
+        Fixture("4-join plan with a 1 vs 48,210 row misestimate and a 1,480 ms nested loop", _EXPLAIN, True),
+        Fixture("the same plan without ANALYZE (estimates only)", make_explain(analyze=False), True),
+        Fixture("plan whose estimate is right (no misestimate)", make_explain(misestimate=False), True),
+        Fixture("parallel plan with workers, loops and filters", make_parallel(), True),
+        Fixture("MySQL-style FORMAT=JSON (query_block)", json.dumps({"query_block": {"select_id": 1, "cost_info": {"query_cost": "1.10"}, "table": {"table_name": "t", "access_type": "ALL", "rows_examined_per_scan": 3}}}, indent=2), False),
+        Fixture("JSON array that is not a plan", json.dumps([{"Plan": 5}], indent=2), False),
+        Fixture("text-format plan", "Seq Scan on t  (cost=0.00..1.03 rows=3 width=4) (actual time=0.01..0.02 rows=3 loops=1)\nPlanning Time: 0.05 ms\n", False),
+        Fixture("two statements in one array (left alone)", json.dumps([{"Plan": {"Node Type": "Result", "Parallel Aware": False}}, {"Plan": {"Node Type": "Result", "Parallel Aware": False}}], indent=2), False),
+    ],
+    min_gain=0.5,
+)

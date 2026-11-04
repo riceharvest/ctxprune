@@ -1175,6 +1175,18 @@ def fold_green_steps(text: str) -> str:
     return "\n".join(out)
 
 
+_PROBE_ATTN = re.compile(r"##\[(?:error|warning)\]|\b(?:error|errors|warning|warnings|failed|failure|fatal|traceback|exception|panic)\b", re.I)
+
+
+def _p_attention(texts: list[str]) -> bool:
+    """The probe's own statement of 'this step needs a reader': markers anywhere, error-ish words outside the echoed command (a regex
+    over the joined step instead of the encoder's line-by-line state, and its own copy of the word list)."""
+    joined = "\n".join(texts)
+    if re.search(r"##\[(?:error|warning)\]", joined):
+        return True
+    return bool(_PROBE_ATTN.search(re.sub(r"(?ms)^##\[group\]Run .*?(?:^##\[endgroup\]$|\Z)", "", joined)))
+
+
 def probes_311(text: str) -> dict:
     steps, kept, errors, warns, loose = [], [], [], [], []
     cur, buf = None, []  # cur = (job, step); buf = list of (ts, text) of the open block
@@ -1184,7 +1196,7 @@ def probes_311(text: str) -> dict:
         if cur is None:
             return
         texts = [t for _, t in buf]
-        if _attention(texts):
+        if _p_attention(texts):
             steps.append((cur[0], cur[1], "attention", len(buf)))
             kept.extend((cur[0], cur[1], t) for t in texts)
         else:

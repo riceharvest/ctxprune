@@ -1953,6 +1953,425 @@ case(
 
 
 # ===============================================================================================================
+# #1325 IPython / nbconvert / PySpark failures: strip ANSI, fold runs of library frames (site-packages, Cython .pyx,
+# pyspark/py4j) into one count line, fold repeated Python tracebacks and runs of Java 'at' frames. Keep the failing
+# cell source, user frames (Cell In[N], project files) with their pointer line, and every exception line.
+# RULE: the probe reads (after stripping ANSI) the distinct exception lines, the user frames with their source
+# pointer, the failing cell's source, and that library frames and Java frames are accounted for (kept + folded).
+# Both fixtures are real: nbconvert --execute on a notebook with a pandas KeyError, and a local PySpark job whose
+# UDF raises ValueError (pyspark 4.3, pandas 3.1, ipykernel 7.4).
+
+NBCONVERT_KEYERROR = (
+    '[NbConvertApp] Converting notebook nb.ipynb to notebook\n'
+    '[IPKernelApp] WARNING | Kernel is running over TCP without encryption. All communication (including code and outputs) is sent in plain text and is susceptible to eavesdropping. Use IPC transport or launch with kernel manager-provisioned CurveZMQ keys to enable transport encryption.\n'
+    'Traceback (most recent call last):\n'
+    '  File "/home/dev/.venv/bin/jupyter-nbconvert", line 8, in <module>\n'
+    '    sys.exit(main())\n'
+    '             ~~~~^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/jupyter_core/application.py", line 284, in launch_instance\n'
+    '    super().launch_instance(argv=argv, **kwargs)\n'
+    '    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/traitlets/config/application.py", line 1080, in launch_instance\n'
+    '    app.start()\n'
+    '    ~~~~~~~~~^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 420, in start\n'
+    '    self.convert_notebooks()\n'
+    '    ~~~~~~~~~~~~~~~~~~~~~~^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 597, in convert_notebooks\n'
+    '    self.convert_single_notebook(notebook_filename)\n'
+    '    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 563, in convert_single_notebook\n'
+    '    output, resources = self.export_single_notebook(\n'
+    '                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n'
+    '        notebook_filename, resources, input_buffer=input_buffer\n'
+    '        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '    )\n'
+    '    ^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 487, in export_single_notebook\n'
+    '    output, resources = self.exporter.from_filename(\n'
+    '                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n'
+    '        notebook_filename, resources=resources\n'
+    '        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '    )\n'
+    '    ^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 201, in from_filename\n'
+    '    return self.from_file(f, resources=resources, **kw)\n'
+    '           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 220, in from_file\n'
+    '    return self.from_notebook_node(\n'
+    '           ~~~~~~~~~~~~~~~~~~~~~~~^\n'
+    '        nbformat.read(file_stream, as_version=4), resources=resources, **kw\n'
+    '        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '    )\n'
+    '    ^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/exporters/notebook.py", line 36, in from_notebook_node\n'
+    '    nb_copy, resources = super().from_notebook_node(nb, resources, **kw)\n'
+    '                         ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 154, in from_notebook_node\n'
+    '    nb_copy, resources = self._preprocess(nb_copy, resources)\n'
+    '                         ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 353, in _preprocess\n'
+    '    nbc, resc = preprocessor(nbc, resc)\n'
+    '                ~~~~~~~~~~~~^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/preprocessors/base.py", line 48, in __call__\n'
+    '    return self.preprocess(nb, resources)\n'
+    '           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 103, in preprocess\n'
+    '    self.preprocess_cell(cell, resources, index)\n'
+    '    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 124, in preprocess_cell\n'
+    '    cell = self.execute_cell(cell, index, store_history=True)\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/jupyter_core/utils/__init__.py", line 165, in wrapped\n'
+    '    return loop.run_until_complete(inner)\n'
+    '           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^\n'
+    '  File "/usr/local/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete\n'
+    '    return future.result()\n'
+    '           ~~~~~~~~~~~~~^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbclient/client.py", line 1062, in async_execute_cell\n'
+    '    await self._check_raise_for_error(cell, cell_index, exec_reply)\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/nbclient/client.py", line 918, in _check_raise_for_error\n'
+    '    raise CellExecutionError.from_cell_and_msg(cell, exec_reply_content)\n'
+    'nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:\n'
+    '------------------\n'
+    'def revenue(frame):\n'
+    "    return frame['price'] * frame['amount']\n"
+    '\n'
+    'total = revenue(df).sum()\n'
+    'total\n'
+    '------------------\n'
+    '\n'
+    '\n'
+    '\x1b[31m---------------------------------------------------------------------------\x1b[39m\n'
+    '\x1b[31mKeyError\x1b[39m                                  Traceback (most recent call last)\n'
+    '\x1b[36mFile \x1b[39m\x1b[32m/home/dev/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py:3816\x1b[39m, in \x1b[36mIndex.get_loc\x1b[39m\x1b[34m(self, key)\x1b[39m\n'
+    '\x1b[32m   3815\x1b[39m \x1b[38;5;28;01mtry\x1b[39;00m:\n'
+    '\x1b[32m-> \x1b[39m\x1b[32m3816\x1b[39m     \x1b[38;5;28;01mreturn\x1b[39;00m \x1b[30;43mself\x1b[39;49m\x1b[30;43m.\x1b[39;49m\x1b[30;43m_engine\x1b[39;49m\x1b[30;43m.\x1b[39;49m\x1b[30;43mget_loc\x1b[39;49m\x1b[30;43m(\x1b[39;49m\x1b[30;43mcasted_key\x1b[39;49m\x1b[30;43m)\x1b[39;49m\n'
+    '\x1b[32m   3817\x1b[39m \x1b[38;5;28;01mexcept\x1b[39;00m \x1b[38;5;167;01mKeyError\x1b[39;00m \x1b[38;5;28;01mas\x1b[39;00m err:\n'
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32mpandas/_libs/index.pyx:172\x1b[39m, in \x1b[36mpandas._libs.index.IndexEngine.get_loc\x1b[39m\x1b[34m()\x1b[39m\n'
+    "\x1b[32m--> \x1b[39m\x1b[32m172\x1b[39m \x1b[33m'Could not get source, probably due dynamically evaluated source code.'\x1b[39m\n"
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32mpandas/_libs/index.pyx:201\x1b[39m, in \x1b[36mpandas._libs.index.IndexEngine.get_loc\x1b[39m\x1b[34m()\x1b[39m\n'
+    "\x1b[32m--> \x1b[39m\x1b[32m201\x1b[39m \x1b[33m'Could not get source, probably due dynamically evaluated source code.'\x1b[39m\n"
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32mpandas/_libs/hashtable_class_helper.pxi:7726\x1b[39m, in \x1b[36mpandas._libs.hashtable.PyObjectHashTable.get_item\x1b[39m\x1b[34m()\x1b[39m\n'
+    "\x1b[32m-> \x1b[39m\x1b[32m7726\x1b[39m \x1b[33m'Could not get source, probably due dynamically evaluated source code.'\x1b[39m\n"
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32mpandas/_libs/hashtable_class_helper.pxi:7734\x1b[39m, in \x1b[36mpandas._libs.hashtable.PyObjectHashTable.get_item\x1b[39m\x1b[34m()\x1b[39m\n'
+    "\x1b[32m-> \x1b[39m\x1b[32m7734\x1b[39m \x1b[33m'Could not get source, probably due dynamically evaluated source code.'\x1b[39m\n"
+    '\n'
+    "\x1b[31mKeyError\x1b[39m: 'amount'\n"
+    '\n'
+    'The above exception was the direct cause of the following exception:\n'
+    '\n'
+    '\x1b[31mKeyError\x1b[39m                                  Traceback (most recent call last)\n'
+    '\x1b[36mCell\x1b[39m\x1b[36m \x1b[39m\x1b[32mIn[3]\x1b[39m\x1b[32m, line 4\x1b[39m\n'
+    '\x1b[32m      1\x1b[39m \x1b[38;5;28;01mdef\x1b[39;00m revenue(frame):\n'
+    "\x1b[32m      2\x1b[39m     \x1b[38;5;28;01mreturn\x1b[39;00m frame[\x1b[33m'price'\x1b[39m] * frame[\x1b[33m'amount'\x1b[39m]\n"
+    '\x1b[32m      3\x1b[39m \n'
+    '\x1b[32m----> \x1b[39m\x1b[32m4\x1b[39m total = revenue(df).sum()\n'
+    '\x1b[32m      5\x1b[39m total\n'
+    '\n'
+    '\x1b[36mCell\x1b[39m\x1b[36m \x1b[39m\x1b[32mIn[3]\x1b[39m\x1b[32m, line 2\x1b[39m, in \x1b[36mrevenue\x1b[39m\x1b[34m(frame)\x1b[39m\n'
+    '\x1b[32m      1\x1b[39m \x1b[38;5;28;01mdef\x1b[39;00m revenue(frame):\n'
+    "\x1b[32m----> \x1b[39m\x1b[32m2\x1b[39m     \x1b[38;5;28;01mreturn\x1b[39;00m frame[\x1b[33m'price'\x1b[39m] * frame[\x1b[33m'amount'\x1b[39m]\n"
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32m/home/dev/.venv/lib/python3.13/site-packages/pandas/core/frame.py:4330\x1b[39m, in \x1b[36mDataFrame.__getitem__\x1b[39m\x1b[34m(self, key)\x1b[39m\n'
+    '\x1b[32m   4326\x1b[39m \n'
+    '\x1b[32m   4327\x1b[39m         \x1b[38;5;28;01mif\x1b[39;00m is_single_key:\n'
+    '\x1b[32m   4328\x1b[39m             \x1b[38;5;28;01mif\x1b[39;00m self.columns.nlevels > \x1b[32m1\x1b[39m:\n'
+    '\x1b[32m   4329\x1b[39m                 \x1b[38;5;28;01mreturn\x1b[39;00m self._getitem_multilevel(key)\n'
+    '\x1b[32m-> \x1b[39m\x1b[32m4330\x1b[39m             indexer = self.columns.get_loc(key)\n'
+    '\x1b[32m   4331\x1b[39m             \x1b[38;5;28;01mif\x1b[39;00m is_integer(indexer):\n'
+    '\x1b[32m   4332\x1b[39m                 indexer = [indexer]  \x1b[38;5;66;03m# type: ignore[assignment]\x1b[39;00m\n'
+    '\x1b[32m   4333\x1b[39m         \x1b[38;5;28;01melse\x1b[39;00m:\n'
+    '\n'
+    '\x1b[36mFile \x1b[39m\x1b[32m/home/dev/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py:3823\x1b[39m, in \x1b[36mIndex.get_loc\x1b[39m\x1b[34m(self, key)\x1b[39m\n'
+    '\x1b[32m   3818\x1b[39m     \x1b[38;5;28;01mif\x1b[39;00m \x1b[38;5;28misinstance\x1b[39m(casted_key, \x1b[38;5;28mslice\x1b[39m) \x1b[38;5;129;01mor\x1b[39;00m (\n'
+    '\x1b[32m   3819\x1b[39m         \x1b[38;5;28misinstance\x1b[39m(casted_key, abc.Iterable)\n'
+    '\x1b[32m   3820\x1b[39m         \x1b[38;5;129;01mand\x1b[39;00m \x1b[38;5;28many\x1b[39m(\x1b[38;5;28misinstance\x1b[39m(x, \x1b[38;5;28mslice\x1b[39m) \x1b[38;5;28;01mfor\x1b[39;00m x \x1b[38;5;129;01min\x1b[39;00m casted_key)\n'
+    '\x1b[32m   3821\x1b[39m     ):\n'
+    '\x1b[32m   3822\x1b[39m         \x1b[38;5;28;01mraise\x1b[39;00m InvalidIndexError(key) \x1b[38;5;28;01mfrom\x1b[39;00m\x1b[38;5;250m \x1b[39m\x1b[34;01merr\x1b[39;00m\n'
+    '\x1b[32m-> \x1b[39m\x1b[32m3823\x1b[39m     \x1b[38;5;28;01mraise\x1b[39;00m \x1b[38;5;167;01mKeyError\x1b[39;00m(key) \x1b[38;5;28;01mfrom\x1b[39;00m\x1b[38;5;250m \x1b[39m\x1b[34;01merr\x1b[39;00m\n'
+    '\x1b[32m   3824\x1b[39m \x1b[38;5;28;01mexcept\x1b[39;00m \x1b[38;5;167;01mTypeError\x1b[39;00m:\n'
+    '\x1b[32m   3825\x1b[39m     \x1b[38;5;66;03m# If we have a listlike key, _check_indexing_error will raise\x1b[39;00m\n'
+    '\x1b[32m   3826\x1b[39m     \x1b[38;5;66;03m#  InvalidIndexError. Otherwise we fall through and re-raise\x1b[39;00m\n'
+    '\x1b[32m   3827\x1b[39m     \x1b[38;5;66;03m#  the TypeError.\x1b[39;00m\n'
+    '\x1b[32m   3828\x1b[39m     \x1b[38;5;28mself\x1b[39m._check_indexing_error(key)\n'
+    '\n'
+    "\x1b[31mKeyError\x1b[39m: 'amount'\n"
+    '\n'
+)
+PYSPARK_UDF_ERROR = (
+    'WARNING: Using incubator modules: jdk.incubator.vector\n'
+    "Using Spark's default log4j profile: org/apache/spark/log4j2-defaults.properties\n"
+    '26/11/04 17:40:50 WARN Utils: Your hostname, vm, resolves to a loopback address: 127.0.0.1; using 192.0.2.2 instead (on interface eth0)\n'
+    '26/11/04 17:40:50 WARN Utils: Set SPARK_LOCAL_IP if you need to bind to another address\n'
+    "Using Spark's default log4j profile: org/apache/spark/log4j2-defaults.properties\n"
+    'Setting default log level to "WARN".\n'
+    'To adjust logging level use sc.setLogLevel(newLevel). For SparkR, use setLogLevel(newLevel).\n'
+    '/home/dev/.venv/lib/python3.13/site-packages/pyspark/testing/utils.py:127: FutureWarning: PySpark does not yet fully support pandas >= 3.0.0. Some features may not work correctly. It is recommended to use pandas < 3.0.0 for now.\n'
+    '  require_minimum_pandas_version()\n'
+    '26/11/04 17:40:51 WARN NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable\n'
+    '/home/dev/.venv/lib/python3.13/site-packages/pyspark/sql/udf.py:116: FutureWarning: PySpark does not yet fully support pandas >= 3.0.0. Some features may not work correctly. It is recommended to use pandas < 3.0.0 for now.\n'
+    '  require_minimum_pandas_version()\n'
+    '/home/dev/.venv/lib/python3.13/site-packages/pyspark/sql/udf.py:120: RuntimeWarning: Arrow optimization failed to enable because PyArrow or Pandas is not installed. Falling back to a non-Arrow-optimized UDF.\n'
+    '  warnings.warn(\n'
+    '\r'
+    '[Stage 0:>                                                          (0 + 1) / 1]\r'
+    '26/11/04 17:41:00 ERROR Executor: Exception in task 0.0 in stage 0.0 (TID 0)\n'
+    'org.apache.spark.api.python.PythonException: [PYTHON_EXCEPTION] An exception was thrown from the Python worker: Traceback (most recent call last):\n'
+    '  File "/work/app/job.py", line 9, in parse_qty\n'
+    '    return int(raw)\n'
+    "ValueError: invalid literal for int() with base 10: 'x3'\n"
+    ' SQLSTATE: 38000\n'
+    '\tat org.apache.spark.api.python.BasePythonRunner$ReaderIterator.handlePythonException(PythonRunner.scala:1097)\n'
+    '\tat org.apache.spark.sql.execution.python.BasePythonUDFRunner$$anon$2.read(PythonUDFRunner.scala:133)\n'
+    '\tat org.apache.spark.sql.execution.python.BasePythonUDFRunner$$anon$2.read(PythonUDFRunner.scala:114)\n'
+    '\tat org.apache.spark.api.python.BasePythonRunner$ReaderIterator.hasNext(PythonRunner.scala:1034)\n'
+    '\tat org.apache.spark.InterruptibleIterator.hasNext(InterruptibleIterator.scala:37)\n'
+    '\tat scala.collection.Iterator$$anon$10.hasNext(Iterator.scala:611)\n'
+    '\tat scala.collection.Iterator$$anon$9.hasNext(Iterator.scala:593)\n'
+    '\tat scala.collection.Iterator$$anon$9.hasNext(Iterator.scala:593)\n'
+    '\tat org.apache.spark.sql.catalyst.expressions.GeneratedClass$GeneratedIteratorForCodegenStage2.processNext(Unknown Source)\n'
+    '\tat org.apache.spark.sql.execution.BufferedRowIterator.hasNext(BufferedRowIterator.java:44)\n'
+    '\tat org.apache.spark.sql.execution.WholeStageCodegenEvaluatorFactory$WholeStageCodegenPartitionEvaluator$$anon$1.hasNext(WholeStageCodegenEvaluatorFactory.scala:50)\n'
+    '\tat org.apache.spark.sql.execution.SparkPlan.$anonfun$getByteArrayRdd$2(SparkPlan.scala:418)\n'
+    '\tat org.apache.spark.rdd.RDD.$anonfun$mapPartitionsInternal$2(RDD.scala:960)\n'
+    '\tat org.apache.spark.rdd.RDD.$anonfun$mapPartitionsInternal$2$adapted(RDD.scala:960)\n'
+    '\tat org.apache.spark.rdd.MapPartitionsRDD.compute(MapPartitionsRDD.scala:57)\n'
+    '\tat org.apache.spark.rdd.RDD.computeOrReadCheckpoint(RDD.scala:374)\n'
+    '\tat org.apache.spark.rdd.RDD.iterator(RDD.scala:338)\n'
+    '\tat org.apache.spark.scheduler.ResultTask.runTask(ResultTask.scala:93)\n'
+    '\tat org.apache.spark.TaskContext.runTaskWithListeners(TaskContext.scala:240)\n'
+    '\tat org.apache.spark.scheduler.Task.run(Task.scala:147)\n'
+    '\tat org.apache.spark.executor.Executor$TaskRunner.$anonfun$run$4(Executor.scala:903)\n'
+    '\tat org.apache.spark.util.SparkErrorUtils.tryWithSafeFinally(SparkErrorUtils.scala:86)\n'
+    '\tat org.apache.spark.util.SparkErrorUtils.tryWithSafeFinally$(SparkErrorUtils.scala:83)\n'
+    '\tat org.apache.spark.util.Utils$.tryWithSafeFinally(Utils.scala:97)\n'
+    '\tat org.apache.spark.executor.Executor$TaskRunner.run(Executor.scala:906)\n'
+    '\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n'
+    '\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)\n'
+    '\tat java.base/java.lang.Thread.run(Thread.java:1583)\n'
+    '26/11/04 17:41:00 WARN TaskSetManager: Lost task 0.0 in stage 0.0 (TID 0) (192.0.2.2 executor driver): org.apache.spark.api.python.PythonException: [PYTHON_EXCEPTION] An exception was thrown from the Python worker: Traceback (most recent call last):\n'
+    '  File "/work/app/job.py", line 9, in parse_qty\n'
+    '    return int(raw)\n'
+    "ValueError: invalid literal for int() with base 10: 'x3'\n"
+    ' SQLSTATE: 38000\n'
+    '\tat org.apache.spark.api.python.BasePythonRunner$ReaderIterator.handlePythonException(PythonRunner.scala:1097)\n'
+    '\tat org.apache.spark.sql.execution.python.BasePythonUDFRunner$$anon$2.read(PythonUDFRunner.scala:133)\n'
+    '\tat org.apache.spark.sql.execution.python.BasePythonUDFRunner$$anon$2.read(PythonUDFRunner.scala:114)\n'
+    '\tat org.apache.spark.api.python.BasePythonRunner$ReaderIterator.hasNext(PythonRunner.scala:1034)\n'
+    '\tat org.apache.spark.InterruptibleIterator.hasNext(InterruptibleIterator.scala:37)\n'
+    '\tat scala.collection.Iterator$$anon$10.hasNext(Iterator.scala:611)\n'
+    '\tat scala.collection.Iterator$$anon$9.hasNext(Iterator.scala:593)\n'
+    '\tat scala.collection.Iterator$$anon$9.hasNext(Iterator.scala:593)\n'
+    '\tat org.apache.spark.sql.catalyst.expressions.GeneratedClass$GeneratedIteratorForCodegenStage2.processNext(Unknown Source)\n'
+    '\tat org.apache.spark.sql.execution.BufferedRowIterator.hasNext(BufferedRowIterator.java:44)\n'
+    '\tat org.apache.spark.sql.execution.WholeStageCodegenEvaluatorFactory$WholeStageCodegenPartitionEvaluator$$anon$1.hasNext(WholeStageCodegenEvaluatorFactory.scala:50)\n'
+    '\tat org.apache.spark.sql.execution.SparkPlan.$anonfun$getByteArrayRdd$2(SparkPlan.scala:418)\n'
+    '\tat org.apache.spark.rdd.RDD.$anonfun$mapPartitionsInternal$2(RDD.scala:960)\n'
+    '\tat org.apache.spark.rdd.RDD.$anonfun$mapPartitionsInternal$2$adapted(RDD.scala:960)\n'
+    '\tat org.apache.spark.rdd.MapPartitionsRDD.compute(MapPartitionsRDD.scala:57)\n'
+    '\tat org.apache.spark.rdd.RDD.computeOrReadCheckpoint(RDD.scala:374)\n'
+    '\tat org.apache.spark.rdd.RDD.iterator(RDD.scala:338)\n'
+    '\tat org.apache.spark.scheduler.ResultTask.runTask(ResultTask.scala:93)\n'
+    '\tat org.apache.spark.TaskContext.runTaskWithListeners(TaskContext.scala:240)\n'
+    '\tat org.apache.spark.scheduler.Task.run(Task.scala:147)\n'
+    '\tat org.apache.spark.executor.Executor$TaskRunner.$anonfun$run$4(Executor.scala:903)\n'
+    '\tat org.apache.spark.util.SparkErrorUtils.tryWithSafeFinally(SparkErrorUtils.scala:86)\n'
+    '\tat org.apache.spark.util.SparkErrorUtils.tryWithSafeFinally$(SparkErrorUtils.scala:83)\n'
+    '\tat org.apache.spark.util.Utils$.tryWithSafeFinally(Utils.scala:97)\n'
+    '\tat org.apache.spark.executor.Executor$TaskRunner.run(Executor.scala:906)\n'
+    '\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)\n'
+    '\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)\n'
+    '\tat java.base/java.lang.Thread.run(Thread.java:1583)\n'
+    '\n'
+    '26/11/04 17:41:00 ERROR TaskSetManager: Task 0 in stage 0.0 failed 1 times; aborting job\n'
+    '\r'
+    '[Stage 0:>                                                          (0 + 0) / 1]\r'
+    'Traceback (most recent call last):\n'
+    '  File "/work/app/job.py", line 15, in <module>\n'
+    '    out.show()\n'
+    '    ~~~~~~~~^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/pyspark/sql/classic/dataframe.py", line 302, in show\n'
+    '    print(self._show_string(n, truncate, vertical))\n'
+    '          ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/pyspark/sql/classic/dataframe.py", line 328, in _show_string\n'
+    '    return self._jdf.showString(n, 20, vertical)\n'
+    '           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/py4j/java_gateway.py", line 1362, in __call__\n'
+    '    return_value = get_return_value(\n'
+    '        answer, self.gateway_client, self.target_id, self.name)\n'
+    '  File "/home/dev/.venv/lib/python3.13/site-packages/pyspark/errors/exceptions/captured.py", line 262, in deco\n'
+    '    raise converted from None\n'
+    '  File "/work/app/job.py", line 9, in parse_qty\n'
+    '    return int(raw)\n'
+    '      ^^^^^^^^^^^^^\n'
+    'pyspark.errors.exceptions.captured.PythonException: An exception was thrown from the Python worker:\n'
+    'Traceback (most recent call last):\n'
+    '  File "/work/app/job.py", line 9, in parse_qty\n'
+    '    return int(raw)\n'
+    "ValueError: invalid literal for int() with base 10: 'x3'\n"
+)
+
+_P_LIB = re.compile(r"site-packages|dist-packages|\.pyx|\.pxi|\.pxd|/lib/python3|pyspark\.zip|py4j|<frozen")
+_P_IPY = re.compile(r"^File (\S+?):(\d+), in (.*)$")
+_P_CELL = re.compile(r"^(?:Cell In\[\d+\]|Input In \[\d+\]|<ipython-input-[^>]*>),? ?(?:line \d+)?.*$")
+_P_PY = re.compile(r'^(\s*)File "(.+?)", line (\d+), in (.*)$')
+_P_STUB = re.compile(r"^\s*\[ctxprune: (\d+) (library frames folded|Java stack frames elided)\]$")
+_P_SAME = re.compile(r"^\s*\[ctxprune: same Python traceback as above \(\d+ lines\)\]$")
+_P_JAVA = re.compile(r"^\tat \S+\(.*\)$")
+_P_TB = "Traceback (most recent call last):"
+
+
+def _frame_items(lines, P):
+    """[(kind, start, end, is_library)] for IPython-style ('ipy') and classic ('py') frames."""
+    items, i, n = [], 0, len(lines)
+    while i < n:
+        p = P[i]
+        if m := _P_IPY.match(p):
+            j = i + 1
+            while j < n and P[j].strip():
+                j += 1
+            items.append(("ipy", i, j, bool(_P_LIB.search(m.group(1)))))
+            i = j
+        elif _P_CELL.match(p) and ("line" in p or p.startswith(("Input", "<ipython"))):
+            j = i + 1
+            while j < n and P[j].strip():
+                j += 1
+            items.append(("ipy", i, j, False))
+            i = j
+        elif m := _P_PY.match(p):
+            ind = m.group(1)
+            j = i + 1
+            while j < n and P[j].startswith(ind + "  ") and not _P_PY.match(P[j]):
+                j += 1
+            items.append(("py", i, j, bool(_P_LIB.search(m.group(2)))))
+            i = j
+        else:
+            i += 1
+    return items
+
+
+def fold_runtime(text: str) -> str:
+    lines = [plain(l) for l in text.split("\n")]
+    P = lines
+    n = len(lines)
+    items = _frame_items(lines, P)
+    drop, stubs = set(), {}
+    k = 0
+    while k < len(items):
+        if not items[k][3]:
+            k += 1
+            continue
+        run = [items[k]]
+        while k + 1 < len(items) and items[k + 1][3] and items[k + 1][0] == run[0][0] and items[k + 1][1] <= run[-1][2] + 1:
+            k += 1
+            run.append(items[k])
+        k += 1
+        start, end = run[0][1], run[-1][2]
+        ind = re.match(r"^\s*", lines[start]).group(0)
+        stub = f"{ind}[ctxprune: {len(run)} library frames folded]"
+        if len(stub) < sum(len(lines[x]) + 1 for x in range(start, end)):
+            stubs[start] = stub
+            drop.update(range(start, end))
+    out = []
+    for i, l in enumerate(lines):
+        if i in stubs:
+            out.append(stubs[i])
+        if i not in drop:
+            out.append(l)
+    # repeated Python tracebacks: identical frames+exception block after a header containing 'Traceback (most recent call last):'
+    lines, out, i, seen, res = out, [], 0, set(), []
+    n = len(lines)
+    while i < n:
+        l = lines[i]
+        res.append(l)
+        i += 1
+        if _P_TB in l:
+            j = i
+            while j < n and lines[j].startswith("  ") and not _P_SAME.match(lines[j]):
+                j += 1
+            if j < n and lines[j] and not lines[j].startswith((" ", "\t")):
+                j += 1  # the exception line belongs to the block
+            block = tuple(lines[i:j])
+            if len(block) >= 3 and block in seen:
+                res.append(f"  [ctxprune: same Python traceback as above ({len(block)} lines)]")
+                i = j
+            else:
+                seen.add(block)
+    # runs of Java stack frames
+    lines, res, i, n = res, [], 0, len(res)
+    while i < n:
+        if _P_JAVA.match(lines[i]):
+            j = i
+            while j < n and _P_JAVA.match(lines[j]):
+                j += 1
+            if j - i >= 3:
+                res.append(f"\t[ctxprune: {j - i} Java stack frames elided]")
+                i = j
+                continue
+        res.append(lines[i])
+        i += 1
+    return shrink_only(text, "\n".join(res))
+
+
+def probes_1325(text: str) -> dict:
+    lines = [plain(l) for l in text.split("\n")]
+    exc, user_frames, cell, libs, java = set(), [], [], 0, 0
+    for i, l in enumerate(lines):
+        if re.match(r"^(?:[\w.$]+(?:Error|Exception|Exit|Interrupt)\b.*|Caused by: .*)$", l) and not l.startswith("File"):
+            exc.add(l)
+        if (m := _P_IPY.match(l)):
+            if _P_LIB.search(m.group(1)):
+                libs += 1
+            else:
+                user_frames.append((l, next((x.strip() for x in lines[i + 1:i + 12] if re.match(r"^\s*-+> \d+", x)), None)))
+        elif _P_CELL.match(l) and ("line" in l or l.startswith(("Input", "<ipython"))):
+            user_frames.append((l, next((x.strip() for x in lines[i + 1:i + 12] if re.match(r"^\s*-+> \d+", x)), None)))
+        elif (m := _P_PY.match(l)):
+            if _P_LIB.search(m.group(2)):
+                libs += 1
+            else:
+                user_frames.append((l.strip(), lines[i + 1].strip() if i + 1 < len(lines) and lines[i + 1].startswith(m.group(1) + "    ") else None))
+        if (s := _P_STUB.match(l)):
+            if s.group(2).startswith("library"):
+                libs += int(s.group(1))
+            else:
+                java += int(s.group(1))
+        elif _P_JAVA.match(l):
+            java += 1
+    if "------------------" in lines:
+        a = lines.index("------------------")
+        b = lines.index("------------------", a + 1) if "------------------" in lines[a + 1:] else a
+        cell = lines[a + 1:b]
+    return {"distinct exception lines": sorted(exc), "user frames with source pointer": sorted(set(user_frames), key=str), "failing cell source": cell,
+            "library frames accounted for": libs, "java frames accounted for": java}
+
+
+COMPOSITE_1325 = cat("$ make notebooks\nexecuting nb.ipynb ...\n", NBCONVERT_KEYERROR, "make: *** [Makefile:12: notebooks] Error 1\n$ spark-submit job.py\n", PYSPARK_UDF_ERROR, "$ echo $?\n1\n")
+
+case(
+    1325,
+    claim="Strips ANSI colour, folds each run of library frames (site-packages, Cython .pyx/.pxi, pyspark/py4j, stdlib) of an IPython or classic traceback into '[ctxprune: N library frames folded]', replaces a Python traceback that repeats an earlier one by a 'same as above' line, and replaces runs of 3+ Java 'at' frames by a count; the failing cell's source, every user frame (Cell In[N], project files) with its pointer line, every distinct exception line and the counts of library and Java frames are unchanged.",
+    loses="ANSI colour, the names and source excerpts of library frames, the second and later identical copies of a Python traceback, and the individual Java frames (the saved original keeps them)",
+    encode=fold_runtime,
+    probes=probes_1325,
+    fixtures=lambda: [
+        Fixture("jupyter nbconvert --execute: pandas KeyError, ANSI colour, nbconvert's own traceback first (real)", NBCONVERT_KEYERROR, True),
+        Fixture("pyspark: UDF raises ValueError, traceback repeated 3x with Java frames (real)", PYSPARK_UDF_ERROR, True),
+        Fixture("CI log: notebook failure first, make error, spark failure last", COMPOSITE_1325, True),
+        Fixture("a short traceback with only user frames", 'Traceback (most recent call last):\n  File "/work/app/job.py", line 12, in <module>\n    main()\n  File "/work/app/job.py", line 8, in main\n    raise ValueError("bad")\nValueError: bad\n', False),
+        Fixture("a single library frame (folding would not be shorter)", 'Traceback (most recent call last):\n  File "/a/site-packages/x.py", line 1, in f\n    g()\nKeyError: 1\n', False),
+        Fixture("text with a Traceback header inside a log line and no frames", "ERROR: job failed: Traceback (most recent call last):\n[ctxprune: same Python traceback as above (9 lines)]\n", None),
+    ],
+    min_gain=0.3,
+)
+
+
+
+# ===============================================================================================================
 # #220 g++/clang overload errors: keep the error plus the first three 'note: candidate' records, then '+N more'.
 # RULE: every error line, the first three candidates (with their 'no known conversion' sub-notes), the number of
 # candidates per run and every non-candidate note/warning must survive.
@@ -4307,6 +4726,385 @@ case(
         Fixture("a report that already has a stub", "# A fatal error has been detected by the Java Runtime Environment:\n#\n#  SIGSEGV (0xb) at pc=0x1, pid=1, tid=1\n[ctxprune: 4 lines elided (Registers)]\n", None),
     ],
     min_gain=0.4,
+)
+
+
+
+# ===============================================================================================================
+# #498 Show lint and typecheck findings only in git-diff-touched files. Modelled as a transform over the (diff,
+# findings) bundle a hook would assemble: '=== git diff -U0 ===' followed by one '=== <tool> ===' section per
+# linter. Keeps findings in touched files, then a count and the first three of the rest, plus (the addition this
+# case needed) every outside finding that names a def/class the diff changed. The real capture shows why: a
+# signature change in api.py breaks src/zz_caller.py, and mypy lists that error 17th of 17, not in the first three.
+# The diff section itself is replaced by one '[498] diff touches ...' line (it was the filter's input, the agent can
+# read `git diff` itself). Real repo: 40 files, 200 ruff findings, 17 mypy errors, 3 files edited.
+
+LINT_DIFF_BUNDLE = (
+    '=== git diff -U0 ===\n'
+    'diff --git a/src/api.py b/src/api.py\n'
+    'index 18a0b42..d46294e 100644\n'
+    '--- a/src/api.py\n'
+    '+++ b/src/api.py\n'
+    '@@ -1,2 +1,2 @@\n'
+    '-def parse(x: int) -> int:\n'
+    '-    return x + 1\n'
+    '+def parse(x: int, strict: bool) -> int:\n'
+    '+    return x + (2 if strict else 1)\n'
+    'diff --git a/src/m03.py b/src/m03.py\n'
+    'index 53972a5..39f6db2 100644\n'
+    '--- a/src/m03.py\n'
+    '+++ b/src/m03.py\n'
+    '@@ -8,0 +9 @@ def work_m03(items: List[int]) -> int:\n'
+    '+    extra = 2\n'
+    'diff --git a/src/util.py b/src/util.py\n'
+    'index 9877444..0cf3cb3 100644\n'
+    '--- a/src/util.py\n'
+    '+++ b/src/util.py\n'
+    '@@ -1,0 +2 @@ import re\n'
+    '+import os\n'
+    '=== ruff check src --select F,E --output-format concise ===\n'
+    'src/m00.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m00.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m00.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m00.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m00.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m00.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m01.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m01.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m01.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m01.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m01.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m02.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m02.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m02.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m02.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m02.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m03.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m03.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m03.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m03.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m03.py:9:5: F841 Local variable `extra` is assigned to but never used\n'
+    'src/m03.py:13:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m03.py:18:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m04.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m04.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m04.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m04.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m04.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m04.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m05.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m05.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m05.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m05.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m05.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m05.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m06.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m06.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m06.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m06.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m06.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m06.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m07.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m07.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m07.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m07.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m07.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m07.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m08.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m08.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m08.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m08.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m08.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m09.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m09.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m09.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m09.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m09.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m10.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m10.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m10.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m10.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m10.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m11.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m11.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m11.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m11.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m11.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m12.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m12.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m12.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m12.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m12.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m12.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m13.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m13.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m13.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m13.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m13.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m13.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m14.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m14.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m14.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m14.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m14.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m14.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m15.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m15.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m15.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m15.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m15.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m16.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m16.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m16.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m16.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m16.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m17.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m17.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m17.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m17.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m17.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m17.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m18.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m18.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m18.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m18.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m18.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m19.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m19.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m19.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m19.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m19.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m19.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m20.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m20.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m20.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m20.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m20.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m20.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m21.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m21.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m21.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m21.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m21.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m22.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m22.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m22.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m22.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m22.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m22.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m23.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m23.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m23.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m23.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m23.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m24.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m24.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m24.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m24.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m24.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m25.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m25.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m25.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m25.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m25.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m26.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m26.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m26.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m26.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m26.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m26.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m27.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m27.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m27.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m27.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m27.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m27.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m28.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m28.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m28.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m28.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m28.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m28.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m29.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m29.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m29.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m29.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m29.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m30.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m30.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m30.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m30.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m30.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m31.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m31.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m31.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m31.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m31.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m32.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m32.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m32.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m32.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m32.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m33.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m33.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m33.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m33.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m33.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m34.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m34.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m34.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m34.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m34.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m34.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/m35.py:1:8: F401 [*] `os` imported but unused\n'
+    'src/m35.py:2:8: F401 [*] `sys` imported but unused\n'
+    'src/m35.py:3:8: F401 [*] `json` imported but unused\n'
+    'src/m35.py:8:5: F841 Local variable `unused` is assigned to but never used\n'
+    'src/m35.py:12:17: E711 Comparison to `None` should be `cond is None`\n'
+    'src/m35.py:17:5: F841 Local variable `c` is assigned to but never used\n'
+    'src/util.py:2:8: F401 [*] `os` imported but unused\n'
+    'Found 200 errors.\n'
+    '[*] 109 fixable with the `--fix` option (91 hidden fixes can be enabled with the `--unsafe-fixes` option).\n'
+    '=== mypy src ===\n'
+    'src/m30.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m25.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m24.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m20.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m17.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m16.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m15.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m12.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m11.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m10.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m09.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m07.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m05.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m02.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m01.py:17: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/m00.py:21: error: Incompatible return value type (got "int", expected "str")  [return-value]\n'
+    'src/zz_caller.py:5: error: Missing positional argument "strict" in call to "parse"  [call-arg]\n'
+    'Found 17 errors in 17 files (checked 40 source files)\n'
+)
+
+_L_SEP = re.compile(r"^=== (.+) ===$")
+_L_FINDING = re.compile(r"^([^\s:]+):(\d+):(?:\d+:)? (.*)$")
+_L_TOUCH = re.compile(r"^\[498\] diff touches \d+ files?: (.*)$")
+_L_OUT = re.compile(r"^\[498\] (\d+) findings outside the diff in \d+ files?; first 3:$")
+_L_LINK = re.compile(r"^\[498\] outside findings that mention names the diff changed \(\d+\):$")
+
+
+def _l_diff_facts(lines: list[str]):
+    touched = []
+    for l in lines:
+        if m := re.match(r"^diff --git a/(.+?) b/(.+)$", l):
+            if m.group(2) not in touched:
+                touched.append(m.group(2))
+    ids = sorted({m.group(1) for l in lines if (m := re.match(r"^[-+]\s*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)", l))})
+    return touched, ids
+
+
+def _l_sections(lines: list[str]):
+    secs, cur = [], (None, [])
+    for l in lines:
+        if m := _L_SEP.match(l):
+            secs.append(cur)
+            cur = (m.group(1), [])
+        else:
+            cur[1].append(l)
+    secs.append(cur)
+    return secs  # first entry is the preamble (name None)
+
+
+def filter_findings(text: str) -> str:
+    lines = text.split("\n")
+    secs = _l_sections(lines)
+    diff = next((s for s in secs if s[0] and s[0].startswith("git diff")), None)
+    if diff is None:
+        return text
+    touched, ids = _l_diff_facts(diff[1])
+    if not touched:
+        return text
+    id_rx = re.compile(r"\b(?:" + "|".join(map(re.escape, ids)) + r")\b") if ids else None
+    if not any(sum(1 for l in body if (m := _L_FINDING.match(l)) and m.group(1) not in touched) > 4 for name, body in secs[1:] if not name.startswith("git diff")):
+        return text  # nothing outside the diff worth hiding: leave the whole bundle, diff included
+    out = list(secs[0][1])
+    for name, body in secs[1:]:
+        if name.startswith("git diff"):
+            out.append(f"[498] diff touches {len(touched)} file{'s' if len(touched) != 1 else ''}: {', '.join(touched)}")
+            out += [l for l in body if l.strip() and not re.match(r"^(?:diff --git|index |--- |\+\+\+ |@@ |[-+ ])", l)]
+            continue
+        out.append(f"=== {name} ===")
+        found = [(l, _L_FINDING.match(l)) for l in body]
+        mine = [l for l, m in found if m and m.group(1) in touched]
+        outside = [(l, m) for l, m in found if m and m.group(1) not in touched]
+        other = [l for l, m in found if not m]
+        if len(outside) <= 4:
+            out += body
+            continue
+        out += mine
+        files = {m.group(1) for _, m in outside}
+        out += [f"[498] {len(outside)} findings outside the diff in {len(files)} file{'s' if len(files) != 1 else ''}; first 3:"] + [l for l, _ in outside[:3]]
+        linked = [l for l, m in outside if id_rx and id_rx.search(m.group(3))]
+        if linked:
+            out += [f"[498] outside findings that mention names the diff changed ({len(linked)}):"] + linked
+        out += other
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_498(text: str) -> dict:
+    lines = text.split("\n")
+    secs = _l_sections(lines)
+    touched, ids = [], []
+    for name, body in secs:
+        if name and name.startswith("git diff"):
+            touched, ids = _l_diff_facts(body)
+    for l in lines:
+        if m := _L_TOUCH.match(l):
+            touched = m.group(1).split(", ")
+    per_tool = {}
+    for name, body in secs[1:]:
+        if name.startswith("git diff"):
+            continue
+        mine, outside, linked_lines, other, in_link = [], 0, [], [], False
+        id_rx = re.compile(r"\b(?:" + "|".join(map(re.escape, ids)) + r")\b") if ids else None
+        encoded = any(_L_OUT.match(l) for l in body)
+        for l in body:
+            if m := _L_OUT.match(l):
+                outside += int(m.group(1))
+                in_link = False
+            elif _L_LINK.match(l):
+                in_link = True
+            elif fm := _L_FINDING.match(l):
+                if fm.group(1) in touched:
+                    mine.append(l)
+                elif encoded:
+                    if in_link:
+                        linked_lines.append(l)
+                else:
+                    outside += 1
+                    if id_rx and id_rx.search(fm.group(3)):
+                        linked_lines.append(l)
+            else:
+                other.append(l)
+                in_link = False
+        per_tool[name] = (mine, outside, linked_lines, other)
+    return {"files the diff touches": touched, "per tool: findings in touched files, outside count, outside findings naming a changed def/class, summary lines": sorted(per_tool.items())}
+
+
+case(
+    498,
+    claim="Replaces the git diff section by a one-line list of touched files and, per lint/typecheck section, keeps every finding in a touched file, then states how many findings lie outside the diff (with the first three) and lists every outside finding whose message names a def/class the diff added or removed (the cross-file breaks); summary lines are unchanged.",
+    loses="the diff text itself, the line-by-line detail of old findings outside the diff beyond the first three, and linked findings are matched by name only (a break that does not mention the changed name is shown only if it is among the first three)",
+    encode=filter_findings,
+    probes=probes_498,
+    fixtures=lambda: [
+        Fixture("40-file repo, 3 edited files, 200 ruff findings and 17 mypy errors; the caller break is mypy's 17th line (real)", LINT_DIFF_BUNDLE, True),
+        Fixture("only a diff, no findings sections", LINT_DIFF_BUNDLE.split("=== ruff")[0], False),
+        Fixture("findings with no diff section", "=== ruff check ===\n" + "".join(f"src/m{i:02d}.py:1:8: F401 `os` imported but unused\n" for i in range(12)) + "Found 12 errors.\n", False),
+        Fixture("few findings outside the diff: nothing to hide", "=== git diff -U0 ===\ndiff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-x=1\n+x = 1\n=== ruff ===\nsrc/a.py:1:1: E225 missing whitespace\nsrc/b.py:2:1: F401 `os` unused\nFound 2 errors.\n", False),
+        Fixture("a diff header with no hunks and a stray separator", "=== git diff -U0 ===\ndiff --git a/x b/x\n=== ===\n=== ruff ===\n" + "".join(f"y{i}.py:1:1: E1 x\n" for i in range(8)), None),
+    ],
+    min_gain=0.5,
 )
 
 

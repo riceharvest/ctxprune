@@ -31,6 +31,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict, defaultdict
+from fractions import Fraction
 from html.parser import HTMLParser
 
 from harness import Fixture, case
@@ -691,7 +692,15 @@ def mine_fields(text: str) -> str:
 
 
 def _flat(row: dict) -> dict:
-    return {p: v for p, v in _leaves(row) if p.rpartition(".")[2] != "node_id"}
+    out, stack = {}, [("", row)]
+    while stack:
+        prefix, node = stack.pop()
+        for k, v in node.items():
+            if isinstance(v, dict) and v:
+                stack.append((prefix + k + ".", v))
+            elif k != "node_id":
+                out[prefix + k] = v
+    return out
 
 
 def _arrays_of(o) -> dict:
@@ -842,6 +851,8 @@ def _columns(rows) -> dict:
             continue
         mean = sum(xs) / len(xs)
         var = sum((x - mean) ** 2 for x in xs) / len(xs)
+        if not (math.isfinite(mean) and math.isfinite(var)):
+            continue
         out[p] = {"mean": mean, "var": var, "min": min(xs), "max": max(xs), "vals": vals}
     return out
 
@@ -920,6 +931,50 @@ def _wrapper(x) -> bool:
             and isinstance(x.get("rows"), list) and len(x["rows"]) == len(s["kept"]) and all(isinstance(i, int) for i in s["kept"]))
 
 
+def _long2(x) -> bool:
+    return isinstance(x, list) and len(x) >= MIN_ARRAY and sum(1 for r in x if isinstance(r, dict)) / len(x) >= 0.9
+
+
+def _numleaves2(row: dict):
+    out, stack = [], [(row, "", 0)]
+    while stack:
+        node, prefix, depth = stack.pop()
+        if depth > ROW_DEPTH:
+            continue
+        for k, v in node.items():
+            if isinstance(v, dict):
+                stack.append((v, prefix + k + ".", depth + 1))
+            elif isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                out.append((prefix + k, v))
+    return out
+
+
+def _stats_exact(rows: list) -> dict:
+    """Column statistics in exact rational arithmetic (the encoder uses floats): [mean, variance, min, max] per usable numeric column."""
+    cols: dict = {}
+    for i, r in enumerate(rows):
+        if isinstance(r, dict):
+            for p, v in _numleaves2(r):
+                cols.setdefault(p, {})[i] = v
+    out = {}
+    for p in sorted(cols):
+        xs = list(cols[p].values())
+        if len(xs) * 10 < len(rows) * 9 or len(set(xs)) < 3:
+            continue
+        fr = [Fraction(x) for x in xs]
+        mean = sum(fr) / len(fr)
+        out[p] = [mean, sum((x - mean) ** 2 for x in fr) / len(fr), min(xs), max(xs)]
+    return out
+
+
+def _beyond_3_sigma(v, mean, var) -> bool:
+    try:
+        var_f, d = Fraction(var), Fraction(v) - Fraction(mean)
+    except (OverflowError, ValueError):
+        return False
+    return var_f > 0 and d * d >= 9 * var_f
+
+
 def probes_132(text: str) -> dict:
     o = jload(text)
     if o is _BAD:
@@ -930,7 +985,7 @@ def probes_132(text: str) -> dict:
         if _wrapper(x):
             s = x["$sampled"]
             found[path] = (s["total"], s["keys"], dict(zip(s["kept"], x["rows"])), s["stats"])
-        elif _is_long(x):
+        elif _long2(x):
             modal = list(Counter(tuple(r) for r in x if isinstance(r, dict)).most_common(1)[0][0])
             found[path] = (len(x), modal, dict(enumerate(x)), None)
         elif isinstance(x, dict):
@@ -941,13 +996,13 @@ def probes_132(text: str) -> dict:
     for path, (total, keys, rows, stats) in sorted(found.items()):
         if stats is None:  # an array the encoder left alone: compute what the header would hold
             ordered = [rows[i] for i in range(total)]
-            stats = {p: [c["mean"], c["var"], c["min"], c["max"]] for p, c in _columns(ordered).items()}
+            stats = _stats_exact(ordered)
         need = {}
         for i, r in rows.items():
             odd = not isinstance(r, dict) or set(r) != set(keys)
             flagged = {}
-            for p, v in _num_leaves(r) if isinstance(r, dict) else []:
-                if p in stats and stats[p][1] > 0 and (v - stats[p][0]) ** 2 >= 9 * stats[p][1]:
+            for p, v in _numleaves2(r) if isinstance(r, dict) else []:
+                if p in stats and _beyond_3_sigma(v, stats[p][0], stats[p][1]):
                     flagged[p] = v
             if i < EDGE or i >= total - EDGE or odd or _err_stack(r) or flagged:
                 need[i] = {"row": _canon(r), "odd schema": odd, "error": _err_stack(r), "sigma outlier columns": flagged}
@@ -1106,6 +1161,10 @@ _STUB_FLAT = re.compile(r"\[(\d+) (floats|ints), min (\S+), max (\S+), first 4: 
 _STUB_ROWS = re.compile(r"\[(\d+) x (\d+) (floats|ints), col min (\S+), col max (\S+), first 2 rows: (.*)\]\Z", re.S)
 
 
+def _kind2(toks) -> str:
+    return "floats" if any(c in t for t in toks for c in ".eE") else "ints"
+
+
 def _elided_record(x):
     """Record for an array the encoder would elide, or for a string already in stub form; None otherwise."""
     if isinstance(x, str) and not isinstance(x, _Tok):
@@ -1119,13 +1178,13 @@ def _elided_record(x):
     if all(isinstance(v, _Tok) for v in x):
         if len(x) < FLAT_MIN:
             return None
-        return ("flat", len(x), _kind(x), min(x, key=float), max(x, key=float), tuple(x[:4]))
+        return ("flat", len(x), _kind2(x), min(x, key=float), max(x, key=float), tuple(x[:4]))
     if all(isinstance(v, list) and v and all(isinstance(t, _Tok) for t in v) for v in x):
         w = len(x[0])
         if len(x) < ROWS_MIN or any(len(v) != w for v in x) or len(x) * w < FLAT_MIN or w > ROW_WIDTH_MAX:
             return None
         flat = [t for v in x for t in v]
-        return ("rows", len(x), w, _kind(flat), tuple(min((v[c] for v in x), key=float) for c in range(w)), tuple(max((v[c] for v in x), key=float) for c in range(w)),
+        return ("rows", len(x), w, _kind2(flat), tuple(min((v[c] for v in x), key=float) for c in range(w)), tuple(max((v[c] for v in x), key=float) for c in range(w)),
                 ";".join(",".join(v) for v in x[:2]))
     return None
 
@@ -1321,6 +1380,15 @@ def _sig2(s) -> str:
     return "any" if not isinstance(s.get("type"), str) else s["type"] + (":" + s["format"] if isinstance(s.get("format"), str) else "")
 
 
+def _resolve2(spec: dict, node):
+    if isinstance(node, dict) and isinstance(node.get("$ref"), str) and node["$ref"].startswith("#/components/"):
+        cur = spec
+        for part in node["$ref"].split("/")[1:]:
+            cur = cur[part]
+        return cur
+    return node
+
+
 def _split_top(s: str) -> list[str]:
     return [x for x in s.split(", ")] if s else []
 
@@ -1336,7 +1404,7 @@ def probes_135(text: str) -> dict:
                     op = item[m]
                     resp = {}
                     for st, r in op.get("responses", {}).items():
-                        r = _resolve(spec, r)
+                        r = _resolve2(spec, r)
                         c = r.get("content") if isinstance(r, dict) else None
                         med = (c.get("application/json") or next(iter(c.values()))) if isinstance(c, dict) and c else None
                         resp[str(st)] = _sig2(med.get("schema")) if isinstance(med, dict) and "schema" in med else None
@@ -1347,9 +1415,9 @@ def probes_135(text: str) -> dict:
         for m, p, op, item, resp in raw:
             params = {}
             for x in list(item.get("parameters", [])) + list(op.get("parameters", [])):
-                x = _resolve(spec, x)
+                x = _resolve2(spec, x)
                 params[(x["name"], x["in"])] = (_sig2(x.get("schema")), bool(x.get("required")))
-            rb = _resolve(spec, op.get("requestBody"))
+            rb = _resolve2(spec, op.get("requestBody"))
             body = None
             if isinstance(rb, dict):
                 c = rb.get("content")
@@ -1560,6 +1628,18 @@ def _cap_lines(text: str) -> tuple:
     return (len(ls), tuple(ls if len(ls) <= NB_CAP else ls[:NB_HEAD] + ls[-NB_TAIL:]))
 
 
+def _mt2(v) -> str:
+    if isinstance(v, list) and all(isinstance(x, str) for x in v):
+        return "".join(v)
+    if isinstance(v, str):
+        return v
+    raise ValueError("odd text")
+
+
+def _sl2(c: dict) -> list[str]:
+    return _mt2(c.get("source", "")).splitlines()
+
+
 def probes_322(text: str) -> dict:
     nb = jload(text)
     if isinstance(nb, dict) and nb.get("nbformat") == 4 and isinstance(nb.get("cells"), list):
@@ -1569,15 +1649,15 @@ def probes_322(text: str) -> dict:
             for o in c.get("outputs", []) if c["cell_type"] == "code" else []:
                 k = o["output_type"]
                 if k == "stream":
-                    outs.append(("stream", o["name"], _cap_lines(_mimetext(o.get("text", "")))))
+                    outs.append(("stream", o["name"], _cap_lines(_mt2(o.get("text", "")))))
                 elif k == "error":
                     outs.append(("error", o["ename"], _ev(o.get("evalue", ""))))
                 else:
                     who = "result" if k == "execute_result" else "display"
                     for mime in sorted(o.get("data", {})):
-                        v = _mimetext(o["data"][mime])
+                        v = _mt2(o["data"][mime])
                         outs.append((who, o.get("execution_count") if who == "result" else None, mime, _cap_lines(v) if mime == "text/plain" else len(v.rstrip("\n"))))
-            src = _src_lines(c)
+            src = _sl2(c)
             cells.append({"index": i, "type": c["cell_type"], "ec": c.get("execution_count") if c["cell_type"] == "code" else None, "id": c.get("id"), "source": src, "outputs": outs})
         ks, li = nb.get("metadata", {}).get("kernelspec", {}), nb.get("metadata", {}).get("language_info", {})
         return {"notebook": (f"4.{_tok(nb.get('nbformat_minor', 0))}", _tok(ks.get("name", "-")), _tok(li.get("name", "-")), _tok(li.get("version", "-"))), "cells": cells}
@@ -2054,6 +2134,21 @@ def _md_facts(md: str) -> dict:
     return facts
 
 
+def _blocks_facts(blocks: list) -> tuple[list, list]:
+    """Probe-side: mentioned user ids and link urls straight from the rich_text elements, in document order (no rendering)."""
+    users, links, stack = [], [], list(reversed(blocks))
+    while stack:
+        n = stack.pop()
+        if isinstance(n, dict):
+            if n.get("type") == "user":
+                users.append(str(n.get("user_id")))
+            elif n.get("type") == "link":
+                links.append(str(n.get("url")))
+            if isinstance(n.get("elements"), list):
+                stack.extend(reversed(n["elements"]))
+    return users, links
+
+
 def probes_324(text: str) -> dict:
     o = jload(text)
     if o is _BAD:
@@ -2080,11 +2175,12 @@ def probes_324(text: str) -> dict:
                     stack.append((f"{path}.{k}", v))
             if isinstance(x.get("text"), str) and ("blocks" in x or x.get("type") == "message"):
                 # what the message says about mentions and links: from the blocks when they are still there, from `text` otherwise
-                if isinstance(x.get("blocks"), list):
-                    src = "\n".join(_slack_text(b) for b in x["blocks"]) if all(isinstance(b, dict) and b.get("type") == "rich_text" for b in x["blocks"]) else x["text"]
+                blocks = x.get("blocks")
+                if isinstance(blocks, list) and all(isinstance(b, dict) and b.get("type") == "rich_text" for b in blocks):
+                    users, links = _blocks_facts(blocks)
                 else:
-                    src = x["text"]
-                slack.append((path, x["text"], re.findall(r"<@(\w+)>", src), re.findall(r"<(https?://[^|>]+)", src), {k: v for k, v in x.items() if k != "blocks"}))
+                    users, links = re.findall(r"<@(\w+)>", x["text"]), re.findall(r"<(https?://[^|>]+)", x["text"])
+                slack.append((path, x["text"], users, links, {k: v for k, v in x.items() if k != "blocks"}))
         elif isinstance(x, str) and x.startswith(MD):
             docs.append((path, _md_facts(x[len(MD):])))
         elif isinstance(x, list):
@@ -2275,11 +2371,57 @@ def render_trace_tree(text: str) -> str:
     return gate(text, "\n".join(out) + "\n")
 
 
+def _unwrap2(v) -> str:
+    if isinstance(v, dict) and v:
+        (k, x), *_rest = v.items()
+        if k == "boolValue" and isinstance(x, bool):
+            return str(x).lower()
+        if k in ("stringValue", "intValue", "doubleValue") and type(x) in (str, int, float):
+            return str(x)
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
+
+
+def _spans_probe(doc) -> list[dict]:
+    """Probe-side normalisation of OTLP / Jaeger / Zipkin, written separately from _spans_of."""
+    out = []
+    if isinstance(doc, dict) and "resourceSpans" in doc:
+        for rs in doc["resourceSpans"]:
+            res = {str(a["key"]): _unwrap2(a.get("value")) for a in (rs.get("resource") or {}).get("attributes") or []}
+            for ss in rs.get("scopeSpans") or rs.get("instrumentationLibrarySpans") or []:
+                for sp in ss.get("spans") or []:
+                    st = sp.get("status") or {}
+                    bad = st.get("code") in (2, "STATUS_CODE_ERROR")
+                    msg = str(st.get("message", ""))
+                    if bad and not msg:
+                        for ev in sp.get("events") or []:
+                            if ev.get("name") == "exception":
+                                ea = {str(a["key"]): _unwrap2(a.get("value")) for a in ev.get("attributes") or []}
+                                msg = ea.get("exception.type", "") + ": " + ea.get("exception.message", "")
+                    t0, t1 = int(sp["startTimeUnixNano"]), int(sp["endTimeUnixNano"])
+                    out.append({"trace": sp["traceId"], "id": sp["spanId"], "parent": sp.get("parentSpanId") or None, "name": sp["name"], "service": res.get("service.name", "?"), "start": t0 // 1000,
+                                "dur": (t1 - t0) // 1000, "error": bad, "msg": msg, "attrs": {str(a["key"]): _unwrap2(a.get("value")) for a in sp.get("attributes") or []}})
+    elif isinstance(doc, dict) and isinstance(doc.get("data"), list):
+        for tr in doc["data"]:
+            for sp in tr["spans"]:
+                kv = {str(t["key"]): t["value"] for t in sp.get("tags") or []}
+                refs = sp.get("references") or []
+                proc = (tr.get("processes") or {}).get(sp.get("processID")) or {}
+                out.append({"trace": sp["traceID"], "id": sp["spanID"], "parent": refs[0]["spanID"] if refs else None, "name": sp["operationName"], "service": proc.get("serviceName", "?"),
+                            "start": int(sp["startTime"]), "dur": int(sp["duration"]), "error": kv.get("error") in (True, "true", 1) or kv.get("otel.status_code") == "ERROR",
+                            "msg": str(kv.get("otel.status_description", "")), "attrs": {k: (v if isinstance(v, str) else json.dumps(v, separators=(",", ":"), ensure_ascii=False)) for k, v in kv.items() if k not in ("error", "otel.status_description")}})
+    elif isinstance(doc, list) and doc and all(isinstance(s, dict) and "traceId" in s and "id" in s for s in doc):
+        for sp in doc:
+            tags = sp.get("tags") or {}
+            out.append({"trace": sp["traceId"], "id": sp["id"], "parent": sp.get("parentId") or None, "name": sp.get("name", ""), "service": (sp.get("localEndpoint") or {}).get("serviceName", "?"),
+                        "start": int(sp["timestamp"]), "dur": int(sp["duration"]), "error": "error" in tags, "msg": str(tags.get("error", "")), "attrs": {str(k): str(v) for k, v in tags.items() if k != "error"}})
+    return out
+
+
 def _probe_spans(text: str):
     """Spans as (trace, depth, service, name, dur in 0.1ms, offset in 0.1ms, status, attrs) from the original or from the tree text."""
     doc = jload(text)
     if doc is not _BAD:
-        sp = _spans_of(doc)
+        sp = _spans_probe(doc)
         if not sp:
             return None
         res = {}
@@ -2446,6 +2588,22 @@ def journal_allowlist(text: str) -> str:
     return gate(text, "\n".join(out) + "\n")
 
 
+def _unit_p(o: dict) -> str:
+    for k in ("_SYSTEMD_UNIT", "SYSLOG_IDENTIFIER", "_COMM"):
+        if o.get(k):
+            return "_".join(str(o[k]).split()) or "-"
+    return "-"
+
+
+def _msg_p(o: dict) -> str:
+    m = o.get("MESSAGE", "")
+    if isinstance(m, list) and all(isinstance(x, int) for x in m):
+        return "<binary %d bytes>" % len(m)
+    if not isinstance(m, str):
+        raise ValueError("odd MESSAGE")
+    return "\\n".join(m.replace("\\", "\\\\").replace("\r", "\\r").split("\n"))
+
+
 def probes_424(text: str) -> dict:
     entries, host = [], None
     lines = [ln for ln in text.split("\n") if ln.strip()]
@@ -2464,8 +2622,8 @@ def probes_424(text: str) -> dict:
             us = int(o["__REALTIME_TIMESTAMP"])
             moment = datetime.datetime.fromtimestamp(us // 1_000_000, datetime.timezone.utc)
             ts = moment.strftime("%Y-%m-%dT%H:%M:%S") + f".{us // 1000 % 1000:03d}Z"
-            unit = _unit(o) + (f"@{'_'.join(str(o.get('_HOSTNAME', '-')).split()) or '-'}" if host == "*" else "")
-            entries.append((ts, unit, str(o.get("_PID") or o.get("SYSLOG_PID") or ""), str(o.get("PRIORITY", "-")), _message(o)))
+            unit = _unit_p(o) + (f"@{'_'.join(str(o.get('_HOSTNAME', '-')).split()) or '-'}" if host == "*" else "")
+            entries.append((ts, unit, str(o.get("_PID") or o.get("SYSLOG_PID") or ""), str(o.get("PRIORITY", "-")), _msg_p(o)))
     counts = Counter(e[3] for e in entries)
     return {"host": host, "entries (time, unit, pid, priority, message)": entries, "entries per priority": sorted(counts.items()),
             "error messages (priority 0-3)": [(e[1], e[4]) for e in entries if e[3] in "0123"], "units seen": sorted({e[1] for e in entries})}
@@ -2924,7 +3082,7 @@ def _packument(n: int = 70) -> str:
             meta["deprecated"] = "Contains a regression in the router, use 4.17.2"  # and one in the middle
         versions[v] = meta
     tags = {"latest": f"4.{(n - 25) // 4}.{(n - 25) % 4}", "next": "5.0.0-beta.3", "beta": "5.0.0-beta.3", "v3-legacy": "3.21.2"}
-    versions["5.0.0-beta.3"] = {**meta, "version": "5.0.0-beta.3", "_id": "express@5.0.0-beta.3", "engines": {"node": ">= 18"}}
+    versions["5.0.0-beta.3"] = {**meta, "version": "5.0.0-beta.3", "_id": "express@5.0.0-beta.3", "engines": {"node": ">= 20"}, "dependencies": {**meta["dependencies"], "router": "^2.0.0-beta.2"}}
     times["5.0.0-beta.3"] = "2024-03-25T15:00:21.002Z"
     tags["latest"] = list(versions)[-2]  # latest is not the last key: a prerelease follows it
     return jc({"_id": "express", "_rev": "2300-6f3d9a1b7c2e", "name": "express", "dist-tags": tags, "versions": versions, "time": times, "maintainers": meta["maintainers"], "description": meta["description"], "homepage": meta["homepage"],
@@ -3673,7 +3831,7 @@ index 0700ffd..e919bfa 100644
 # stubs, and a hunk whose only changes are counters and payloads loses its context lines too. Every other line is untouched.
 
 NB_LEGEND = "#ipynb-decoded: 'm|text' = one JSON string element (trailing \\n and comma dropped), '~|' = folded execution_count lines, <blob ..> = payload size"
-_CTR = re.compile(r'([ +-])\s*"execution_count": (?:null|\d+),?$')
+_CTR = re.compile(r'([ +-])\s*"execution_count": (?:null|[0-9]+),?$')
 _STR = re.compile(r'([ +-])\s*("(?:[^"\\]|\\.)*"),?$')
 _BLOB_KV = re.compile(r'([ +-])\s*"((?:image/[\w.+-]+)|application/pdf)": "((?:[^"\\]|\\.)*)",?$')
 _B64 = re.compile(r"(?:[A-Za-z0-9+/=]|\\n)+\Z")
@@ -3687,6 +3845,10 @@ def _decode_line(ln: str):
     if _CTR.match(ln):
         return "ctr", m, ln
     if b := _BLOB_KV.match(ln):
+        try:
+            json.loads('"' + b.group(3) + '"')
+        except ValueError:
+            return "raw", m, ln
         return "blob", m, f"<blob {b.group(2)} {len(b.group(3))}>"
     if s := _STR.match(ln):
         try:
@@ -3767,6 +3929,38 @@ def _body_lines(text: str) -> list[str]:
     return ls[:-1] if ls and ls[-1] == "" else ls
 
 
+def _classify2(ln: str):
+    """Probe-side classifier for one content line, written without the encoder's regexes: strip the marker, then ask json what the rest is."""
+    if not ln or ln[0] not in " +-":
+        return "raw", ln[:1], ln
+    m, rest = ln[0], ln[1:].lstrip()
+    core = rest[:-1] if rest.endswith(",") else rest
+    if rest.startswith('"execution_count": '):
+        v = core[len('"execution_count": '):]
+        if v == "null" or (v.isascii() and v.isdigit()):
+            return "ctr", m, ln
+    if core == core.rstrip() and core.startswith('"') and ": " in core:
+        key_end = core.find('": "')
+        if key_end > 0 and core.endswith('"') and (core[1:key_end].startswith("image/") or core[1:key_end] == "application/pdf") and '"' not in core[1:key_end]:
+            raw_val = core[key_end + 4:-1]
+            try:
+                json.loads('"' + raw_val + '"')
+                return "blob", m, f"<blob {core[1:key_end]} {len(raw_val)}>"
+            except ValueError:
+                pass
+    if core == core.rstrip() and len(core) >= 2 and core[0] == '"' and core[-1] == '"':
+        try:
+            val = json.loads(core)
+        except ValueError:
+            return "raw", m, ln
+        body = core[1:-1]
+        if len(body) >= 200 and set(body.replace("\\n", "")) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="):
+            return "blob", m, f"<blob base64 {len(body)}>"
+        val = val[:-1] if val.endswith("\n") else val
+        return ("raw", m, ln) if ("\n" in val or any(ord(c) < 32 and c != "\t" for c in val)) else ("str", m, val)
+    return "raw", m, ln
+
+
 def _diff_events(text: str) -> list:
     """Probe-side reading of a git diff (original or decoded) as a flat list of facts, tracking the current file and hunk."""
     ev, nb, hunk, started = [], False, None, False
@@ -3776,7 +3970,7 @@ def _diff_events(text: str) -> list:
         nonlocal pending
         if hunk is None:
             return
-        kinds = [(_decode_line(x) if not x.startswith(("~|",)) else None) for x in pending]
+        kinds = [(_classify2(x) if not x.startswith(("~|",)) else None) for x in pending]
         meaningful = any(k and k[0] in ("str", "raw") and k[1] in ("+", "-") for k in kinds)
         ctr = [0, 0]
         for k in kinds:
@@ -4759,6 +4953,10 @@ def _pbx_facts(text: str) -> dict:
             "object count": len(objs), "object versions": (root.get("objectVersion"), root.get("archiveVersion"))}
 
 
+_ROW2 = re.compile(r"\t\t(\{[^}]+\})\.(.*)\.(ActiveCfg|Build\.0) = (.*)$")
+_IDENT2 = re.compile(r"\t\t(\{[^}]+\}) = identity$")
+
+
 def _sln_facts(text: str) -> dict:
     lines = text.replace("\r\n", "\n").split("\n")
     projects, cfgs, per, other, section = [], [], defaultdict(dict), [], None
@@ -4775,9 +4973,9 @@ def _sln_facts(text: str) -> dict:
             cfgs.append(m.groups())
             other.append(ln)
         elif section == "ProjectConfigurationPlatforms":
-            if m := SLN_ID_LINE.match(ln):
+            if m := _ROW2.match(ln):
                 per[m.group(1)].setdefault(m.group(2), {})[m.group(3)] = m.group(4)
-            elif m := SLN_COLLAPSED.match(ln):
+            elif m := _IDENT2.match(ln):
                 per[m.group(1)]["*identity*"] = {}
             elif ln != SLN_LEGEND:
                 other.append(ln)
@@ -5043,7 +5241,7 @@ def probes_1162(text: str) -> dict:
             return {"otlp": None}
         for d in docs:
             for rl in d.get("resourceLogs", []):
-                svc = _service(rl.get("resource"))
+                svc = _svc2(rl.get("resource"))
                 for sl in rl.get("scopeLogs", []):
                     for r in sl.get("logRecords", []):
                         kv = {"ts": _record_ts_probe(r), "level": _level_probe(r), "service": svc, "body": _otlp_val(r["body"]) if r.get("body") is not None else ""}
@@ -5051,13 +5249,12 @@ def probes_1162(text: str) -> dict:
                             kv["trace"] = str(r["traceId"])
                         if r.get("spanId"):
                             kv["span"] = str(r["spanId"])
-                        for k, v in _attr_pairs(r.get("attributes"), OTLP_RESERVED_LOG):
-                            kv[k] = v
+                        kv.update(_attrs_probe(r.get("attributes"), OTLP_RESERVED_LOG))
                         logs.append(kv)
                         if kv["level"].upper() in ("ERROR", "FATAL", "CRITICAL"):
                             err_by_service[svc] += 1
             for rm in d.get("resourceMetrics", []):
-                svc = _service(rm.get("resource"))
+                svc = _svc2(rm.get("resource"))
                 for sm in rm.get("scopeMetrics", []):
                     for m in sm.get("metrics", []):
                         kind = next(k for k in ("sum", "gauge", "histogram") if k in m)
@@ -5067,8 +5264,7 @@ def probes_1162(text: str) -> dict:
                         pts = []
                         for dp in b.get("dataPoints", []):
                             kv = {"ts": _record_ts_probe(dp), "service": svc}
-                            for k, v in _attr_pairs(dp.get("attributes"), OTLP_RESERVED_METRIC):
-                                kv[k] = v
+                            kv.update(_attrs_probe(dp.get("attributes"), OTLP_RESERVED_METRIC))
                             if kind == "histogram":
                                 kv.update(count=_number(dp.get("count", 0)), sum=_number(dp.get("sum", 0)))
                                 for k in ("min", "max"):
@@ -5083,6 +5279,24 @@ def probes_1162(text: str) -> dict:
     top = err_by_service.most_common()
     best = [s for s, n in top if n == top[0][1]] if top else []
     return {"log records": logs, "metrics": metrics, "errors per service": sorted(err_by_service.items()), "service with the most errors": sorted(best)}
+
+
+def _attrs_probe(lst, reserved) -> dict:
+    out = {}
+    for a in lst or []:
+        k = str(a["key"])
+        if not re.fullmatch(r"[^\s=\"]+", k) or (k.startswith("a.") and k[2:] in reserved):
+            raise ValueError("odd attribute key")
+        out[("a." + k) if k in reserved else k] = _unwrap2(a.get("value"))
+    return dict(sorted(out.items()))
+
+
+def _svc2(res) -> str:
+    name = "-"
+    for a in (res or {}).get("attributes") or []:
+        if a.get("key") == "service.name":
+            name = _unwrap2(a.get("value"))
+    return _tok(name)
 
 
 def _record_ts_probe(rec: dict) -> str:
