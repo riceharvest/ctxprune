@@ -1,6 +1,6 @@
-"""Fidelity gate for the lossless ([L]) ideas in docs/ideas: one test per idea, plus coverage and harness checks.
+"""Fidelity gate for the lossless ([L]) and shortlisted rule ([R]) ideas in docs/ideas: one test per idea, plus coverage and harness checks.
 
-The cases live in docs/ideas/lossless/cases_*.py; `python docs/ideas/lossless/run.py` runs the same thing from a shell.
+The cases live in docs/ideas/gate/cases_*.py; `python docs/ideas/gate/run.py` runs the same thing from a shell.
 """
 import json
 import os
@@ -8,8 +8,8 @@ import sys
 
 import pytest
 
-LOSSLESS = os.path.join(os.path.dirname(__file__), "..", "docs", "ideas", "lossless")
-sys.path.insert(0, os.path.abspath(LOSSLESS))
+GATE = os.path.join(os.path.dirname(__file__), "..", "docs", "ideas", "gate")
+sys.path.insert(0, os.path.abspath(GATE))
 import harness  # noqa: E402
 
 harness.discover()
@@ -34,22 +34,22 @@ def test_oracles_notice_corrupted_encodings():
     assert not blind, f"cases whose oracle misses corrupted encodings: {blind}"
 
 
-def test_every_kept_lossless_idea_has_a_case():
+def test_every_gated_idea_has_a_case():
     missing, extra = harness.coverage()
-    assert not missing, f"[L] ideas without a case: {missing}"
-    assert not extra, f"cases for ids that are not kept [L] ideas: {extra}"
+    assert not missing, f"gated ideas without a case: {missing}"
+    assert not extra, f"cases for ids that are not kept ideas: {extra}"
 
 
 def test_ideas_jsonl_records_each_check():
-    """ideas.jsonl carries the claim of every case (python docs/ideas/lossless/run.py --sync writes it)."""
-    path = os.path.join(LOSSLESS, "..", "ideas.jsonl")
+    """ideas.jsonl carries the claim of every case (python docs/ideas/gate/run.py --sync writes it)."""
+    path = os.path.join(GATE, "..", "ideas.jsonl")
     for r in (json.loads(l) for l in open(path, encoding="utf-8") if l.strip()):
-        c = harness.REGISTRY.get(r["id"]) if r["tag"] == "L" and r["status"] != "dropped" else None
+        c = harness.REGISTRY.get(r["id"]) if r["status"] != "dropped" else None
         if c is None:
             assert "check" not in r, f"#{r['id']} has a check but no case"
         else:
             assert (r.get("check"), r.get("check_kind"), r.get("check_loses", "")) == (c.claim, c.kind, c.loses), \
-                f"#{r['id']}: ideas.jsonl is stale, run python docs/ideas/lossless/run.py --sync"
+                f"#{r['id']}: ideas.jsonl is stale, run python docs/ideas/gate/run.py --sync"
 
 
 @pytest.mark.parametrize("idea", sorted(harness.REGISTRY))

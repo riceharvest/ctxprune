@@ -1,15 +1,15 @@
-"""Run the fidelity gate for the lossless ([L]) ideas.
+"""Run the fidelity gate for the lossless ([L]) and shortlisted rule ([R]) ideas.
 
-    python docs/ideas/lossless/run.py              # every case
-    python docs/ideas/lossless/run.py 9 10 392     # just these idea ids
-    python docs/ideas/lossless/run.py -v 9         # per-fixture detail and every failure
-    python docs/ideas/lossless/run.py --module cases_logs -v   # only that file's cases (others may be unfinished)
-    python docs/ideas/lossless/run.py --list       # id, kind, claim
-    python docs/ideas/lossless/run.py --coverage   # exit 1 if a kept [L] idea has no case
-    python docs/ideas/lossless/run.py --selftest   # prove the gate rejects planted defects
-    python docs/ideas/lossless/run.py --oracles    # corrupt each encoding; the case must notice (is the oracle vacuous?)
-    python docs/ideas/lossless/run.py --json       # machine-readable results
-    python docs/ideas/lossless/run.py --sync       # write each case's claim into ideas.jsonl, rebuild the markdown
+    python docs/ideas/gate/run.py              # every case
+    python docs/ideas/gate/run.py 9 10 392     # just these idea ids
+    python docs/ideas/gate/run.py -v 9         # per-fixture detail and every failure
+    python docs/ideas/gate/run.py --module cases_logs -v   # only that file's cases (others may be unfinished)
+    python docs/ideas/gate/run.py --list       # id, kind, claim
+    python docs/ideas/gate/run.py --coverage   # exit 1 if a gated idea has no case
+    python docs/ideas/gate/run.py --selftest   # prove the gate rejects planted defects
+    python docs/ideas/gate/run.py --oracles    # corrupt each encoding; the case must notice (is the oracle vacuous?)
+    python docs/ideas/gate/run.py --json       # machine-readable results
+    python docs/ideas/gate/run.py --sync       # write each case's claim into ideas.jsonl, rebuild the markdown
 
 Exit status is 1 on any failure (or, with --coverage / --selftest, any gap). See harness.py for what a pass means.
 """
@@ -36,7 +36,7 @@ def sync() -> int:
         c = harness.REGISTRY.get(r["id"])
         for k in ("check", "check_kind", "check_loses"):
             r.pop(k, None)
-        if c and r["tag"] == "L" and r["status"] != "dropped":
+        if c and r["status"] != "dropped":
             r["check"], r["check_kind"] = c.claim, c.kind
             if c.loses:
                 r["check_loses"] = c.loses
@@ -72,7 +72,7 @@ def main() -> int:
     rc_load = 1 if harness.LOAD_ERRORS else 0
     if a.coverage:
         missing, extra = harness.coverage()
-        print(f"{len(harness.REGISTRY)} cases; missing a case: {missing or 'none'}; case without a kept [L] idea: {extra or 'none'}")
+        print(f"{len(harness.REGISTRY)} cases; missing a case: {missing or 'none'}; case without a kept idea: {extra or 'none'}")
         return 1 if missing or extra or rc_load else 0
     if a.oracles:
         bad = 0
@@ -99,7 +99,7 @@ def main() -> int:
     if unknown:
         print(f"no case for idea(s) {unknown}; --coverage lists the gaps", file=sys.stderr)
         return 2
-    titles = {r["id"]: r["title"] for r in harness.lossless_ideas()}
+    titles = {r["id"]: r["title"] for r in harness.all_ideas()}
     if a.list:
         for i in ids:
             c = harness.REGISTRY[i]

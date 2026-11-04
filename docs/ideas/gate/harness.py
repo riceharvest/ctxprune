@@ -1,16 +1,20 @@
-"""Fidelity gate for the lossless ideas (tag [L] in docs/ideas/ideas.jsonl).
+"""Fidelity gate for the token-saving ideas in docs/ideas: the lossless ones (tag [L]) and the shortlisted rules (tag [R]).
 
-Each [L] idea gets one registered `case`: a small reference prototype of the transform (or, for ideas that are
+Each gated idea gets one registered `case`: a small reference prototype of the transform (or, for ideas that are
 policies rather than transforms, a deterministic simulation) plus built-in fixtures and an oracle. Running a case
-proves the idea can be lossless *on its own fixtures and on mutated variants of them*; it does not replace the
+proves the idea keeps what it promises *on its own fixtures and on mutated variants of them*; it does not replace the
 real-capture measurement in each idea's prose "Test:" line, and it says nothing about whether an LLM reads the
 transformed text as well as the original (see #183).
 
-Three kinds of case, strictest first:
+Four kinds of case, strictest first:
 
   roundtrip   decode(encode(x)) == x byte for byte.          (`decode=` given, `loses=""`)
   equivalent  no inverse, but an independent oracle(original, encoded) says both carry the same information under
               a stated relation; `loses=` names exactly what is NOT preserved ("blank-line count beyond one").
+  rule        information is dropped on purpose. `probes(text) -> dict` answers the questions an agent must still be
+              able to answer (which test failed, the file:line of each error, the latest version); the answers must be
+              identical on the original and the encoding, on every fixture and mutation. `loses=` names what is dropped.
+              The probes must also be able to tell the rule from naive truncation at equal size (see oracle_check).
   sim         a policy or stateful behaviour, checked by a function that raises AssertionError on failure.
 
 Rules enforced for every transform case, on each fixture AND on ~40 seeded mutations of it:
@@ -73,6 +77,13 @@ def tokens(text: str) -> int:
     if enc is not None:
         return len(enc.encode(text, disallowed_special=()))
     return len(_PIECE.findall(text))
+
+
+def exact_tokens() -> bool:
+    """True when token counts are real o200k counts (tiktoken installed and its vocabulary loadable). Assertions about the
+    MAGNITUDE of a token saving belong behind this; structure and fidelity assertions must hold with the proxy as well."""
+    _load_o200k()
+    return TOKENIZER == "o200k"
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -155,6 +166,7 @@ class Case:
     encode: Callable[[str], str] | None = None
     decode: Callable[[str], str] | None = None
     equivalent: Callable[[str, str], bool] | None = None
+    probes: Callable[[str], dict] | None = None
     fixtures: list[Fixture] | Callable[[], list[Fixture]] | None = None
     sim: Callable[[], dict | None] | None = None
     min_gain: float = 0.10
@@ -170,6 +182,8 @@ class Case:
             return "manual"
         if self.sim is not None:
             return "sim"
+        if self.probes is not None:
+            return "rule"
         return "roundtrip" if self.decode is not None and not self.loses else "equivalent"
 
 
@@ -184,15 +198,17 @@ def case(id: int, claim: str, **kw) -> Case:
     if c.manual:
         pass
     elif c.sim is not None:
-        if c.encode or c.decode or c.equivalent or c.fixtures:
-            raise ValueError(f"#{id}: a sim case takes no encode/decode/equivalent/fixtures")
+        if c.encode or c.decode or c.equivalent or c.probes or c.fixtures:
+            raise ValueError(f"#{id}: a sim case takes no encode/decode/equivalent/probes/fixtures")
     else:
         if c.encode is None or c.fixtures is None:
             raise ValueError(f"#{id}: transform cases need encode= and fixtures=")
-        if c.decode is None and c.equivalent is None:
-            raise ValueError(f"#{id}: need decode= (exact inverse) or equivalent= (independent oracle)")
+        if c.decode is None and c.equivalent is None and c.probes is None:
+            raise ValueError(f"#{id}: need decode= (exact inverse), equivalent= (independent oracle) or probes= (rule)")
         if c.decode is None and not c.loses:
-            raise ValueError(f"#{id}: an equivalent-only case must say what it loses (loses=...)")
+            raise ValueError(f"#{id}: a case without an exact inverse must say what it loses (loses=...)")
+        if c.probes is not None and c.decode is not None:
+            raise ValueError(f"#{id}: a rule drops information, so it cannot have decode=; use equivalent= or roundtrip")
     REGISTRY[id] = c
     return c
 
@@ -231,6 +247,13 @@ def _check_one(c: Case, x: str, strict: bool) -> tuple[str | None, str | None]:
                 return f"decode(encode(x)) != x: x={_clip(x)} enc={_clip(e)} dec={_clip(d)}", e
         if c.equivalent is not None and not c.equivalent(x, e):
             return f"oracle says information changed: x={_clip(x)} enc={_clip(e)}", e
+        if c.probes is not None:
+            a, b = c.probes(x), c.probes(e)
+            if not isinstance(a, dict) or not isinstance(b, dict):
+                return f"probes must return a dict of answers, got {type(a).__name__}", e
+            if a != b:
+                diff = {k: (a.get(k), b.get(k)) for k in sorted(set(a) | set(b), key=str) if a.get(k) != b.get(k)}
+                return f"probe answers changed {_clip(str(diff), 220)}; x={_clip(x)} enc={_clip(e)}", e
     except Exception as ex:  # noqa: BLE001
         return f"decode/oracle raised {type(ex).__name__}: {ex}; x={_clip(x)} enc={_clip(e)}", e
     if not strict:
@@ -378,20 +401,26 @@ def discover(only: list[str] | None = None) -> dict[int, Case]:
     return REGISTRY
 
 
-def lossless_ideas() -> list[dict]:
-    """Kept [L] records from ideas.jsonl (status != dropped)."""
+def all_ideas() -> list[dict]:
     import json
 
     path = os.path.join(os.path.dirname(HERE), "ideas.jsonl")
-    rows = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
-    return [r for r in rows if r["tag"] == "L" and r["status"] != "dropped"]
+    return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+
+
+def gated_ideas() -> list[dict]:
+    """Ideas that must have a case: every kept [L] idea, plus the shortlisted [R] ideas (status scope, est medium or
+    large, found by the generation loop: the same rule build.py uses for the shortlist star)."""
+    return [r for r in all_ideas() if (r["tag"] == "L" and r["status"] != "dropped") or
+            (r["tag"] == "R" and r["status"] == "scope" and r["est"] in ("medium", "large") and r["round"] > 0)]
 
 
 def coverage() -> tuple[list[int], list[int]]:
-    """(kept [L] ideas with no case, cases whose id is not a kept [L] idea)."""
-    want = {r["id"] for r in lossless_ideas()}
+    """(gated ideas with no case, cases whose id is not a kept idea)."""
+    want = {r["id"] for r in gated_ideas()}
+    kept = {r["id"] for r in all_ideas() if r["status"] != "dropped"}
     have = set(REGISTRY)
-    return sorted(want - have), sorted(have - want)
+    return sorted(want - have), sorted(have - kept)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -432,8 +461,35 @@ def _corruptions(e: str) -> dict[str, list[str]]:
     return out
 
 
-MUST_NOTICE = ("replace-char", "drop-char", "truncate")
+MUST_NOTICE = ("replace-char", "drop-char", "truncate", "drop-all", "head", "tail")
 MIN_NOTICE_RATE = 0.75
+
+
+def _rule_baselines(c: Case, fx: list[Fixture]) -> dict[str, list[str]]:
+    """Rule cases: the probes must notice dropping everything on every shrinking fixture, and must tell the rule from
+    naive head and tail truncation (cut to the rule's own output size) on at least one fixture each. A rule that only
+    matches head or tail truncation on all its fixtures has not shown it keeps anything a dumb cut would not."""
+    survivors: dict[str, list[str]] = {}
+    told = {"head": 0, "tail": 0}
+    n = 0
+    for f in fx:
+        if f.shrinks is not True:
+            continue
+        e = c.encode(f.text)
+        if e == f.text:
+            continue
+        n += 1
+        k = len(e)
+        want = c.probes(f.text)
+        if c.probes("") == want:
+            survivors.setdefault("drop-all", []).append(f.name)
+        for name, cut in (("head", f.text[:k]), ("tail", f.text[len(f.text) - k:])):
+            told[name] += c.probes(cut) != want
+    if n:
+        for name, hits in told.items():
+            if not hits:
+                survivors[name] = ["no fixture where the probes tell this rule from truncation at equal size"]
+    return survivors
 
 
 def oracle_check(c: Case) -> dict[str, list[str]]:
@@ -446,6 +502,8 @@ def oracle_check(c: Case) -> dict[str, list[str]]:
     if c.sim is not None or c.manual:
         return survivors
     fx = c.fixtures() if callable(c.fixtures) else c.fixtures
+    if c.probes is not None:
+        return _rule_baselines(c, fx)
     for f in fx:
         if f.shrinks is not True:
             continue
@@ -507,4 +565,40 @@ def selftest() -> list[str]:
         problems.append("oracle_check did not flag a tautological oracle")
     if set(oracle_check(mk(equivalent=ok_oracle))) & set(MUST_NOTICE):
         problems.append("oracle_check flagged a sound oracle")
+
+    # rule cases: answers must survive; probes must not be vacuous nor satisfied by plain truncation
+    def logs(err_at: str) -> str:
+        body = [f"info filler line {i}" for i in range(30)]
+        body.insert({"top": 0, "bottom": 30}[err_at], f"ERROR disk full on /dev/sda{1 if err_at == 'top' else 2}")
+        return "\n".join(body) + "\n"
+
+    rfx = [Fixture("error first", logs("top"), True), Fixture("error last", logs("bottom"), True), Fixture("one line", "ERROR x\n", False)]
+    probes = lambda t: {"errors": [l for l in t.splitlines() if "ERROR" in l]}  # noqa: E731
+
+    def keep_errors(t: str) -> str:
+        keep = [l for l in t.split("\n") if "ERROR" in l or l.startswith("[")]
+        dropped = len([l for l in t.split("\n") if l.strip()]) - len([l for l in keep if "ERROR" in l or l.startswith("[")])
+        out = "\n".join(keep + ([f"[{dropped} lines dropped]"] if dropped else [])) + ("\n" if t.endswith("\n") else "")
+        return out if len(out) < len(t) else t
+
+    def head_cut(t: str) -> str:
+        lines = t.split("\n")
+        return "\n".join(lines[: max(1, len(lines) * 4 // 10)]) + "\n" if len(lines) > 5 else t
+
+    def rule(**kw) -> Case:
+        return Case(id=-1, claim="selftest", fixtures=rfx, loses="filler lines", **kw)
+
+    good_rule = rule(encode=keep_errors, probes=probes, idempotent=False)
+    r_good = run_case(good_rule)
+    if r_good.status != "pass" or set(oracle_check(good_rule)) & set(MUST_NOTICE):
+        problems.append(f"gate rejected a good rule: {r_good.errors[:2]} {oracle_check(good_rule)}")
+    if run_case(rule(encode=head_cut, probes=probes, idempotent=False)).status != "fail":
+        problems.append("gate did not reject: a rule that drops an answer-bearing line")
+    if "drop-all" not in oracle_check(rule(encode=keep_errors, probes=lambda t: {}, idempotent=False)):
+        problems.append("oracle_check did not flag probes that answer nothing")
+    if "head" not in oracle_check(Case(id=-1, claim="selftest", loses="x", encode=head_cut, probes=probes, idempotent=False,
+                                       fixtures=[Fixture("error first", logs("top"), True), Fixture("one line", "ERROR x\n", False)])):
+        problems.append("oracle_check did not flag a rule that is just head truncation")
+    if run_case(rule(encode=keep_errors, probes=lambda t: 5, idempotent=False)).status != "fail":
+        problems.append("gate did not reject probes that do not return a dict")
     return problems
