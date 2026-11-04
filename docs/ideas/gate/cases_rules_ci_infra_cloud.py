@@ -5141,6 +5141,19 @@ def probes_aws_debug(text: str) -> dict:
             "retry events": retries, "cli driver records": cli, "warnings, errors, tracebacks": errs, "lines outside records": other}
 
 
+_AWS_ANY = re.compile(_BREC.pattern, re.M)
+_AWS_MARK = re.compile(_BDIG.pattern + "|" + _BDROP.pattern, re.M)
+_KUBE_ANY = re.compile(_GLOG.pattern, re.M)
+
+
+def _is_aws(t: str) -> bool:
+    return bool(_AWS_ANY.search(t))
+
+
+def _is_kube(t: str) -> bool:
+    return bool(_KUBE_ANY.search(t))
+
+
 def _kubectl_trace(failure: bool = False, n_disc: int = 40) -> str:
     out = ["I0304 10:15:02.001000   12345 loader.go:373] Config loaded from file:  /home/user/.kube/config"]
     t = [2]
@@ -5174,6 +5187,7 @@ def _kubectl_trace(failure: bool = False, n_disc: int = 40) -> str:
         out.append('Error from server (Forbidden): secrets is forbidden: User "alice" cannot list resource "secrets" in API group "" in the namespace "kube-system"')
     else:
         out += req("GET", f"{api}/api/v1/namespaces/default/services?limit=500", "200 OK", 18, body='{"kind":"Table","rows":[]}')
+        out += ["NAME                        READY   STATUS    RESTARTS   AGE", "web-6d8f7c9b5-x2k9p        1/1     Running   0          3d", "web-6d8f7c9b5-q7m4d        1/1     Running   0          3d"]
     return "\n".join(out) + "\n"
 
 
@@ -5213,8 +5227,8 @@ case(
     1235,
     claim="For kubectl -v=8 output, each request becomes one 'time METHOD url -> status in Nms' line, header dumps and 2xx bodies are dropped, the request and response bodies and the final error of a failed request stay verbatim, and runs of three or more discovery GETs become one count line; for aws --debug, requests become one digest line while HTTP status lines, credential and retry events, the failed response body, tracebacks and the final error stay verbatim and hook, loader and signing noise becomes one count line.",
     loses="request and response headers, 2xx response bodies, per-request detail of discovery GETs, the botocore signing, hook and loader records and 'No retry needed' lines; TF_LOG output is not handled",
-    encode=lambda t: digest_aws_debug(t) if _BREC.search(t) and not _GLOG.search(t) else digest_kubectl_trace(t),
-    probes=lambda t: probes_aws_debug(t) if _BREC.search(t) or _BDIG.search(t) or _BDROP.search(t) else probes_kubectl(t),
+    encode=lambda t: digest_aws_debug(t) if _is_aws(t) and not _is_kube(t) else digest_kubectl_trace(t),
+    probes=lambda t: probes_aws_debug(t) if _is_aws(t) or _AWS_MARK.search(t) else probes_kubectl(t),
     fixtures=[
         Fixture("kubectl get pods -v=8 with 40 discovery GETs, then a list", _kubectl_trace(), True),
         Fixture("kubectl get secrets -v=8 failing with 403 at the end", _kubectl_trace(failure=True), True),
@@ -5292,8 +5306,9 @@ def fold_device_lists(text: str) -> str:
             while body and not body[-1].strip():
                 body = body[:-1]
             out.append(l)
-            if len(body) > 4:
-                out += body[:3] + [f"    [{len(body) - 3} more lines omitted; run: dumpsys {_DUMPSYS.match(l).group(1)}]"]
+            nb = [k for k, b in enumerate(body) if b.strip()]
+            if len(nb) > 4:
+                out += body[:nb[2] + 1] + [f"    [{len(nb) - 3} more lines omitted; run: dumpsys {_DUMPSYS.match(l).group(1)}]"]
                 out += lines[i + 1 + len(body):j]
             else:
                 out += lines[i + 1:j]
@@ -5320,9 +5335,15 @@ def probes_1158(text: str) -> dict:
     services, svc_in, sections, cur = [], False, [], None
     other = []
     for l in lines:
+        if not l.strip() and top in ("Device Types", "Device Pairs"):
+            top = None
+            continue
         t = _SIMTOP.match(l)
         if t:
             top, sec = t.group(1), None
+            continue
+        if top in ("Device Types", "Device Pairs"):
+            counts["== " + top + " =="] = counts.get("== " + top + " ==", 0) + 1
             continue
         if (o := _OMIT_LINES.match(l)):
             counts[o.group(1)] = int(o.group(2))
@@ -5334,7 +5355,7 @@ def probes_1158(text: str) -> dict:
             continue
         if (o := _OMIT_DEV.match(l)):
             unavailable[o.group(1)] += int(o.group(2))
-            sec = None
+            sec = o.group(1)  # devices that follow a broken line still belong to this section
             continue
         d = _SIMDEV.match(l)
         if d:
@@ -5508,7 +5529,7 @@ def sim_1153() -> dict:
     # reader view: everything needed to fix the bug is in the quiet output (test names, panic site, assertion text, totals)
     r0, r1 = _reading(quiet), _reading(noisy)
     assert r0 == r1 and r0["failed tests"] == ["tests::transfer_from_unknown_account", "tests::transfer_moves_money"], (r0, r1)
-    assert ("tests::transfer_moves_money", "src/lib.rs:49:9:", "assertion `left == right` failed") in r0["panic site and first message line"]
+    assert ("tests::transfer_moves_money", "src/lib.rs:49:9", "assertion `left == right` failed") in r0["panic site and first message line"]
     # what is lost: the call chain. The panic in balance_of (src/lib.rs:17:33) was reached from transfer at src/lib.rs:21, and only the backtrace says so
     assert "src/lib.rs:21:25" in noisy and "src/lib.rs:21:25" not in quiet
     assert "run with `RUST_BACKTRACE=1`" in quiet, "the quiet output must still tell the agent how to get the backtrace for one test"

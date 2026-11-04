@@ -4896,3 +4896,256 @@ case(
     ],
     min_gain=0.1,
 )
+
+
+# ===============================================================================================================
+# #1162 OTLP logs and metrics JSON to logfmt rows (a collector file-exporter file: one JSON document, or one per line).
+# Logs: one logfmt line per record (ts level service [trace span] body attributes). Metrics: '# metric <name> unit type agg' then one
+# line per data point (ts service attributes value | count sum min max buckets bounds). Only service.name is kept from the resource.
+
+OTLP_RESERVED_LOG = ("ts", "level", "service", "trace", "span", "body")
+OTLP_RESERVED_METRIC = ("ts", "service", "value", "count", "sum", "min", "max", "buckets", "bounds")
+_KV = re.compile(r'([^\s=]+)=("(?:[^"\\]|\\.)*"|\S*)')
+_SEV_WORDS = {0: "TRACE", 1: "DEBUG", 2: "INFO", 3: "WARN", 4: "ERROR", 5: "FATAL"}
+
+
+def _lf_val(v: str) -> str:
+    return v if re.fullmatch(r"[\w.:/@+-]+", v) else jc(v)
+
+
+def _ts_ms(ns) -> str:
+    n = int(ns) // 1_000_000
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(n // 1000)) + f".{n % 1000:03d}Z"
+
+
+def _record_ts(rec: dict) -> str:
+    for k in ("timeUnixNano", "observedTimeUnixNano"):
+        if rec.get(k) not in (None, "", "0", 0):
+            return _ts_ms(rec[k])
+    return "-"
+
+
+def _number(v) -> str:
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise ValueError("odd number")
+    return str(int(v)) if isinstance(v, str) else repr(v)
+
+
+def _level(rec: dict) -> str:
+    t = rec.get("severityText")
+    if isinstance(t, str) and t.strip() and not re.search(r"\s", t):
+        return t
+    n = rec.get("severityNumber")
+    if isinstance(n, (int, str)) and str(n).isdigit() and 1 <= int(n) <= 24:
+        n = int(n)
+        return "TRACE" if n <= 4 else "DEBUG" if n <= 8 else "INFO" if n <= 12 else "WARN" if n <= 16 else "ERROR" if n <= 20 else "FATAL"
+    return "UNSPECIFIED"
+
+
+def _attr_pairs(lst, reserved) -> list[tuple[str, str]]:
+    out = []
+    for a in lst or []:
+        k = str(a["key"])
+        if not re.fullmatch(r"[^\s=\"]+", k) or (k.startswith("a.") and k[2:] in reserved):
+            raise ValueError("odd attribute key")
+        out.append(("a." + k if k in reserved else k, _otlp_val(a.get("value"))))
+    return sorted(out)
+
+
+def _service(res) -> str:
+    return _tok(_attrs_otlp((res or {}).get("attributes")).get("service.name", "-"))
+
+
+def _otlp_docs(text: str):
+    whole = jload(text)
+    docs = [whole] if whole is not _BAD else [jload(x) for x in text.split("\n") if x.strip()]
+    if not docs or any(not isinstance(d, dict) or not ("resourceLogs" in d or "resourceMetrics" in d) for d in docs):
+        raise ValueError("not OTLP")
+    return docs
+
+
+@total
+def otlp_to_logfmt(text: str) -> str:
+    out = []
+    for d in _otlp_docs(text):
+        if "resourceLogs" in d:
+            recs = []
+            for rl in d["resourceLogs"]:
+                svc = _service(rl.get("resource"))
+                for sl in rl.get("scopeLogs", []):
+                    for r in sl.get("logRecords", []):
+                        body = r.get("body")
+                        fields = [("ts", _record_ts(r)), ("level", _level(r)), ("service", svc)]
+                        if r.get("traceId"):
+                            fields.append(("trace", str(r["traceId"])))
+                        if r.get("spanId"):
+                            fields.append(("span", str(r["spanId"])))
+                        fields.append(("body", jc(_otlp_val(body) if body is not None else "")))
+                        recs.append(" ".join(f"{k}={v if k == 'body' else _lf_val(v)}" for k, v in fields) + "".join(f" {k}={_lf_val(v)}" for k, v in _attr_pairs(r.get("attributes"), OTLP_RESERVED_LOG)))
+            out += [f"# otlp logs records={len(recs)}"] + recs
+        if "resourceMetrics" in d:
+            out.append("# otlp metrics")
+            for rm in d["resourceMetrics"]:
+                svc = _service(rm.get("resource"))
+                for sm in rm.get("scopeMetrics", []):
+                    for m in sm.get("metrics", []):
+                        kind = next((k for k in ("sum", "gauge", "histogram") if k in m), None)
+                        if kind is None:
+                            raise ValueError("unsupported metric kind")
+                        body = m[kind]
+                        agg = {1: "delta", 2: "cumulative"}.get(body.get("aggregationTemporality"), "-") if kind != "gauge" else "-"
+                        out.append(f"# metric {_tok(m.get('name'))} unit={_tok(m.get('unit') or '-')} type={kind} agg={agg}" + (" monotonic=true" if body.get("isMonotonic") else ""))
+                        for dp in body.get("dataPoints", []):
+                            f = [f"ts={_record_ts(dp)}", f"service={_lf_val(svc)}"] + [f"{k}={_lf_val(v)}" for k, v in _attr_pairs(dp.get("attributes"), OTLP_RESERVED_METRIC)]
+                            if kind == "histogram":
+                                f += [f"count={_number(dp.get('count', 0))}", f"sum={_number(dp.get('sum', 0))}"]
+                                f += [f"{k}={_number(dp[k])}" for k in ("min", "max") if k in dp]
+                                f += ["buckets=" + jc([int(x) for x in dp.get("bucketCounts", [])]), "bounds=" + jc(dp.get("explicitBounds", []))]
+                            else:
+                                f.append("value=" + _number(dp["asInt"] if "asInt" in dp else dp["asDouble"]))
+                            out.append(" ".join(f))
+    return gate(text, "\n".join(out) + "\n")
+
+
+def _kv_line(ln: str) -> dict:
+    return {m.group(1): (json.loads(m.group(2)) if m.group(2).startswith('"') else m.group(2)) for m in _KV.finditer(ln)}
+
+
+def _sev_word(n) -> str:
+    return _SEV_WORDS[(int(n) - 1) // 4]
+
+
+def probes_1162(text: str) -> dict:
+    logs, metrics, cur, err_by_service = [], [], None, Counter()
+    if text.startswith("# otlp"):
+        for ln in text.split("\n"):
+            if ln.startswith("# otlp"):
+                cur = None
+                continue
+            if not ln:
+                continue
+            if ln.startswith("# metric "):
+                h = ln.split(" ")
+                cur = {"name": h[2], "head": h[3:], "points": []}
+                metrics.append(cur)
+            elif cur is None:
+                kv = _kv_line(ln)
+                logs.append(kv)
+            else:
+                cur["points"].append(_kv_line(ln))
+        for r in logs:
+            if r["level"].upper() in ("ERROR", "FATAL", "CRITICAL"):
+                err_by_service[r["service"]] += 1
+    else:
+        try:
+            docs = _otlp_docs(text)
+        except ValueError:
+            return {"otlp": None}
+        for d in docs:
+            for rl in d.get("resourceLogs", []):
+                svc = _service(rl.get("resource"))
+                for sl in rl.get("scopeLogs", []):
+                    for r in sl.get("logRecords", []):
+                        kv = {"ts": _record_ts_probe(r), "level": _level_probe(r), "service": svc, "body": _otlp_val(r["body"]) if r.get("body") is not None else ""}
+                        if r.get("traceId"):
+                            kv["trace"] = str(r["traceId"])
+                        if r.get("spanId"):
+                            kv["span"] = str(r["spanId"])
+                        for k, v in _attr_pairs(r.get("attributes"), OTLP_RESERVED_LOG):
+                            kv[k] = v
+                        logs.append(kv)
+                        if kv["level"].upper() in ("ERROR", "FATAL", "CRITICAL"):
+                            err_by_service[svc] += 1
+            for rm in d.get("resourceMetrics", []):
+                svc = _service(rm.get("resource"))
+                for sm in rm.get("scopeMetrics", []):
+                    for m in sm.get("metrics", []):
+                        kind = next(k for k in ("sum", "gauge", "histogram") if k in m)
+                        b = m[kind]
+                        agg = "-" if kind == "gauge" else {1: "delta", 2: "cumulative"}.get(b.get("aggregationTemporality"), "-")
+                        head = [f"unit={_tok(m.get('unit') or '-')}", f"type={kind}", f"agg={agg}"] + (["monotonic=true"] if b.get("isMonotonic") else [])
+                        pts = []
+                        for dp in b.get("dataPoints", []):
+                            kv = {"ts": _record_ts_probe(dp), "service": svc}
+                            for k, v in _attr_pairs(dp.get("attributes"), OTLP_RESERVED_METRIC):
+                                kv[k] = v
+                            if kind == "histogram":
+                                kv.update(count=_number(dp.get("count", 0)), sum=_number(dp.get("sum", 0)))
+                                for k in ("min", "max"):
+                                    if k in dp:
+                                        kv[k] = _number(dp[k])
+                                kv["buckets"] = jc([int(x) for x in dp.get("bucketCounts", [])])
+                                kv["bounds"] = jc(dp.get("explicitBounds", []))
+                            else:
+                                kv["value"] = _number(dp["asInt"] if "asInt" in dp else dp["asDouble"])
+                            pts.append(kv)
+                        metrics.append({"name": _tok(m.get("name")), "head": head, "points": pts})
+    top = err_by_service.most_common()
+    best = [s for s, n in top if n == top[0][1]] if top else []
+    return {"log records": logs, "metrics": metrics, "errors per service": sorted(err_by_service.items()), "service with the most errors": sorted(best)}
+
+
+def _record_ts_probe(rec: dict) -> str:
+    ns = next((rec[k] for k in ("timeUnixNano", "observedTimeUnixNano") if rec.get(k) not in (None, "", "0", 0)), None)
+    if ns is None:
+        return "-"
+    ms = int(ns) // 1_000_000
+    return datetime.datetime.fromtimestamp(ms // 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+
+
+def _level_probe(rec: dict) -> str:
+    t = rec.get("severityText")
+    if isinstance(t, str) and t.strip() and not re.search(r"\s", t):
+        return t
+    n = rec.get("severityNumber")
+    return _sev_word(n) if isinstance(n, (int, str)) and str(n).isdigit() and 1 <= int(n) <= 24 else "UNSPECIFIED"
+
+
+def _otlp_logs_doc(batch: int) -> dict:
+    r = rng(40 + batch)
+    recs = []
+    t0 = 1712345678_000_000_000 + batch * 5_000_000_000
+    for i in range(10):
+        svc = ["checkout", "cart", "payments"][(i + batch) % 3]
+        err = (batch, i) in {(0, 0), (1, 5), (2, 9)} or (svc == "payments" and i % 4 == 1)
+        recs.append({"timeUnixNano": str(t0 + i * 123_456_789), "observedTimeUnixNano": str(t0 + i * 123_456_789 + 50_000), "severityNumber": 17 if err else 9, "severityText": "ERROR" if err else "INFO",
+                     "body": {"stringValue": f"charge failed for order {1000 + batch * 10 + i}: card_declined" if err else f"request {batch}-{i} handled in {r.randrange(5, 90)}ms"},
+                     "attributes": [{"key": "http.status_code", "value": {"intValue": "502" if err else "200"}}, {"key": "service.instance", "value": {"stringValue": f"{svc}-7d9f-x{i}"}}, {"key": "retry", "value": {"boolValue": err}}],
+                     "droppedAttributesCount": 0, "flags": 1, "traceId": hexid(batch * 10 + i, 32, "t").lower() if i % 2 == 0 else "", "spanId": hexid(batch * 10 + i, 16, "s").lower() if i % 2 == 0 else ""})
+    by_svc: dict[str, list] = {}
+    for rec, i in zip(recs, range(10)):
+        by_svc.setdefault(["checkout", "cart", "payments"][(i + batch) % 3], []).append(rec)
+    return {"resourceLogs": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": s}}, {"key": "host.name", "value": {"stringValue": f"{s}-host"}}, {"key": "telemetry.sdk.language", "value": {"stringValue": "python"}}]},
+                              "scopeLogs": [{"scope": {"name": "app.logger", "version": "1.0"}, "logRecords": rs}], "schemaUrl": "https://opentelemetry.io/schemas/1.21.0"} for s, rs in by_svc.items()]}
+
+
+def _otlp_metrics_doc() -> dict:
+    t0 = 1712345678_000_000_000
+    attrs = lambda **kw: [{"key": k, "value": {"stringValue": v}} for k, v in kw.items()]  # noqa: E731
+    ms = [{"name": "http.server.duration", "description": "Duration of HTTP server requests.", "unit": "ms", "histogram": {"aggregationTemporality": 1, "dataPoints": [
+        {"attributes": attrs(**{"http.method": m}), "startTimeUnixNano": str(t0), "timeUnixNano": str(t0 + 10_000_000_000), "count": str(4 + k), "sum": 182.5 + k, "bucketCounts": ["0", "1", str(2 + k), "1", "0"], "explicitBounds": [5.0, 25.0, 100.0, 500.0], "min": 1.2, "max": 88.0 + k}
+        for k, m in enumerate(["GET", "POST", "DELETE"])]}},
+          {"name": "process.cpu.time", "description": "CPU time.", "unit": "s", "sum": {"aggregationTemporality": 2, "isMonotonic": True, "dataPoints": [{"attributes": attrs(state="user"), "startTimeUnixNano": str(t0), "timeUnixNano": str(t0 + 10_000_000_000), "asDouble": 12.5}, {"attributes": attrs(state="system"), "startTimeUnixNano": str(t0), "timeUnixNano": str(t0 + 10_000_000_000), "asDouble": 3.25}]}},
+          {"name": "queue.depth", "description": "Messages waiting.", "unit": "{message}", "gauge": {"dataPoints": [{"attributes": [], "timeUnixNano": str(t0 + 10_000_000_000), "asInt": "7"}]}}]
+    return {"resourceMetrics": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout"}}, {"key": "host.name", "value": {"stringValue": "h1"}}]}, "scopeMetrics": [{"scope": {"name": "meter"}, "metrics": ms}]}]}
+
+
+_OTLP_LOGS_NDJSON = "\n".join(jc(_otlp_logs_doc(b)) for b in range(3)) + "\n"
+_OTLP_METRICS = jc(_otlp_metrics_doc()) + "\n"
+
+case(
+    1162,
+    claim="OTLP logs and metrics JSON (one document or one per line) become one logfmt line per log record (time to the millisecond, level, service, trace and span ids when present, body, unwrapped attributes) and one line per metric data point under a '# metric' header (value, or count/sum/min/max/buckets/bounds); record and data-point counts, severities, bodies, attributes, metric values and the service with the most errors are unchanged.",
+    loses="severityNumber when severityText is present (and the reverse), observedTimeUnixNano, sub-millisecond time, startTimeUnixNano of data points, resource and scope attributes other than service.name, metric descriptions, droppedAttributesCount and flags; documents with attribute keys containing whitespace, '=' or quotes, or metrics other than sum, gauge and histogram, are left unchanged",
+    encode=otlp_to_logfmt,
+    probes=safe_probes(probes_1162),
+    fixtures=lambda: [
+        Fixture("collector file-exporter logs: 3 export lines of 10 records, errors first, in the middle and last; payments logs most errors", _OTLP_LOGS_NDJSON, True),
+        Fixture("pretty-printed single logs document", jp(_otlp_logs_doc(1)), True),
+        Fixture("metrics: a 3-point histogram, a monotonic sum, a gauge", _OTLP_METRICS, True),
+        Fixture("trace export is not logs or metrics", jc({"resourceSpans": []}), False),
+        Fixture("package.json", PACKAGE_JSON, False),
+        Fixture("input that starts like the output", "# otlp logs records=1\nts=2025-01-01T00:00:00.000Z level=INFO service=a body=\"x\"\n", None),
+    ],
+    min_gain=0.5,
+)

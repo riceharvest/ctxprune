@@ -171,7 +171,7 @@ _SSE_SEQ = re.compile(r'\{"type":"([A-Za-z0-9_.:-]+)","sequence_number":(\d+)([,
 
 
 def _sse_hdr(e: int, s: int) -> str:
-    parts = (["event: lines (= type)"] if e else []) + (["sequence_number (= frame index)"] if s else [])
+    parts = (["event lines (= type)"] if e else []) + (["sequence_number (= frame index)"] if s else [])
     return ": omitted, derivable from the payload: " + " and ".join(parts) + "\n"
 
 

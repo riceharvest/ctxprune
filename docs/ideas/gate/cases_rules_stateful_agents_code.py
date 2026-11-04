@@ -2305,7 +2305,7 @@ def sim_579() -> dict:
         r0 = _run(["bash", "-c", cmd], cwd=d, env=base)
         r1 = _run(["bash", "-c", cmd], cwd=d, env=on)
         assert r0[0] == r1[0] == 7, "the exit status of the command is the exit status of the shell"
-        assert len(r0[1]) > 20000 and len(r1[1]) < 200, f"a 20 KB command comes back as {len(r1[1])} bytes"
+        assert len(r0[1]) > 20000 and len(r1[1]) < 200, f"a 20 KB command comes back as {len(r1[1])} bytes (stderr: {r1[2][:200]!r})"
         assert set(r0[1].split("\n")) <= set(r1[1].split("\n")), "no distinct line is lost, only repetitions"
         assert "repeated 699 more times" in r1[1] and r1[1].startswith("build start\n") and "build end\n" in r1[1]
         assert r1[2] == r0[2] == "warn on stderr\n", "stderr bypasses the filter untouched (and so can appear before stdout is released)"

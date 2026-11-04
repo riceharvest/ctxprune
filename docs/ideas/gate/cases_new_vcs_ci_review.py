@@ -1843,8 +1843,9 @@ gh_encode, gh_decode = json_codec(
     _gh_transform, _gh_restore)
 
 
-# --- fixtures for #1424 (reconstructed from memory of the documented example responses; URL fields written out by hand,
-# separately from the encoder's tables)
+# --- fixtures for #1424: reconstructed from memory of the documented example responses (simple-user, repository, pull request,
+# pull request review comment, issue comment); URL fields are written out by hand, separately from the encoder's tables, and none of
+# it was captured from the live API
 
 def _pretty(o):
     return json.dumps(o, indent=2, ensure_ascii=False) + "\n"
@@ -2113,6 +2114,8 @@ files_encode, files_decode = json_codec(
     _files_transform, _files_restore)
 
 
+# reconstructed from memory: entries shaped like the documented pulls/N/files response (sha, filename, status, additions, deletions,
+# changes, blob_url, raw_url, contents_url, patch, previous_filename), URLs written out by hand, not captured from the live API
 def _file_entry(name, status, a, d, patch=None, prev=None, sha="6dcb09b5b57875f334f61aebed695e2e4193db5e", repo="acme-corp/widgets"):
     q = name.replace(" ", "%20")
     e = {"sha": "bbcd538c8e72b8c175046e27cc8f907076331401"[: 40 - len(name) % 7] + "0" * (len(name) % 7), "filename": name, "status": status,
@@ -2299,6 +2302,8 @@ def _gl_restore(tree):
 gitlab_encode, gitlab_decode = json_codec("gitlab", _gl_transform, _gl_restore)
 
 
+# reconstructed from memory: commit objects shaped like the documented GET /projects/:id/repository/commits response (id, short_id,
+# created_at, parent_ids, title, message, author_*, authored_date, committer_*, committed_date, trailers, extended_trailers, web_url)
 def _gl_commit(i, author, email, title, body="", committer=None, prefix="https://gitlab.com/acme/widgets/-/commit/"):
     sha = f"{(0x9fceb02d0ae598e95dc970b74767f19372d61af8 + i * 0x1234567) % (1 << 160):040x}"
     date = f"2026-03-{10 + i:02d}T{9 + i:02d}:15:00.000+01:00"
@@ -2357,6 +2362,8 @@ case(
         Fixture("the same list pretty-printed", _pretty(GL_COMMITS), True),
         Fixture("20 commits, one committer differs on every fifth", _compact([_gl_commit(i % 20, "Ada Example", "ada@example.com", f"Change {i}",
                                                                               committer="GitLab" if i % 5 == 4 else None) for i in range(20)]), True),
+        Fixture("one commit of five has a created_at unlike both its dates",
+                _compact([{**GL_COMMITS[2], "created_at": "2026-04-01T00:00:00.000Z"}] + GL_COMMITS[:2] + GL_COMMITS[3:]), True),
         Fixture("merge request objects have no commit twins", GL_MR_LIST_DOC, False),
         Fixture("merge request change entries have none either", GL_CHANGES_DOC, False),
         Fixture("a lone commit whose twins differ keeps every literal",
@@ -2501,6 +2508,8 @@ case(
         Fixture("a single annotation: the message prefix still names the root", RUFF_GHA.split("\n")[0] + "\n", None),
         Fixture("a file in a sibling directory that shares the root's text stays literal",
                 RUFF_GHA + "::error title=ruff (F401),file=/home/runner/work/widgets/widgets-fork/src/a.py,line=1,col=1,endLine=1,endColumn=2::src/a.py:1:1: F401 x\n", True),
+        Fixture("a message that starts with the path but not with path:line:col: keeps its text",
+                RUFF_GHA + "::error title=custom,file=/home/runner/work/widgets/widgets/src/app/models.py,line=3,col=4::src/app/models.py has a problem\n", True),
         Fixture("a path that starts with @ (scoped npm dir) is never rewritten",
                 "::error file=/home/runner/w/a/@types/node/index.d.ts,line=1,col=1::x\n::error file=/home/runner/w/a/src/b.ts,line=2,col=2::y\n", False),
         Fixture("input that starts like the escape line", RAW + RUFF_GHA, None),

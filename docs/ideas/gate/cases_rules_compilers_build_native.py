@@ -2842,6 +2842,232 @@ case(
 
 
 # ===============================================================================================================
+# #223 gradle dependencies: print identical configuration trees once, headed by every configuration name that
+# shares them. RULE (weaker than claimed on a plain Java project, see the real fixture): the probe maps
+# (project, configuration) -> its exact tree lines, so 'which version of X is on runtimeClasspath' is answerable from
+# the folded form; descriptions of the folded-away configurations are the only loss.
+
+GRADLE_DEPS_REAL = (
+    '\n'
+    '------------------------------------------------------------\n'
+    "Project ':app'\n"
+    '------------------------------------------------------------\n'
+    '\n'
+    "annotationProcessor - Annotation processors and their dependencies for source set 'main'.\n"
+    'No dependencies\n'
+    '\n'
+    "compileClasspath - Compile classpath for source set 'main'.\n"
+    '+--- project :lib\n'
+    '|    \\--- org.apache.commons:commons-lang3:3.13.0\n'
+    '+--- org.slf4j:slf4j-api:2.0.9\n'
+    '\\--- com.google.guava:guava:31.0-jre\n'
+    '     +--- com.google.guava:failureaccess:1.0.1 FAILED\n'
+    '     +--- com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava FAILED\n'
+    '     +--- com.google.code.findbugs:jsr305:3.0.2 FAILED\n'
+    '     +--- org.checkerframework:checker-qual:3.12.0\n'
+    '     +--- com.google.errorprone:error_prone_annotations:2.7.1\n'
+    '     \\--- com.google.j2objc:j2objc-annotations:1.3\n'
+    '\n'
+    "compileOnly - Compile-only dependencies for the 'main' feature. (n)\n"
+    'No dependencies\n'
+    '\n'
+    'default - Configuration for default artifacts. (n)\n'
+    'No dependencies\n'
+    '\n'
+    "implementation - Implementation dependencies for the 'main' feature. (n)\n"
+    '+--- project lib (n)\n'
+    '+--- org.slf4j:slf4j-api:2.0.9 (n)\n'
+    '\\--- com.google.guava:guava:31.0-jre (n)\n'
+    '\n'
+    'mainSourceElements - List of source directories contained in the Main SourceSet. (n)\n'
+    'No dependencies\n'
+    '\n'
+    "runtimeClasspath - Runtime classpath of source set 'main'.\n"
+    '+--- project :lib\n'
+    '|    +--- org.apache.commons:commons-lang3:3.13.0\n'
+    '|    \\--- com.google.guava:guava:32.1.3-jre FAILED\n'
+    '+--- org.slf4j:slf4j-api:2.0.9\n'
+    '+--- com.google.guava:guava:31.0-jre -> 32.1.3-jre FAILED\n'
+    '\\--- ch.qos.logback:logback-classic:1.4.11 FAILED\n'
+    '\n'
+    "runtimeElements - Runtime elements for the 'main' feature. (n)\n"
+    'No dependencies\n'
+    '\n'
+    "runtimeOnly - Runtime-only dependencies for the 'main' feature. (n)\n"
+    '\\--- ch.qos.logback:logback-classic:1.4.11 (n)\n'
+    '\n'
+    "testAnnotationProcessor - Annotation processors and their dependencies for source set 'test'.\n"
+    'No dependencies\n'
+    '\n'
+    "testCompileClasspath - Compile classpath for source set 'test'.\n"
+    '+--- project :lib\n'
+    '|    \\--- org.apache.commons:commons-lang3:3.13.0\n'
+    '+--- org.slf4j:slf4j-api:2.0.9\n'
+    '+--- com.google.guava:guava:31.0-jre\n'
+    '|    +--- com.google.guava:failureaccess:1.0.1 FAILED\n'
+    '|    +--- com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava FAILED\n'
+    '|    +--- com.google.code.findbugs:jsr305:3.0.2 FAILED\n'
+    '|    +--- org.checkerframework:checker-qual:3.12.0\n'
+    '|    +--- com.google.errorprone:error_prone_annotations:2.7.1\n'
+    '|    \\--- com.google.j2objc:j2objc-annotations:1.3\n'
+    '\\--- org.junit.jupiter:junit-jupiter:5.10.0 FAILED\n'
+    '\n'
+    "testCompileOnly - Compile only dependencies for source set 'test'. (n)\n"
+    'No dependencies\n'
+    '\n'
+    "testImplementation - Implementation only dependencies for source set 'test'. (n)\n"
+    '\\--- org.junit.jupiter:junit-jupiter:5.10.0 (n)\n'
+    '\n'
+    "testRuntimeClasspath - Runtime classpath of source set 'test'.\n"
+    '+--- project :lib\n'
+    '|    +--- org.apache.commons:commons-lang3:3.13.0\n'
+    '|    \\--- com.google.guava:guava:32.1.3-jre FAILED\n'
+    '+--- org.slf4j:slf4j-api:2.0.9\n'
+    '+--- com.google.guava:guava:31.0-jre -> 32.1.3-jre FAILED\n'
+    '+--- ch.qos.logback:logback-classic:1.4.11 FAILED\n'
+    '\\--- org.junit.jupiter:junit-jupiter:5.10.0 FAILED\n'
+    '\n'
+    "testRuntimeOnly - Runtime only dependencies for source set 'test'. (n)\n"
+    'No dependencies\n'
+    '\n'
+    '(*) - Indicates repeated occurrences of a transitive dependency subtree. Gradle expands transitive dependency subtrees only once per project; repeat occurrences only display the root of the subtree, followed by this annotation.\n'
+    '\n'
+    '(n) - A dependency or dependency configuration that cannot be resolved.\n'
+    '\n'
+    'A web-based, searchable dependency report is available by adding the --scan option.\n'
+)
+
+_D_PROJECT = re.compile(r"^(?:Root project|Project) '")
+_D_HEADER = re.compile(r"^([A-Za-z][\w.-]*(?:, [A-Za-z][\w.-]*)*)(?: - (.*))?$")
+_D_BODY_FIRST = re.compile(r"^(?:No dependencies|[+\\]--- .*)$")
+
+
+def _d_blocks(lines):
+    """[(header index, end index exclusive, names, description, body tuple)] for each configuration block."""
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        m = _D_HEADER.match(lines[i])
+        if m and i + 1 < n and _D_BODY_FIRST.match(lines[i + 1]) and not _D_PROJECT.match(lines[i]):
+            j = i + 1
+            while j < n and lines[j].strip():
+                j += 1
+            out.append((i, j, m.group(1).split(", "), m.group(2), tuple(lines[i + 1:j])))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def fold_configurations(text: str) -> str:
+    lines = text.split("\n")
+    blocks = _d_blocks(lines)
+    project_of = {}
+    proj = None
+    starts = {b[0]: b for b in blocks}
+    for i, l in enumerate(lines):
+        if _D_PROJECT.match(l):
+            proj = l
+        if i in starts:
+            project_of[i] = proj
+    groups: dict = {}
+    for b in blocks:
+        groups.setdefault((project_of[b[0]], b[4]), []).append(b)
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        b = starts.get(i)
+        if b is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        grp = groups[(project_of[i], b[4])]
+        if grp[0] is not b:  # a repeat: drop it together with the blank line after it
+            i = b[1] + 1 if b[1] < n and not lines[b[1]].strip() else b[1]
+            continue
+        names = [nm for g in grp for nm in g[2]]
+        head = ", ".join(names) + (f" - {b[3]}" if b[3] is not None else "")
+        out += [head] + list(b[4])
+        i = b[1]
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_223(text: str) -> dict:
+    lines = text.split("\n")
+    trees, others, proj = {}, [], None
+    skip = set()
+    for h, e, names, _desc, body in _d_blocks(lines):
+        skip.update(range(h, e))
+    cur_proj_at = {}
+    for i, l in enumerate(lines):
+        if _D_PROJECT.match(l):
+            proj = l
+        cur_proj_at[i] = proj
+    for h, e, names, _desc, body in _d_blocks(lines):
+        for nm in names:
+            trees[(cur_proj_at[h], nm)] = body
+    others = [l for i, l in enumerate(lines) if i not in skip and l.strip()]
+    return {"tree per (project, configuration)": sorted(trees.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])),
+            "non-tree lines": others}
+
+
+def _android_like() -> str:
+    """Generated to the shape of `gradlew :app:dependencies` for an Android app module (reconstructed from memory):
+    debug/release x compile/runtime x main/unitTest/androidTest configurations, most of them with the same tree."""
+    core = ["+--- org.jetbrains.kotlin:kotlin-stdlib:1.9.22", "|    +--- org.jetbrains:annotations:13.0", "|    \\--- org.jetbrains.kotlin:kotlin-stdlib-common:1.9.22 (c)",
+            "+--- androidx.core:core-ktx:1.12.0", "|    +--- androidx.annotation:annotation:1.6.0", "|    \\--- androidx.core:core:1.12.0 (*)",
+            "+--- androidx.appcompat:appcompat:1.6.1", "|    +--- androidx.activity:activity:1.6.0 -> 1.8.0", "|    \\--- androidx.core:core:1.9.0 -> 1.12.0 (*)",
+            "\\--- com.squareup.okhttp3:okhttp:4.12.0", "     +--- com.squareup.okio:okio:3.6.0", "     \\--- org.jetbrains.kotlin:kotlin-stdlib:1.8.21 -> 1.9.22 (*)"]
+    test = core + ["+--- junit:junit:4.13.2", "|    \\--- org.hamcrest:hamcrest-core:1.3", "\\--- org.mockito:mockito-core:5.7.0"]
+    android = core + ["+--- androidx.test.ext:junit:1.1.5", "\\--- androidx.test.espresso:espresso-core:3.5.1"]
+    spec = [
+        ("debugCompileClasspath", "Resolved configuration for compilation for variant: debug", core),
+        ("debugRuntimeClasspath", "Resolved configuration for runtime for variant: debug", core),
+        ("debugUnitTestCompileClasspath", "Resolved configuration for compilation for variant: debugUnitTest", test),
+        ("debugUnitTestRuntimeClasspath", "Resolved configuration for runtime for variant: debugUnitTest", test),
+        ("debugAndroidTestCompileClasspath", "Resolved configuration for compilation for variant: debugAndroidTest", android),
+        ("debugAndroidTestRuntimeClasspath", "Resolved configuration for runtime for variant: debugAndroidTest", android),
+        ("releaseCompileClasspath", "Resolved configuration for compilation for variant: release", core),
+        ("releaseRuntimeClasspath", "Resolved configuration for runtime for variant: release", core),
+        ("releaseUnitTestCompileClasspath", "Resolved configuration for compilation for variant: releaseUnitTest", test),
+        ("releaseUnitTestRuntimeClasspath", "Resolved configuration for runtime for variant: releaseUnitTest", test),
+        ("debugAnnotationProcessorClasspath", "Resolved configuration for annotation-processor for variant: debug", None),
+        ("releaseAnnotationProcessorClasspath", "Resolved configuration for annotation-processor for variant: release", None),
+        ("debugUnitTestAnnotationProcessorClasspath", "Resolved configuration for annotation-processor for variant: debugUnitTest", None),
+        ("debugAndroidTestAnnotationProcessorClasspath", "Resolved configuration for annotation-processor for variant: debugAndroidTest", None),
+        ("kotlinCompilerClasspath", None, ["\\--- org.jetbrains.kotlin:kotlin-compiler-embeddable:1.9.22", "     +--- org.jetbrains.kotlin:kotlin-stdlib:1.9.22", "     \\--- org.jetbrains.kotlin:kotlin-script-runtime:1.9.22"]),
+    ]
+    out = ["------------------------------------------------------------", "Project ':app'", "------------------------------------------------------------", ""]
+    for name, desc, body in spec:
+        out.append(name + (f" - {desc}" if desc else ""))
+        out += body if body else ["No dependencies"]
+        out.append("")
+    out += ["(c) - A dependency constraint, not a dependency. The dependency affected by the constraint occurs elsewhere in the tree.",
+            "(*) - Indicates repeated occurrences of a transitive dependency subtree. Dependencies are omitted (listed previously)", "",
+            "A web-based, searchable dependency report is available by adding the --scan option.", "", "BUILD SUCCESSFUL in 2s", "1 actionable task: 1 executed", ""]
+    return "\n".join(out)
+
+
+ANDROID_DEPS = _android_like()
+
+case(
+    223,
+    claim="Configuration blocks of 'gradle dependencies' whose dependency trees are line-for-line identical within a project are printed once under 'name1, name2, ... - first description'; the exact tree of every (project, configuration), including version arrows, (*), (c) and FAILED markers, and every line outside the trees are unchanged.",
+    loses="the description text of every configuration after the first in a folded group, and the position of the later configurations in the report",
+    encode=fold_configurations,
+    probes=probes_223,
+    fixtures=lambda: [
+        Fixture("Android-style :app report, 15 configurations, 5 distinct trees (generated, reconstructed from memory)", ANDROID_DEPS, True),
+        Fixture("plain Java app + lib project: only the 'No dependencies' configurations repeat (real, Gradle 8.14)", GRADLE_DEPS_REAL, True),
+        Fixture("two projects: identical trees in different projects must not merge", "------------------------------------------------------------\nProject ':a'\n------------------------------------------------------------\n\nx - X\n+--- g:h:1\n|    \\--- g:i:2\n\\--- g:j:3\n\ny - Y\n+--- g:h:1\n|    \\--- g:i:2\n\\--- g:j:3\n\nz - Z\n+--- g:h:1\n|    \\--- g:i:2\n\\--- g:j:3\n\n------------------------------------------------------------\nProject ':b'\n------------------------------------------------------------\n\nx - X\n+--- g:h:1\n|    \\--- g:i:2\n\\--- g:j:3\n\n", True),
+        Fixture("every configuration distinct", "compileClasspath - c\n\\--- a:b:1\n\nruntimeClasspath - r\n\\--- a:b:2\n\n", False),
+        Fixture("not a dependency report", "BUILD SUCCESSFUL in 2s\n1 actionable task: 1 executed\n", False),
+        Fixture("a header that already lists several names", "a, b - folded earlier\n\\--- g:h:1\n\nc - other\n\\--- g:h:2\n", None),
+    ],
+    min_gain=0.1,
+)
+
+
+
+# ===============================================================================================================
 # #224 Maven reactor stanzas and Maven/Gradle failure footers. Per module Maven prints a banner, 'Building', a
 # '--- plugin:version:goal (id) @ module ---' header per goal and no-op results ('Nothing to compile'); failures end
 # with constant -e/-X/help advice. Gradle ends with a constant '* Try:' list and a deprecation advisory.

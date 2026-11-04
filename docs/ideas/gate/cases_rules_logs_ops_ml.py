@@ -15,14 +15,13 @@ from the encoder wherever that is practical) and says what is lost in `loses=`. 
 """
 from __future__ import annotations
 
-import json
 import math
 import random
 import re
 import statistics
 from collections import Counter, defaultdict
 
-from harness import Fixture, case, tokens  # noqa: F401  (tokens used by the sizing helper at the bottom)
+from harness import Fixture, case
 
 A = re.ASCII
 
@@ -988,7 +987,7 @@ def _boot_log(contexts: int, with_error: bool = False, two_pids: bool = False) -
 
     for c in range(contexts):
         out += ["", banner, ""] if c else [banner, ""]
-        out += [rec("INFO", "main", "c.e.demo.DemoApplicationTests", f"Starting DemoApplicationTests using Java 17.0.9 with PID 12345 (started by runner in /work/demo)"),
+        out += [rec("INFO", "main", "c.e.demo.DemoApplicationTests", "Starting DemoApplicationTests using Java 17.0.9 with PID 12345 (started by runner in /work/demo)"),
                 rec("INFO", "main", "c.e.demo.DemoApplicationTests", 'No active profile set, falling back to 1 default profile: "default"'),
                 rec("INFO", "main", ".s.d.r.c.RepositoryConfigurationDelegate", "Bootstrapping Spring Data JPA repositories in DEFAULT mode."),
                 rec("INFO", "main", ".s.d.r.c.RepositoryConfigurationDelegate", f"Finished Spring Data repository scanning in {80 + c} ms. Found 3 JPA repository interfaces."),
@@ -1917,7 +1916,7 @@ def _sql_log(n: int = 70) -> str:
             out.append(f"{ts} LOG:  duration: {d} ms  statement: UPDATE shop_cart SET updated = '2024-03-05 10:15:{ms // 1000:02d}.{rng.randint(100000, 999999)}', total = {rng.randint(1, 900)}.{rng.randint(10, 99)} WHERE id = {rng.randint(1, 300)}")
         else:
             out.append(f"{ts} LOG:  duration: {d} ms  statement: INSERT INTO shop_audit (cart_id, note) VALUES ({rng.randint(1, 300)}, 'it''s {rng.choice(['ok', 'late', 'dup'])}')")
-    out.append(f"2024-03-05 10:15:09.999 UTC [880] LOG:  duration: 1930.004 ms  statement: SELECT count(*) FROM shop_item WHERE created < '2020-01-01'")
+    out.append("2024-03-05 10:15:09.999 UTC [880] LOG:  duration: 1930.004 ms  statement: SELECT count(*) FROM shop_item WHERE created < '2020-01-01'")
     return "\n".join(out) + "\n"
 
 
@@ -2324,7 +2323,7 @@ def probes_1330(text: str) -> dict:
     if head is None:
         return {"settings table": None, "lines": lines}
     i0, kind, cols = head
-    kept, omitted, other, total_rows = [], 0, [], 0
+    kept, omitted, other = [], 0, []
     for i in range(n):
         l = lines[i]
         if i <= i0:
@@ -3141,7 +3140,7 @@ def probes_1328(text: str) -> dict:
     lines, _ = split_nl(text)
     v = 0
     kept: list[tuple[int, str]] = []
-    run_urls, summary, ctx, hist_lines = [], {}, [], 0
+    run_urls, summary, ctx = [], {}, []
     in_hist = in_sum = False
     for l in lines:
         m = _M1328.match(l)
@@ -3808,7 +3807,7 @@ def _turbo_run(mode: str) -> str:
         out += [" ERROR  run failed: command  exited (2)", " Tasks:    4 successful, 6 total", "Cached:    0 cached, 6 total", "  Time:    8.412s ", "Failed:    @acme/api#build"]
     else:
         hits = {"cached": 6, "mixed": 3, "cold": 0}[mode]
-        out += ["", f" Tasks:    6 successful, 6 total", f"Cached:    {hits} cached, 6 total", f"  Time:    {'1.234s >>> FULL TURBO' if mode == 'cached' else '8.412s'} "]
+        out += ["", " Tasks:    6 successful, 6 total", f"Cached:    {hits} cached, 6 total", f"  Time:    {'1.234s >>> FULL TURBO' if mode == 'cached' else '8.412s'} "]
     return "\n".join(out) + "\n"
 
 
