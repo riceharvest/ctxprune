@@ -395,6 +395,77 @@ def coverage() -> tuple[list[int], list[int]]:
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# oracle check: would the case notice a corrupted encoding?
+
+def _noticed(c: Case, x: str, bad: str) -> bool:
+    """True if the case's fidelity check (decode or oracle) rejects `bad` as an encoding of `x`."""
+    try:
+        if c.decode is not None and c.decode(bad) != x:
+            return True
+        if c.equivalent is not None and not c.equivalent(x, bad):
+            return True
+    except Exception:  # noqa: BLE001  (a decoder that chokes on garbage also notices it)
+        return True
+    return False
+
+
+def _corruptions(e: str) -> dict[str, list[str]]:
+    """Output-level corruptions of an encoding: name -> variants. Character edits are tried at up to 12 spread-out
+    non-space positions (a decoder may legitimately tolerate one redundant character, such as an optional '+', but a
+    vacuous oracle misses nearly all of them). swap-lines / duplicate-line are order-sensitivity probes."""
+    out: dict[str, list[str]] = {}
+    idx = [i for i, ch in enumerate(e) if not ch.isspace()]
+    if idx:
+        picks = sorted({idx[k * (len(idx) - 1) // 11] for k in range(12)}) if len(idx) > 1 else idx
+        out["replace-char"] = [e[:i] + ("\u0416" if e[i] != "\u0416" else "\u0417") + e[i + 1:] for i in picks]
+        out["drop-char"] = [e[:i] + e[i + 1:] for i in picks]
+    if len(e) >= 10:
+        out["truncate"] = [e[: int(len(e) * 0.9)]]
+    lines = e.split("\n")
+    k = next((j for j in range(len(lines) // 2, len(lines) - 1) if lines[j] != lines[j + 1]), None)
+    if k is not None:
+        swapped = lines[:]
+        swapped[k], swapped[k + 1] = swapped[k + 1], swapped[k]
+        out["swap-lines"] = ["\n".join(swapped)]
+    if len(lines) > 1:
+        out["duplicate-line"] = ["\n".join(lines[: len(lines) // 2 + 1] + lines[len(lines) // 2:])]
+    return out
+
+
+MUST_NOTICE = ("replace-char", "drop-char", "truncate")
+MIN_NOTICE_RATE = 0.75
+
+
+def oracle_check(c: Case) -> dict[str, list[str]]:
+    """For a transform case: corruption name -> descriptions of fixtures where the case failed to notice too many
+    corrupted encodings. For the MUST_NOTICE corruptions, a fixture is reported when fewer than MIN_NOTICE_RATE of
+    its variants are rejected by the case's own fidelity check (decode or oracle); an empty MUST_NOTICE result means
+    the oracle is not vacuous. For swap-lines / duplicate-line, any miss is reported as information: it is legitimate
+    when the stated `loses=` says order or multiplicity is not preserved, or the line is blank or a default."""
+    survivors: dict[str, list[str]] = {}
+    if c.sim is not None or c.manual:
+        return survivors
+    fx = c.fixtures() if callable(c.fixtures) else c.fixtures
+    for f in fx:
+        if f.shrinks is not True:
+            continue
+        e = c.encode(f.text)
+        if e == f.text:
+            continue
+        for name, variants in _corruptions(e).items():
+            tried = [bad for bad in variants if bad != e]
+            missed = sum(not _noticed(c, f.text, bad) for bad in tried)
+            if not tried:
+                continue
+            limit = 1 - MIN_NOTICE_RATE if name in MUST_NOTICE and len(tried) > 1 else 0
+            if name == "truncate" or name not in MUST_NOTICE:
+                limit = 0
+            if missed / len(tried) > limit:
+                survivors.setdefault(name, []).append(f"{f.name} ({missed}/{len(tried)} missed)")
+    return survivors
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # self-test: the gate must reject known-bad transforms, or a pass means nothing
 
 def _hang():
@@ -429,4 +500,11 @@ def selftest() -> list[str]:
     good = run(encode=squeeze, equivalent=ok_oracle, loses="blank-line count above two")
     if good.status != "pass":
         problems.append(f"gate rejected a good transform: {good.errors[:2]}")
+    mk = lambda **kw: Case(id=-1, claim="selftest", fixtures=sample, loses="x", encode=squeeze, **kw)  # noqa: E731
+    if not set(oracle_check(mk(equivalent=always))) & set(MUST_NOTICE):
+        problems.append("oracle_check did not flag an oracle that accepts anything")
+    if not set(oracle_check(mk(equivalent=lambda a, b: len(a) > 0 or True))) & set(MUST_NOTICE):
+        problems.append("oracle_check did not flag a tautological oracle")
+    if set(oracle_check(mk(equivalent=ok_oracle))) & set(MUST_NOTICE):
+        problems.append("oracle_check flagged a sound oracle")
     return problems

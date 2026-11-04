@@ -7,6 +7,7 @@
     python docs/ideas/lossless/run.py --list       # id, kind, claim
     python docs/ideas/lossless/run.py --coverage   # exit 1 if a kept [L] idea has no case
     python docs/ideas/lossless/run.py --selftest   # prove the gate rejects planted defects
+    python docs/ideas/lossless/run.py --oracles    # corrupt each encoding; the case must notice (is the oracle vacuous?)
     python docs/ideas/lossless/run.py --json       # machine-readable results
     python docs/ideas/lossless/run.py --sync       # write each case's claim into ideas.jsonl, rebuild the markdown
 
@@ -55,6 +56,7 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--coverage", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--oracles", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--sync", action="store_true")
     ap.add_argument("--module", action="append", metavar="NAME", help="load only cases_NAME.py (repeatable); default: all")
@@ -72,6 +74,19 @@ def main() -> int:
         missing, extra = harness.coverage()
         print(f"{len(harness.REGISTRY)} cases; missing a case: {missing or 'none'}; case without a kept [L] idea: {extra or 'none'}")
         return 1 if missing or extra or rc_load else 0
+    if a.oracles:
+        bad = 0
+        for i in a.ids or sorted(harness.REGISTRY):
+            surv = harness.oracle_check(harness.REGISTRY[i])
+            hard = {k: v for k, v in surv.items() if k in harness.MUST_NOTICE}
+            soft = {k: v for k, v in surv.items() if k not in harness.MUST_NOTICE}
+            if hard:
+                bad += 1
+                print(f"#{i} BLIND to {', '.join(f'{k} ({len(v)} fixtures: {v[:2]})' for k, v in hard.items())}")
+            elif soft and a.verbose:
+                print(f"#{i} order-insensitive: {', '.join(f'{k} in {v[:2]}' for k, v in soft.items())}")
+        print(f"{bad} case(s) with an oracle that missed a corruption it must notice")
+        return 1 if bad or rc_load else 0
     if a.sync:
         if rc_load:
             return 1

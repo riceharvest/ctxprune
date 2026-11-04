@@ -976,13 +976,14 @@ def _check_tokens(orig: str, new: str, pack: Pack) -> None:
 # ---- a real bash with shim programs ------------------------------------------------------------------------------
 
 _SHIM = """#!/bin/sh
-{
+# one write() per record: pipeline stages run concurrently, and several printf calls into one >> would interleave
+rec=$(
 printf '%s' "${0##*/}"
 for a in "$@"; do printf '\\037%s' "$a"; done
 printf '\\036'
 for v in $SHIM_WATCH; do eval "printf '%s=%s\\037' $v \\"\\${$v-<unset>}\\""; done
-printf '\\n'
-} >> "$SHIM_LOG"
+)
+printf '%s\\n' "$rec" >> "$SHIM_LOG"
 for a in "$@"; do [ "$a" = "--fail" ] && exit 3; done
 exit 0
 """

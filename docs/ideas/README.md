@@ -1,7 +1,9 @@
 # Token-saving ideas for ctxprune
 
 A long list of hypotheses for saving more tokens, filtered to what fits ctxprune's scope. **None of it has been
-built or measured.** Treat every item as something to test, not a result.
+built into ctxprune or measured on real captures.** Treat every item as something to test, not a result. The 162 lossless
+(`L`) ideas additionally have a runnable fidelity gate (reference prototype, fixtures, oracle): see
+[`lossless/`](lossless/README.md). It shows an idea can be lossless on synthetic input; it does not show real savings.
 
 ## Scope filter
 
@@ -24,6 +26,10 @@ An idea is kept only if it works:
 | [`dropped.md`](dropped.md) | The 342 ideas filtered out (harness-specific 268, off-scope 37, model-specific 33, cloud 4), with reasons. |
 | [`ideas.jsonl`](ideas.jsonl) | Source of truth for all 1,403 ideas. |
 | [`build.py`](build.py) | `python docs/ideas/build.py` regenerates the three markdown files from `ideas.jsonl`. |
+| [`lossless/`](lossless/README.md) | Runnable tests for the 162 lossless ideas: `python docs/ideas/lossless/run.py [id ...]`. Each idea's `Run:` line in `ideas.md` shows its command. |
+
+`ideas.jsonl` records for lossless ideas also carry `check`, `check_kind` and `check_loses`, written by
+`python docs/ideas/lossless/run.py --sync` (do not hand-edit).
 
 Status values in `ideas.jsonl`: `scope` (817), `eval` (218: measurement, benchmark and safety tooling), `conditional`
 (26: need the tool call rewritten before it runs, so they only work where something can intercept calls), `dropped`

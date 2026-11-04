@@ -7,7 +7,7 @@ Conventions used below:
   * in-band signalling uses the sigil "§": text that already starts with it is escaped with "§raw\\n", and ideas whose
     markers could be confused with real text leave any input that contains the sigil alone (see `_esc_encode`);
   * roundtrip cases are byte exact; the rest are `equivalent` with an oracle that parses both sides with a different
-    algorithm (json.loads, xml canonicalisation, html.parser, tokenize, a YAML subset parser, a CommonMark subset
+    algorithm (json.loads, expat XML infoset, html.parser, tokenize, a YAML subset parser, a CommonMark subset
     renderer, exact rational arithmetic) and a `loses=` that names exactly what is not preserved.
 """
 import datetime
@@ -1621,11 +1621,15 @@ case(
 
 
 # ===============================================================================================================
-# #1169 Delta and run-length encode metric value lists. Roundtrip on canonical compact numeric arrays.
+# #1169 Delta and run-length encode metric value lists. Roundtrip on canonical compact numeric arrays: flat series
+# and the Prometheus [[ts,"value"],...] matrix shape (transposed into two series).
 
-_ITEM = r'(?:-?(?:0|[1-9]\d*)(?:\.\d+)?|"-?(?:0|[1-9]\d*)(?:\.\d+)?")'
-_SERIES = re.compile(r"\[(" + _ITEM + "(?:," + _ITEM + r"){7,})\]")
-_SERIES_ENC = re.compile(r"§([drD])\[([^\]\[]*)\]")
+_NUM = r"-?(?:0|[1-9]\d*)(?:\.\d+)?"
+_ITEM = rf'(?:{_NUM}|"{_NUM}")'
+_SERIES = re.compile(rf"\[({_ITEM}(?:,{_ITEM}){{7,}})\]")
+_MATRIX = re.compile(rf"\[(\[{_ITEM},{_ITEM}\](?:,\[{_ITEM},{_ITEM}\]){{7,}})\]")
+_SAMPLE = re.compile(rf"\[({_ITEM}),({_ITEM})\]")
+_SERIES_ENC = re.compile(r"§(P?)\[([^\]\[]*)\]")
 
 
 def _runs(tokens_, fmt=lambda t: t):
@@ -1643,43 +1647,63 @@ def _fmt_delta(d):
     return f"{'+' if d >= 0 else '-'}{abs(d)}"
 
 
-def _series_encode(m):
-    body = m.group(1)
-    items = body.split(",")
+def _enc_items(items):
+    """'<mode>:<body>' for a list of raw items (mode r: raw tokens with runs; d / D: first value and deltas, bare / quoted),
+    or None when the items mix quoted and bare numbers."""
     quoted = items[0][0] == '"'
     if any((it[0] == '"') != quoted for it in items):
-        return m.group(0)
-    best = "§r[" + ",".join(_runs(items)) + "]"
+        return None
+    best = "r:" + ",".join(_runs(items))
     raw = [it.strip('"') for it in items]
-    if all(re.fullmatch(r"-?(?:0|[1-9]\d*)", r) for r in raw) and all(str(int(r)) == r for r in raw):
+    if all(re.fullmatch(r"-?(?:0|[1-9]\d*)", r) and str(int(r)) == r for r in raw):
         vals = [int(r) for r in raw]
         deltas = [b - a for a, b in zip(vals, vals[1:])]
-        cand = f"§{'D' if quoted else 'd'}[" + ",".join([str(vals[0])] + _runs(deltas, _fmt_delta)) + "]"
+        cand = ("D:" if quoted else "d:") + ",".join([str(vals[0])] + _runs(deltas, _fmt_delta))
         if len(cand) < len(best):
             best = cand
-    return best if len(best) < len(m.group(0)) else m.group(0)
+    return best
 
 
-def _series_decode(m):
-    mode, body = m.group(1), m.group(2)
+def _dec_items(enc):
+    mode, _, body = enc.partition(":")
     items = body.split(",")
     if mode == "r":
         out = []
         for it in items:
             tok, star, n = it.partition("*")
             out += [tok] * (int(n) if star else 1)
-        return "[" + ",".join(out) + "]"
+        return out
     v, out = int(items[0]), [items[0]]
     for it in items[1:]:
         d, star, n = it.partition("*")
         for _ in range(int(n) if star else 1):
             v += int(d)
             out.append(str(v))
-    return "[" + ",".join(f'"{x}"' if mode == "D" else x for x in out) + "]"
+    return [f'"{x}"' for x in out] if mode == "D" else out
+
+
+def _flat_encode(m):
+    enc = _enc_items(m.group(1).split(","))
+    new = f"§[{enc}]" if enc else m.group(0)
+    return new if len(new) < len(m.group(0)) else m.group(0)
+
+
+def _pairs_encode(m):
+    pairs = _SAMPLE.findall(m.group(1))
+    a, b = _enc_items([p[0] for p in pairs]), _enc_items([p[1] for p in pairs])
+    new = f"§P[{a};{b}]" if a and b else m.group(0)
+    return new if len(new) < len(m.group(0)) else m.group(0)
+
+
+def _series_decode(m):
+    if m.group(1):
+        a, b = (_dec_items(part) for part in m.group(2).split(";"))
+        return "[" + ",".join(f"[{x},{y}]" for x, y in zip(a, b)) + "]"
+    return "[" + ",".join(_dec_items(m.group(2))) + "]"
 
 
 def _fold_series(text):
-    body = _SERIES.sub(_series_encode, text)
+    body = _SERIES.sub(_flat_encode, _MATRIX.sub(_pairs_encode, text))
     return None if body == text else body
 
 
@@ -1692,32 +1716,42 @@ def decode_series(text):
     return _esc_decode(text, "§dr\n", lambda body: _SERIES_ENC.sub(_series_decode, body))
 
 
-def _prom_like():
+def _prom_matrix():
     counter, total = [], 1_204_000
     for i in range(60):
         total += [3, 7, 4, 12, 5][i % 5] + (i // 17)
         counter.append(total)
     plateau = [0] * 20 + [100] * 25 + [250] * 15
-    ts = [1700000000 + 15 * i for i in range(60)]
-    quoted = [str(v) for v in counter[:30]]
-    return json.dumps({"status": "success", "timestamps": ts, "http_requests_total": counter, "queue_depth": plateau,
-                       "as_strings": quoted, "ratio": [0.5] * 10 + [0.25] * 10}, separators=(",", ":")) + "\n"
+    series = []
+    for name, vals in (("http_requests_total", counter), ("queue_depth", plateau)):
+        pairs = [[1700000000 + 15 * i, str(v)] for i, v in enumerate(vals)]
+        series.append({"metric": {"__name__": name, "job": "api"}, "values": pairs})
+    return json.dumps({"status": "success", "data": {"resultType": "matrix", "result": series}}, separators=(",", ":")) + "\n"
+
+
+def _flat_series():
+    counter = [1_204_000 + 7 * i + (i * i) // 9 for i in range(40)]
+    return json.dumps({"timestamps": [1700000000 + 15 * i for i in range(40)], "counter": counter, "plateau": [0] * 15 + [100] * 25,
+                       "as_strings": [str(v) for v in counter[:20]], "ratio": [0.5] * 10 + [0.25] * 10}, separators=(",", ":")) + "\n"
 
 
 case(
     1169,
-    claim="Canonical compact numeric arrays of 8+ items (bare or quoted) are rewritten as first value plus signed deltas with 'x*N' runs, or as raw tokens with runs, whichever is shorter; decode rebuilds the exact array text, including quotes and decimals.",
+    claim="Canonical compact numeric arrays of 8+ items (bare or quoted), and Prometheus [[ts,\"v\"],...] matrices (as two series), are rewritten as first value plus signed deltas with 'x*N' runs, or as raw tokens with runs, whichever is shorter; decode rebuilds the exact array text, including quotes and decimals.",
     encode=encode_series,
     decode=decode_series,
     fixtures=lambda: [
-        Fixture("counter series, timestamps, plateau and quoted values", _prom_like(), True),
+        Fixture("Prometheus query_range matrix, counter and plateau", _prom_matrix(), True),
+        Fixture("flat series: timestamps, counter, plateau, quoted and decimal values", _flat_series(), True),
         Fixture("noisy small integers", '{"v":[3,1,4,1,5,9,2,6,5,3,5,8,9,7,9,3]}\n', False),
         Fixture("short arrays and strings", '{"v":[1,2,3],"s":["a","b","c","d","e","f","g","h"]}\n', False),
         Fixture("non-canonical numbers", '{"v":[1,2,3,4,5,6,7,8.0,9],"w":[01,2,3,4,5,6,7,8],"x":[1e5,1e5,1e5,1e5,1e5,1e5,1e5,1e5]}\n', False),
+        Fixture("matrix with fewer than 8 samples", '{"values":[[1700000000,"10"],[1700000015,"10"],[1700000030,"10"],[1700000045,"11"],[1700000060,"11"],[1700000075,"12"],[1700000090,"12"]]}\n', False),
         Fixture("negative, zero and big values", '{"v":[-5,-5,-5,-5,0,0,0,0,9007199254740993,9007199254740994,-0,-1]}\n{"w":[-3,-2,-1,0,1,2,3,4,5]}\n', None),
         Fixture("mixed quoting and decimals", '{"v":["1",2,"3",4,5,6,7,8],"d":[0.5,0.5,0.5,0.5,1.25,1.25,1.25,1.25,-0.0,-0.0]}\n', None),
-        Fixture("text that starts like encoder output", '§dr\n§d[1,+1*7]\n', None),
-        Fixture("sigil in the middle", _prom_like() + "§d[1]\n", None),
+        Fixture("matrix with a non-numeric value and a mixed column", '{"values":[[1,"a"],[2,"a"],[3,"a"],[4,"a"],[5,"a"],[6,"a"],[7,"a"],[8,"a"]],"m":[[1,"1"],[2,2],[3,"3"],[4,4],[5,"5"],[6,6],[7,"7"],[8,8]]}\n', None),
+        Fixture("text that starts like encoder output", '§dr\n§[d:1,+1*7]\n§P[d:1,+1*7;D:1,+1*7]\n', None),
+        Fixture("sigil in the middle", _flat_series() + "§d[1]\n", None),
     ],
     min_gain=0.5,
     idempotent=False,

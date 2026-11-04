@@ -41,7 +41,7 @@ def item(r, star=True):
     if r["test"]:
         line += f"\n  - Test: {r['test']}"
     if r.get("check"):
-        line += f"\n  - Run: `python docs/ideas/lossless/run.py {r['id']}` ({r['check_kind']}) {r['check']}"
+        line += f"\n  - Run: `python docs/ideas/lossless/run.py {r['id']}` ({r['check_kind']}): {r['check']}"
         if r.get("check_loses"):
             line += f" Not preserved: {r['check_loses']}."
     return line

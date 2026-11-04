@@ -23,6 +23,17 @@ def test_gate_rejects_planted_defects():
     assert harness.selftest() == []
 
 
+def test_oracles_notice_corrupted_encodings():
+    """Corrupt each transform's output (replace/drop a character, truncate): the case's own decode or oracle must
+    reject it, otherwise the case would pass for a wrong encoder too."""
+    blind = {}
+    for i, c in sorted(harness.REGISTRY.items()):
+        hard = {k: v for k, v in harness.oracle_check(c).items() if k in harness.MUST_NOTICE}
+        if hard:
+            blind[i] = hard
+    assert not blind, f"cases whose oracle misses corrupted encodings: {blind}"
+
+
 def test_every_kept_lossless_idea_has_a_case():
     missing, extra = harness.coverage()
     assert not missing, f"[L] ideas without a case: {missing}"
