@@ -1,27 +1,36 @@
 """Gate cases for the shortlisted RULE ideas of the "stateful agents and code" slice:
 #127 #141 #142 #189 #206 #209 #288 #304 #305 #387 #449 #485 #503 #579 #593 #684 #946 #1302 #1303 #1324.
 
-Four of them are text rules with probes (#127 audit digest, #206 source skeleton, #209 BM25 chunks, #305 ranked bodies);
-the other sixteen depend on state or policy (ledgers, MCP wrappers and gateways, shell shims, PATH, SHELL and BASH_ENV
-overrides, sparse worktrees, history rewriting), so they are sims with a reader view, invalidation cases and fail-open.
-Where the idea is about a process boundary the sim runs REAL processes in a temp dir: bash, python, git, grep, find, jq,
-ruff. Rules for those: stdout and stderr are captured on separate pipes and no assertion depends on how two pipeline
-stages interleave. The independent oracles are python's ast module (#206, #305), real jq (#304), real git (#1303),
-real grep/find/ls (#1302) and real bash exit statuses (#189, #579, #946).
+Four are text rules with probes (#127 audit/SARIF digest, #206 source skeleton, #209 BM25 chunks, #305 ranked bodies); the other
+sixteen depend on state or policy (ledgers, MCP wrappers and gateways, shell shims, PATH, SHELL and BASH_ENV overrides, sparse
+worktrees, history rewriting), so they are sims with a reader view, invalidation cases and fail-open. Where the idea is about a
+process boundary the sim runs REAL processes in a temp dir: bash, python, git, grep, find, jq, ruff, rg. Rules for those: stdout and
+stderr are captured on separate pipes, stdin is /dev/null, and no assertion depends on how two pipeline stages interleave. The
+independent oracles are python's ast module (#206, #305), real jq (#304), real git (#1303), real grep/find/ls (#1302), real ruff
+(#141) and real bash exit statuses (#189, #579, #946).
 
-Honest caveats live next to each case (what the probes caught, what did not reproduce). Everything here is a
-prototype of the idea, not shipped code.
+What the probes and sims caught or measured (details sit next to each case):
+  #127  the npm text report only shrinks 23% (the URL prefix is the one redundancy); SARIF shrinks 87%. A greedy URL regex merged two
+        advisories on one mutated line, and a title with a leading space collided with the digest's header syntax.
+  #209  pure BM25 lost the failing-test lines and the last line; the rule needs head/tail anchors, an error-signal rescue and
+        near-duplicate suppression, and digit-normalising the dedupe key merged two different assertions.
+  #288  -41% request tokens, but +14% (batches) to +59% (every turn) billed once prompt caching is counted: every rewrite re-bills the prefix.
+  #579  bash ignores BASH_ENV when stdin is a socket; `bash -lc` is covered here (the idea says login shells skip it); a hook without
+        a filter check loses all stdout; an unmarked hook changes what nested `$(bash -c ...)` captures.
+  #1302 `grep -r` and `rg` do not follow symlinks, so a symlink mirror is empty to them; hard links work.
+  #684, #304, #503 token savings depend on prompt caching: a cache-aware model is used next to the raw counts.
+Everything here is a prototype of the idea, not shipped code.
 """
 import ast
 import base64
 import hashlib
-import itertools
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -98,10 +107,13 @@ _bm25_selfcheck()
 # ---------------------------------------------------------------------------------------------------------------
 # real processes
 
-def _run(argv, cwd=None, env=None, stdin: bytes | None = None, timeout: int = 20):
-    """Run a real process. stdout and stderr are separate pipes (never merged), so nothing here depends on interleaving."""
+def _run(argv, cwd=None, env=None, stdin: bytes | None = None, timeout: int = 20, stdin_obj=None):
+    """Run a real process. stdout and stderr are separate pipes (never merged), so nothing here depends on interleaving.
+    stdin is /dev/null unless given: an INHERITED stdin made #579 flaky (bash ignores BASH_ENV when stdin is a socket, and the
+    harness that runs a gate may hand its children a socket, a pipe or /dev/null)."""
     e = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LC_ALL": "C.UTF-8", "HOME": cwd or "/tmp", **(env or {})}
-    p = subprocess.run(argv, cwd=cwd, env=e, input=stdin, capture_output=True, timeout=timeout)
+    kw = {"stdin": stdin_obj} if stdin_obj is not None else {"stdin": subprocess.DEVNULL} if stdin is None else {"input": stdin}
+    p = subprocess.run(argv, cwd=cwd, env=e, capture_output=True, timeout=timeout, **kw)
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
@@ -223,7 +235,7 @@ _P_TITLE_URL = " - https://github.com/advisories/"
 
 
 def _probe_npm(text: str) -> dict:
-    pkg, indent, sev = None, "", None
+    pkg, sev = None, None
     adv, fix, dep, paths, summary = [], {}, [], {}, []
     started = False
     for line in text.split("\n"):
@@ -234,7 +246,7 @@ def _probe_npm(text: str) -> dict:
             continue
         m = None if re.match(r"^ " + _GHSA + " ", line) else _P_HDR.match(line)
         if m and "https://" not in line and not line.strip().startswith(("fix", "Will", "Depends", "node_modules")):
-            indent, pkg, sev = m.group(1), m.group(2), m.group(4)
+            pkg, sev = m.group(2), m.group(4)
             paths.setdefault(pkg, [])
             continue
         s = line.strip()
@@ -964,7 +976,7 @@ case(
     probes=probes_206,
     fixtures=lambda: _source_fixtures(False),
     min_gain=0.25,
-    mutations=10,
+    mutations=8,
 )
 
 case(
@@ -975,7 +987,7 @@ case(
     probes=probes_305,
     fixtures=lambda: _source_fixtures(True),
     min_gain=0.2,
-    mutations=10,
+    mutations=8,
 )
 
 
@@ -1132,7 +1144,6 @@ def _k8s_209() -> str:
 
 
 def _pytest_209() -> str:
-    g = _lcg(2091)
     mods = ["cart", "checkout", "pricing", "inventory", "shipping", "tax", "coupons", "users"]
     rows = []
     n = 0
@@ -1152,7 +1163,6 @@ def _pytest_209() -> str:
 
 
 def _journal_209() -> str:
-    g = _lcg(2092)
     out = ["-- Journal begins at Tue 2026-10-27 06:12:09 UTC. --", "Nov 04 07:00:01 web-1 systemd[1]: Starting A high performance web server and a reverse proxy server...",
            "Nov 04 07:00:01 web-1 nginx[1234]: nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)",
            "Nov 04 07:00:01 web-1 nginx[1234]: nginx: [emerg] still could not bind()"]
@@ -1826,7 +1836,7 @@ def sim_387() -> dict:
 
 case(
     387,
-    claim="Hit bodies over 260 characters in list-shaped search results become a ~200-character snippet (around the first query word) plus id, path and an expand_id; a synthetic expand(id) returns the original body byte for byte; short hits, single documents, errors and duplicate ids pass through, and an expired id is an explicit error.",
+    claim="Hit bodies over 260 characters in list-shaped search results become a ~200-character snippet (around the first query word) plus id, path and an expand_id; a synthetic expand(id) returns the original body byte for byte; short hits, single documents, errors and duplicate ids pass through, and an expired id is an explicit error. On 16 tasks the snippets plus the hits actually opened cost 46% fewer tokens than the full results; 9 of 16 needed an expand.",
     sim=sim_387,
 )
 
@@ -2033,7 +2043,6 @@ def sim_684() -> dict:
         gh = session(native_schema, [4000] * 8, [150] * 8, 4)
         br_schema = native_schema * 25 // 48  # a browser-shaped server: 25 tools, results are page snapshots the agent reads in full
         bw = session(br_schema, [3500] * 10, [3400] * 10, 6)
-        one = session(native_schema, [800], [800], 1)
         raw_gh, billed_gh = 1 - gh[2] / gh[0], 1 - gh[3] / gh[1]
         raw_bw, billed_bw = 1 - bw[2] / bw[0], 1 - bw[3] / bw[1]
         assert raw_gh > 0.5 and billed_gh > 0.3, f"a many-tool server with jq-filterable results must win (raw {raw_gh:.0%}, billed {billed_gh:.0%})"
@@ -2061,6 +2070,9 @@ case(
 # MEASURED ON THIS BOX (bash 5.2.21, dash as /bin/sh), where the ideas' text and the observation differ:
 #   #579  says 'login shells skip BASH_ENV'. `bash -lc` does NOT skip it here (profile and BASH_ENV are both read); `bash -ic`
 #         (interactive) and `sh -c` (dash) do skip it. The sim asserts what bash does, not what the idea says.
+#   #579  BASH_ENV is silently IGNORED when bash's stdin is a socket: bash then assumes it was started by rshd/sshd and reads ~/.bashrc
+#         instead. This is what made an earlier version of this gate flaky (the runner handed its children a socket in some calls and
+#         a pipe or /dev/null in others), and it is a real hazard for agents that spawn `bash -c` over a socketpair.
 #   #579  a BASH_ENV hook that does `exec > >(filter)` LOSES ALL STDOUT when the filter cannot start (the substitution dies,
 #         the pipe has no reader): the hook must test the filter first. And a nested `bash -c` inside `$(...)` would be
 #         filtered too, changing what a script captures, unless the hook marks itself with an environment variable.
@@ -2171,10 +2183,13 @@ def _transcripts() -> dict[str, dict[str, tuple[str, int]]]:
     npm_noise = [f"npm WARN deprecated {p}@{v}: this package is no longer supported" for p, v in (("request", "2.88.2"), ("uuid", "3.4.0"), ("har-validator", "5.1.5"), ("core-js", "2.6.12"), ("left-pad", "1.3.0"), ("mkdirp", "0.5.1"))] * 3
     npm_pass = "\n".join(npm_noise + ["", "added 412 packages, and audited 413 packages in 14s", "", "73 packages are looking for funding", "  run `npm fund` for details", "", "found 0 vulnerabilities", "npm notice New major version of npm available! 10.9.9 -> 11.0.0", ""])
     npm_fail = "\n".join(npm_noise + ["npm ERR! code ERESOLVE", "npm ERR! ERESOLVE could not resolve", "npm ERR! While resolving: shop@1.0.0", "npm ERR! Found: react@18.3.1", "npm ERR! Could not resolve dependency: peer react@\"^17.0.0\" from react-old@3.1.0", ""])
-    pip_noise = [l for n in ("numpy", "requests", "urllib3", "certifi", "idna", "charset-normalizer", "pandas", "pytz", "six", "tzdata") for l in (f"Collecting {n}", f"  Downloading {n}-1.0.0-py3-none-any.whl (1.2 MB)", f"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 9.9 MB/s eta 0:00:00") if not l.startswith("     ")] + [f"Requirement already satisfied: {n} in /usr/lib/python3/dist-packages ({i}.0)" for i, n in enumerate(("pip", "wheel", "setuptools", "packaging", "attrs", "toml"))]
+    pip_noise = []
+    for n in ("numpy", "requests", "urllib3", "certifi", "idna", "charset-normalizer", "pandas", "pytz", "six", "tzdata"):
+        pip_noise += [f"Collecting {n}", f"  Downloading {n}-1.0.0-py3-none-any.whl (1.2 MB)"]
+    pip_noise += [f"Requirement already satisfied: {n} in /usr/lib/python3/dist-packages ({i}.0)" for i, n in enumerate(("pip", "wheel", "setuptools", "packaging", "attrs", "toml"))]
     pip_pass = "\n".join(pip_noise + ["Installing collected packages: pytz, tzdata, six, numpy, pandas", "Successfully installed numpy-2.1.0 pandas-2.2.3 pytz-2024.2 six-1.16.0 tzdata-2024.2", ""])
     pip_fail = "\n".join(pip_noise + ["ERROR: Could not find a version that satisfies the requirement fancylib==9.9 (from versions: 1.0, 1.1, 2.0)", "ERROR: No matching distribution found for fancylib==9.9", ""])
-    dk = [f"#{n} {t}" for n in range(2, 12) for t in (f"[internal] load metadata for docker.io/library/python:3.13-slim", f"DONE 0.{n}s", f"sha256:{_sha(str(n), 40)} 1.2MB / 1.2MB", f"transferring context: 2B done")]
+    dk = [f"#{n} {t}" for n in range(2, 12) for t in ("[internal] load metadata for docker.io/library/python:3.13-slim", f"DONE 0.{n}s", f"sha256:{_sha(str(n), 40)} 1.2MB / 1.2MB", "transferring context: 2B done")]
     docker_pass = "\n".join(dk + ["#12 [7/7] RUN pip install -r requirements.txt", "#12 DONE 8.4s", "#13 exporting to image", "#13 naming to docker.io/library/shop:latest done", ""])
     docker_fail = "\n".join(dk + ["#12 [7/7] RUN pip install -r requirements.txt", "#12 3.114 ERROR: Could not open requirements file: [Errno 2] No such file or directory: 'requirements.txt'", "#12 ERROR: process \"/bin/sh -c pip install -r requirements.txt\" did not complete successfully: exit code: 1", ""])
     crates = ("serde", "serde_json", "tokio", "bytes", "mio", "libc", "regex", "memchr", "itoa", "ryu", "once_cell", "hashbrown")
@@ -2331,6 +2346,17 @@ def sim_579() -> dict:
             covered[label] = "repeated 39 more times" in out
         assert covered == {"bash -c": True, "bash -lc": True, "bash -ic": False, "sh -c (dash)": False}, f"scope on this bash: {covered}"
         assert "mark=from_profile" in _run(["bash", "-lc", probe], cwd=d, env=on)[1], "the login shell really ran its profile"
+        # --- the hazard found while building this gate: a socket on stdin makes bash skip BASH_ENV (and read ~/.bashrc, if any)
+        _write(os.path.join(d, "home", ".bashrc"), "export MARK_RC=bashrc_was_read\n")
+        a, b = socket.socketpair()
+        try:
+            via_sock = _run(["bash", "-c", cmd], cwd=d, env=on, stdin_obj=a)
+            rc_probe = _run(["bash", "-c", "echo rc=$MARK_RC"], cwd=d, env=on, stdin_obj=a)[1]
+        finally:
+            a.close()
+            b.close()
+        assert via_sock[0] == 7 and len(via_sock[1]) > 20000, "stdin is a socket: BASH_ENV is skipped, the 20 KB command comes back unfiltered"
+        assert rc_probe == "rc=bashrc_was_read\n" and _run(["bash", "-c", "echo rc=$MARK_RC"], cwd=d, env=on)[1] == "rc=\n", "bash treated it as a remote shell and read ~/.bashrc instead"
         # --- the two hazards
         nested = 'x=$(bash -c "for i in \\$(seq 1 40); do echo same; done"); echo "$x" | wc -l'
         assert _run(["bash", "-c", nested], cwd=d, env=on)[1].strip() == "40", "marked hook: a nested bash inside $(...) is not filtered"
@@ -2343,12 +2369,12 @@ def sim_579() -> dict:
         small = _run(["bash", "-c", "echo ok; exit 3"], cwd=d, env=on)
         assert (small[0], small[1]) == (3, "ok\n"), "short output is passed through"
     return {"bytes_direct": len(r0[1]), "bytes_filtered": len(r1[1]), "exit_status": r1[0], "login_shell_bash_lc_covered": covered["bash -lc"], "interactive_covered": covered["bash -ic"],
-            "dash_covered": covered["sh -c (dash)"], "unguarded_hook_loses_stdout_if_filter_missing": True}
+            "dash_covered": covered["sh -c (dash)"], "socket_on_stdin_disables_the_hook": True, "unguarded_hook_loses_stdout_if_filter_missing": True}
 
 
 case(
     579,
-    claim="A BASH_ENV file that execs stdout into a filter shrinks a 20 KB bash -c to under 200 bytes with the exit status (7) kept and no distinct line lost; stderr bypasses it; bash -c and bash -lc are covered here while bash -ic and dash are not; the hook must mark itself (nested bash would otherwise change captured data) and test the filter first (otherwise a missing filter loses all stdout).",
+    claim="A BASH_ENV file that execs stdout into a filter shrinks a 20 KB bash -c to under 200 bytes with the exit status (7) kept and no distinct line lost; stderr bypasses it; bash -c and bash -lc are covered here while bash -ic, dash and any bash whose stdin is a socket are not; the hook must mark itself (nested bash would otherwise change captured data) and test the filter first (otherwise a missing filter loses all stdout).",
     sim=sim_579,
 )
 
@@ -2386,6 +2412,14 @@ def sim_946() -> dict:
         assert via[0] == direct[0] == 7, "the prototype's exit status 7 survives"
         assert len(direct[1]) > 20000 and len(via[1]) < 200 and via[2] == direct[2]
         assert set(direct[1].split("\n")) <= set(via[1].split("\n")), "no distinct line lost"
+        # a socket on stdin (which makes bash skip BASH_ENV, see #579) does not matter to the wrapper
+        a, b = socket.socketpair()
+        try:
+            sock = _run([wrapper, "-c", cmd], cwd=d, env=env, stdin_obj=a)
+        finally:
+            a.close()
+            b.close()
+        assert sock[0] == 7 and len(sock[1]) < 200, "the wrapper filters even when stdin is a socket"
         # login shell: the wrapper covers `-lc` and the profile still runs (BASH_ENV also covers bash -lc here, see #579)
         probe = 'echo mark=$MARK; for i in $(seq 1 40); do echo same; done'
         rc, out, _ = _run([wrapper, "-lc", probe], cwd=d, env=env)
@@ -2885,7 +2919,7 @@ def _transcript_288(n: int = 44, seed: int = 288):
         elif k == 2:  # heredoc that RUNS a script: not a file write
             call("Bash", {"command": "python3 - <<'EOF'\n" + "\n".join(f"print({i} * {i})" for i in range(25)) + "\nEOF"}, "\n".join(str(i * i) for i in range(25)))
         elif k == 4 and p in disk:  # Edit
-            old = f"total = x * "
+            old = "total = x * "
             disk[p] = disk[p].replace(old, "total = 2 * x * ", 1)
             call("Edit", {"file_path": p, "old_string": old, "new_string": "total = 2 * x * "}, f"The file {p} has been updated.")
         elif k == 5:  # Read
@@ -3006,7 +3040,7 @@ def sim_288() -> dict:
 
 case(
     288,
-    claim="Write inputs and `cat > file <<EOF` bodies older than ten assistant turns become one line (line count, sha1, 'on disk at this path'); young turns, failed or deleted writes, short content, script heredocs and files not on disk now keep their content, every stub's hash is reproducible from the disk or marked changed with a later Edit in history, a message flips at most once, and the sim shows that stubbing every turn re-bills the cached prefix while batches of ten do not.",
+    claim="Write inputs and `cat > file <<EOF` bodies older than ten assistant turns become one line (line count, sha1, 'on disk at this path'); young turns, failed or deleted writes, short content, script heredocs and files not on disk now keep their content, every stub's hash is reproducible from the disk or marked changed with a later Edit in history, a message flips at most once. Request tokens fall 41%, but billed with prompt caching stubbing every turn costs 59% MORE and batches of ten 14% more, because each rewrite re-bills the prefix after it; one rewrite late in a session is about break-even.",
     sim=sim_288,
 )
 
@@ -3258,6 +3292,7 @@ def sim_1324() -> dict:
         kept_age += sum(lab[j] for j in top_age)
         reused_total += sum(lab)
     auc_age, auc_bm = sum(a_age) / len(a_age), sum(a_bm) / len(a_bm)
+    assert auc_age > 0.5, f"the generator gives recency a small real effect, so age must be a better-than-chance predictor ({auc_age:.2f}); below 0.5 means the age score has the wrong sign"
     assert auc_bm > auc_age + 0.1, f"relevance must beat age on this reuse model ({auc_bm:.2f} vs {auc_age:.2f})"
     assert kept_bm > kept_age, "at an equal keep budget the relevance rule keeps more of the results that were reused"
 

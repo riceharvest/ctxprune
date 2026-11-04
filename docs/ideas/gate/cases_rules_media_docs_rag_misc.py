@@ -3924,7 +3924,6 @@ def strip_thread(text: str) -> str:
             x += 1
         out += res
         # update what has been seen (kept own text and kept quotes)
-        kept_quote = [l for kind, l in items if kind == "quote"]
         for kind, l in items:
             if kind == "own" and l.strip():
                 seen.add(" ".join(l.split()))
@@ -4233,8 +4232,10 @@ def probes_422(text: str) -> dict:
     n_rows = len(rows) + resid[0]
     if kind == "cpu" and total and total[0] == "cpu" and len(rows) + resid[0] != total[3]:
         n_rows = ("inconsistent", n_rows)
+    kept_w = sum(w for w, _, _ in rows)
     return {
         "kind": kind,
+        "kept rows hold at least 95% of the weight": kept_w * 100 >= 95 * (kept_w + resid[1]),
         "totals": total,
         "three heaviest rows (weight, label)": [(w, lab) for w, lab, _ in top],
         "weight accounted for (kept rows + residual)": sum(w for w, _, _ in rows) + resid[1],
@@ -4835,14 +4836,12 @@ def probes_728(text: str) -> dict:
     """Reader view from the JSON (walk the entries) or from the digest (parse rows): totals, failures, slowest five, XHR rows, type histogram."""
     rows: list[tuple] = []  # (method, url, status, ms, bytes, type)
     hist: Counter = Counter()
-    n_static = bytes_static = 0
     total_bytes = None
     try:
         d = json.loads(text) if text.lstrip().startswith("{") else None
     except ValueError:
         d = None
     ents = _har_entries(d) if d is not None else None
-    bodies: dict[int, str] = {}
     if ents is not None:
         for i, r in enumerate(ents):
             rows.append(r[:6])
@@ -4857,8 +4856,6 @@ def probes_728(text: str) -> dict:
                 rows.append((m.group(1), m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5)), m.group(6)))
                 hist[m.group(6)] += 1
             elif (m := _HAR_STATIC.match(l)):
-                n_static += int(m.group(1))
-                bytes_static += int(m.group(3))
                 for kv in m.group(2).split():
                     k, v = kv.split("=")
                     hist[k] += int(v)
@@ -4910,6 +4907,7 @@ def make_har(n_static: int = 36, seed: int = 9) -> str:
     ents.insert(20, entry("POST", "/api/login", 401, 188.0, "xhr", "application/json", 41, '{"error":"invalid credentials","attempts_left":2}'))
     ents.insert(30, entry("GET", "/assets/script-slow.js", 200, 1850.2, "script", "application/javascript", 450000))
     ents.insert(33, entry("GET", "/api/search?q=anvil", 200, 2301.7, "xhr", "application/json", 91820, '{"hits":' + "[" + '{"id":%d,"title":"result"},' * 5 + "]}"))
+    ents.insert(36, entry("GET", "/assets/font-slow.woff2", 200, 850.4, "font", "font/woff2", 61000))
     ents.insert(40, entry("GET", "/favicon.ico", 404, 41.2, "other", "text/html", 0))
     ents.append(entry("GET", "/api/cart", 500, 977.1, "fetch", "application/json", 112, '{"error":"upstream timeout","trace":"c1f9e2"}'))
     ents.append(entry("POST", "/api/events", 204, 55.0, "ping", "text/plain", 0))
@@ -5131,7 +5129,6 @@ def probes_729(text: str) -> dict:
     else:
         model = _model_from_text(text)
         npages = len([p for p in model if p]) if any(model) else 0
-        pi_map = [i for i, p in enumerate(model) if p]
         for pi, page in enumerate(p for p in model if p):
             for qi, par in enumerate(page):
                 clean = []
@@ -5257,7 +5254,7 @@ case(
 # with regexes and ast; the rewrite happens only when both agree.
 
 _NWS_START = "NodeWithScore(node=TextNode("
-_STR = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
+_STR = r"""'[^'\\]*(?:\\.[^'\\]*)*'|"[^"\\]*(?:\\.[^"\\]*)*\""""
 _NODE_LINE = re.compile(r"^NodeWithScore\(id=")
 
 
@@ -5441,6 +5438,7 @@ case(
         Fixture("a text that contains the repr marker inside the chunk", _NODES.replace("Tokens expire", "[NodeWithScore(node=TextNode( Tokens expire", 1), None),
     ],
     min_gain=0.25,
+    mutations=25,
 )
 
 # ===============================================================================================================
@@ -5689,7 +5687,6 @@ def dedupe_chunks(text: str) -> str:
     if len(chunks) < 2 or any(c[2] is not None for c in chunks) or any(("," in c[0] or "|" in c[0] or "|" in c[1] or "," in c[1]) for c in chunks):
         return text
     sh = [_shingles("\n".join(c[3])) for c in chunks]
-    order = sorted(range(len(chunks)), key=lambda i: (tuple(-x for x in _version(chunks[i][1])) if _version(chunks[i][1]) else (1,), i))
     # newest version first; unversioned chunks (version ()) come after versioned ones, in file order
     order = sorted(range(len(chunks)), key=lambda i: (not _version(chunks[i][1]), tuple(-x for x in _version(chunks[i][1])), i))
     reps: list[int] = []
@@ -5757,7 +5754,6 @@ def make_chunks() -> str:
         "sandbox.md#6": "the sandbox mirrors production and the data reset runs every night",
         "secrets.md#7": "store each secret in the secret manager and grant the service a read only role",
     }
-    docs = []
     chunks = []
     for key, lead in topics.items():
         words = [rnd.choice(vocab) for _ in range(150)]
@@ -5960,7 +5956,13 @@ def probes_1020(text: str) -> dict:
             r = _pure_subst(hk) if cut is None else None
             if r and pure_counts[r[0]] >= MIN_HUNKS:
                 path = _section_path(sec)
-                substs[r[0]] += [(path, n) for n in r[1]]
+                new_ln, changed = int(_HUNK.match(hk[0]).group(3)), []  # an independent line counter: new-side numbers of the added lines
+                for l in hk[1:]:
+                    if l[0] == "+":
+                        changed.append(new_ln)
+                    if l[0] != "-":
+                        new_ln += 1
+                substs[r[0]] += [(path, n) for n in changed]
             else:
                 keep.append(tuple(hk))
         if keep or not p[1]:
@@ -6177,6 +6179,7 @@ case(
         Fixture("input that already is an outline", "outline: 1 chapters, 600 words, 00:00-01:00, speakers []\n[00:00] intro sentence here., 590 words elided\n" + _LECTURE, None),
     ],
     min_gain=0.5,
+    mutations=20,
 )
 
 # ===============================================================================================================
@@ -6506,7 +6509,7 @@ _KV_AT = re.compile(r" ([a-z0-9_]+)=")
 def _parse_kvs(s: str) -> tuple[str, dict]:
     m = _KV_AT.search(s)
     head = s if m is None else s[: m.start()]
-    kvs, pos, dec = {}, 0 if m is None else m.start(), json.JSONDecoder()
+    kvs, dec = {}, json.JSONDecoder()
     while m is not None:
         v, end = dec.raw_decode(s, m.end())
         kvs[m.group(1)] = v
@@ -6535,7 +6538,6 @@ def probes_1332(text: str) -> dict:
             nodes.append((depth, n["Node Type"], {_snake(k): v for k, v in n.items() if k not in ("Node Type", "Plans") and not _droppable(k, v)}, [c for c in n.get("Plans", [])]))
             for c in n.get("Plans", []):
                 walk(c, depth + 1)
-        raw = []
         walk(d[0]["Plan"], 0)
         nodes = [(a, b, c) for a, b, c, _ in nodes]
     else:

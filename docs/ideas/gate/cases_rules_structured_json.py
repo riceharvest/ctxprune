@@ -323,6 +323,7 @@ def _npm_audit() -> str:
 ESLINT_PRUNED = prune_cli_json(ESLINT_BIG)
 PACKAGE_JSON = jp({"name": "app", "version": "1.2.3", "scripts": {"build": "webpack", "lint": "eslint ."}, "dependencies": {"react": "^18.2.0", "lodash": "^4.17.21"}})
 
+# reconstructed from memory unless stated: eslint output is a real capture (eslint 10.1.0 in this container, 5 files); jest --json, webpack --json and npm audit --json are reconstructed from memory
 case(
     120,
     claim="Recognises eslint -f json, jest --json, webpack --json and npm audit --json by shape and removes per-tool noise keys (eslint source/usedDeprecatedRules/fix/suggestions/messageId/nodeType, jest fullName/failureDetails/location/duplicate suite message, webpack reasons/issuerPath/identifier, npm audit cwe/cvss/nodes); every problem with file:line:col:rule:message, every test with status and failure text, a suite that failed to run, all modules, assets, errors and totals are unchanged.",
@@ -541,6 +542,7 @@ _DJ_CHAIN = _django_page("TemplateDoesNotExist", "orders/list.html", "http://loc
 _DJ_TOP = _django_page("ValueError", "invalid literal for int() with base 10: 'abc'", "http://localhost:8000/orders/abc/", _DJ_FRAMES[2:], pastebin_first=True)
 _DJ_TWO = _DJ_500.replace("</body>", '<textarea id="traceback_area">second</textarea></body>')
 
+# reconstructed from memory unless stated: Django and Werkzeug debug pages are reconstructed from memory (no Django or Flask here), smaller than the 80 kB page the idea measured
 case(
     122,
     claim="A Django debug page (textarea#traceback_area) or Werkzeug page (textarea in div.plain) is replaced by one header line plus the unescaped plaintext traceback; every frame (file, line, function), the innermost frame, Exception Type/Value, request line, versions, chained-exception count and template-error lines are unchanged; other HTML (404 pages, pages with two candidates, markup in the textarea) is untouched.",
@@ -745,7 +747,8 @@ def probes_131(text: str) -> dict:
                 f[p] = re.sub(PH_L + r"(.*?)" + PH_R, lambda m: str(f[m.group(1)]), t)
             flat_rows.append(f)
         out[path] = flat_rows
-    return {"rows per array (every leaf except node_id)": out}
+    return {"rows per array (every leaf except node_id)": out, "row count per array": {p: len(r) for p, r in out.items()},
+            "leaf paths present in every row": {p: sorted(set.intersection(*[set(f) for f in r])) for p, r in out.items()}}
 
 
 def _gh_issues(n: int, pull_at: int | None = None, seed: int = 7) -> list[dict]:
@@ -786,6 +789,7 @@ _GH_WITH_PR = jc(_gh_issues(30, pull_at=14))
 _GH_WRAPPED = jc({"total_count": 120, "incomplete_results": False, "items": _gh_issues(24, seed=3)})
 _NO_PATTERN = jc([{"id": i * 7919 % 1000, "name": "".join(chr(97 + (i * k) % 26) for k in range(5, 11)), "score": (i * 37) % 101 / 7} for i in range(12)])
 
+# reconstructed from memory unless stated: GitHub REST issue objects reconstructed from memory (field set and URL templates of api.github.com)
 case(
     131,
     claim="In a JSON array of >= 5 objects, leaves identical in every row are hoisted into '# const' lines, string leaves that verify as a template of other leaves (same or enclosing object) become one '# tmpl' line, and node_id is dropped; expanding the header restores every leaf of every row except node_id, and a field that breaks the pattern in even one row (a PR among issues, one locked row) stays in the rows.",
@@ -978,7 +982,7 @@ def _beyond_3_sigma(v, mean, var) -> bool:
 def probes_132(text: str) -> dict:
     o = jload(text)
     if o is _BAD:
-        return {"arrays": None}
+        return {"total rows per array": None}
     found, stack = {}, [("$", o)]
     while stack:
         path, x = stack.pop()
@@ -1006,8 +1010,9 @@ def probes_132(text: str) -> dict:
                     flagged[p] = v
             if i < EDGE or i >= total - EDGE or odd or _err_stack(r) or flagged:
                 need[i] = {"row": _canon(r), "odd schema": odd, "error": _err_stack(r), "sigma outlier columns": flagged}
-        out[path] = {"total rows": total, "schema": keys, "required rows": need, "column min/max": {p: (s[2], s[3]) for p, s in stats.items()}}
-    return {"arrays": out}
+        out[path] = (total, keys, need, {p: (s[2], s[3]) for p, s in stats.items()})
+    return {"total rows per array": {p: v[0] for p, v in out.items()}, "schema per array": {p: v[1] for p, v in out.items()},
+            "required rows per array (edges, errors, sigma outliers, odd schema)": {p: v[2] for p, v in out.items()}, "column min/max per array": {p: v[3] for p, v in out.items()}}
 
 
 def _pods(n: int = 240) -> str:
@@ -1047,6 +1052,7 @@ def _plain_rows(n: int) -> str:
     return jc([{"id": i, "name": f"item-{i}", "weight": round(r.uniform(1, 2), 3), "ok": True} for i in range(n)])
 
 
+# reconstructed from memory unless stated: kubectl pod list and a service-metrics list reconstructed from memory
 case(
     132,
     claim="Arrays of >= 100 mostly-object elements are sampled to the first and last 3 rows plus every error row, every row beyond 3 sigma in a numeric column and every row with a different key set, with the schema, total count and column mean/var/min/max kept in a $sampled header and containers deeper than 6 inside kept rows stubbed; the required rows are identical wherever they sit in the array.",
@@ -1207,7 +1213,8 @@ def probes_133(text: str) -> dict:
             return [skeleton(f"{path}[{i}]", v) for i, v in enumerate(x)]
         return ("num", str(x)) if isinstance(x, _Tok) else x
 
-    return {"elided arrays (count, kind, min, max, first values)": records, "everything else": skeleton("$", o)}
+    rest = skeleton("$", o)
+    return {"elided arrays (count, kind, min, max, first values)": records, "number of elided arrays": len(records), "everything else": rest}
 
 
 def _embedding_response() -> str:
@@ -1234,6 +1241,7 @@ def _histogram() -> str:
                "short": list(range(31)), "sum": 1834.25, "count": 71234, "p99_series": [round(r.uniform(0.1, 0.9), 3) for _ in range(40)]})
 
 
+# reconstructed from memory unless stated: embedding response, GeoJSON and histogram reconstructed from memory (random-looking 17-digit floats)
 case(
     133,
     claim="In a valid JSON document, a flat array of >= 32 numbers (or >= 8 equal-width numeric rows, width <= 8) is replaced in place by one string holding the count, min, max and first values (per-column for rows); every other byte, every short array and every non-numeric array is untouched.",
@@ -1506,6 +1514,7 @@ _OAS_BIG = jp(_spec(["pet", "order", "user", "invoice", "shipment", "customer", 
 _SWAGGER2 = jc({"swagger": "2.0", "info": {"title": "Petstore", "version": "1.0.7"}, "basePath": "/v2", "paths": {"/pet/{petId}": {"get": {"summary": "Find pet by ID", "operationId": "getPetById", "parameters": [{"name": "petId", "in": "path", "required": True, "type": "integer", "format": "int64"}], "responses": {"200": {"description": "ok", "schema": {"$ref": "#/definitions/Pet"}}}}}}})
 _OAS_BAD_NAME = jp({**_spec(["pet"]), "paths": {"/pet": {"get": {"operationId": "x y", "parameters": [{"name": "a b", "in": "query"}], "responses": {"200": {"description": "ok"}}}}}})
 
+# reconstructed from memory unless stated: Petstore-style OpenAPI 3.0 spec reconstructed from memory; the 12-resource spec is generated from the same templates
 case(
     135,
     claim="An OpenAPI 3.x JSON spec becomes one line per operation (method, path, operationId, name:in:type* parameters, @body, status:schema responses, summary) plus one line per component schema (properties with * for required, enums, arrays, maps) and the shared error schema named once; every endpoint, parameter, required flag, response status and success schema, and every schema property and enum value is unchanged.",
@@ -1640,6 +1649,13 @@ def _sl2(c: dict) -> list[str]:
     return _mt2(c.get("source", "")).splitlines()
 
 
+def _nb_answers(header, cells: list) -> dict:
+    return {"notebook": header, "cells": cells,
+            "blobs (cell, mime, size)": [(c["index"], o[2], o[3]) for c in cells for o in c["outputs"] if len(o) == 4 and isinstance(o[3], int)],
+            "errors (cell, ename, evalue)": [(c["index"], o[1], o[2]) for c in cells for o in c["outputs"] if o[0] == "error"],
+            "execution order": [(c["index"], c["ec"]) for c in cells if c["type"] == "code"]}
+
+
 def probes_322(text: str) -> dict:
     nb = jload(text)
     if isinstance(nb, dict) and nb.get("nbformat") == 4 and isinstance(nb.get("cells"), list):
@@ -1660,7 +1676,7 @@ def probes_322(text: str) -> dict:
             src = _sl2(c)
             cells.append({"index": i, "type": c["cell_type"], "ec": c.get("execution_count") if c["cell_type"] == "code" else None, "id": c.get("id"), "source": src, "outputs": outs})
         ks, li = nb.get("metadata", {}).get("kernelspec", {}), nb.get("metadata", {}).get("language_info", {})
-        return {"notebook": (f"4.{_tok(nb.get('nbformat_minor', 0))}", _tok(ks.get("name", "-")), _tok(li.get("name", "-")), _tok(li.get("version", "-"))), "cells": cells}
+        return _nb_answers((f"4.{_tok(nb.get('nbformat_minor', 0))}", _tok(ks.get("name", "-")), _tok(li.get("name", "-")), _tok(li.get("version", "-"))), cells)
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()  # the encoding ends with a newline
@@ -1705,7 +1721,7 @@ def probes_322(text: str) -> dict:
             cur["source"].append(ln)
     for c in cells:
         c["outputs"] = [(("stream", o[1], (o[2], tuple(o[3]))) if o[0] == "stream" else (o[0], o[1], o[2], (o[3], tuple(o[4])))) if isinstance(o, list) else o for o in c["outputs"]]
-    return {"notebook": (m.group(1), m.group(2), m.group(3), m.group(4)) if m else None, "cells": cells}
+    return _nb_answers((m.group(1), m.group(2), m.group(3), m.group(4)) if m else None, cells)
 
 
 def _png_b64(seed: int, n: int) -> str:
@@ -1753,6 +1769,7 @@ _NB_MARKER = json.dumps({**json.loads(_NB), "cells": json.loads(_NB)["cells"][:2
 _NB_PIPE = json.dumps({**json.loads(_NB), "cells": [{"cell_type": "code", "execution_count": 1, "metadata": {}, "outputs": [], "source": ["#| not an output line\n", "y = 2\n"]}]}, indent=1)
 _NB_V3 = jp({"nbformat": 3, "nbformat_minor": 0, "worksheets": [{"cells": [{"cell_type": "code", "input": ["1+1"], "outputs": [], "language": "python"}]}], "metadata": {}})
 
+# reconstructed from memory unless stated: notebook JSON reconstructed from memory in nbformat 4.5 shape (json.dump indent=1 as Jupyter writes it); no jupyter/nbformat here
 case(
     322,
     claim="A nbformat-4 notebook becomes '# %% <index> <type> ec=N id=X' cells with verbatim source (markdown commented), text outputs capped to 8+4 lines with the total count, image/html outputs stubbed to mime and size, errors reduced to ename and evalue; cell index and id, execution count, every source line, every stream/result text line that is shown, image count and sizes, and every error are unchanged.",
@@ -2185,7 +2202,9 @@ def probes_324(text: str) -> dict:
             docs.append((path, _md_facts(x[len(MD):])))
         elif isinstance(x, list):
             stack += [(f"{path}[{i}]", v) for i, v in enumerate(x)]
-    return {"rich-text documents (words, headings, links)": sorted(docs, key=lambda d: d[0]), "slack messages (text, mentions, links, other fields)": sorted(slack, key=lambda d: d[0])}
+    docs.sort(key=lambda d: d[0])
+    return {"rich-text documents (words, headings, links)": docs, "all headings": [(p, d["headings"]) for p, d in docs], "all link targets": [(p, d["links"]) for p, d in docs],
+            "slack messages (text, mentions, links, other fields)": sorted(slack, key=lambda d: d[0])}
 
 
 def _adf_doc(seed: int = 1) -> dict:
@@ -2246,8 +2265,14 @@ def _slack_history() -> str:
     return jc({"ok": True, "messages": ms, "has_more": False, "pin_count": 1, "channel_actions_ts": None})
 
 
+_ADF_SPECIAL = jc({"d": {"version": 1, "type": "doc", "content": [
+    {"type": "paragraph", "content": [{"type": "text", "text": "# not a heading"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "> not a quote"}]},
+    {"type": "paragraph", "content": [{"type": "text", "text": "```not a fence"}, {"type": "hardBreak"}, {"type": "text", "text": "# after a break"}]},
+    {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "real heading"}]}, {"type": "codeBlock", "content": [{"type": "text", "text": "```\n# inside a fence\n```"}]},
+    {"type": "paragraph", "content": [{"type": "text", "text": "snake_case and **stars** and [brackets](x)"}]}]}})
 _PLAIN_JSON = jp({"summary": "no rich text here", "description": "plain string", "fields": {"priority": {"name": "High"}}, "blocks": [{"type": "section", "text": "not rich_text"}]})
 
+# reconstructed from memory unless stated: Jira ADF, Notion block list and Slack history reconstructed from memory
 case(
     324,
     claim="Inside any JSON document an ADF doc becomes '[md] ' Markdown (headings, lists with numbering, code fences with language, quotes, panels, tables, marks, links, mentions, emoji, cards, status, media), a Notion block list becomes Markdown, and a Slack message's blocks are dropped when they render to exactly its text; the word sequence, heading levels and texts, link targets, and Slack mentions and links are unchanged, and node types the converter does not know survive as compact JSON.",
@@ -2260,6 +2285,7 @@ case(
         Fixture("Slack history: four duplicate blocks, one message whose blocks disagree with its text", _slack_history(), True),
         Fixture("JSON with no rich text; a 'blocks' key that is not rich_text", _PLAIN_JSON, False),
         Fixture("already converted", jc({"description": MD + "# Title\n\nbody"}), False),
+        Fixture("ADF paragraphs that start like Markdown structure, a fence inside a code block", _ADF_SPECIAL, None),
         Fixture("ADF with a link target holding a space", jc({"d": {"version": 1, "type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "x", "marks": [{"type": "link", "attrs": {"href": "https://a b"}}]}]}]}}), False),
     ],
     min_gain=0.25,
@@ -2514,6 +2540,7 @@ def _zipkin_trace() -> str:
     return jp(out)
 
 
+# reconstructed from memory unless stated: OTLP, Jaeger and Zipkin exports of one trace reconstructed from memory (no collector or Jaeger here)
 case(
     421,
     claim="OTLP, Jaeger and Zipkin trace JSON become 'trace <id> | N spans | window' plus one line per span, indented by depth, with service, name, duration and start offset in 0.1 ms, status with message, and unwrapped attributes; span count, tree shape, every duration and offset, the slowest span and every errored span with its message are unchanged.",
@@ -2667,6 +2694,7 @@ _JOURNAL = _journal()
 _JOURNAL_MIXED = "".join(jc({**json.loads(l), "_HOSTNAME": ["web-01", "web-02"][i % 2]}) + "\n" for i, l in enumerate(_journal(24).splitlines()))
 _DOCKER_LOG = "".join(jc({"log": f"request {i} ok\n", "stream": "stdout", "time": f"2025-03-02T14:03:{i:02d}.123456789Z"}) + "\n" for i in range(30))
 
+# reconstructed from memory unless stated: journalctl -o json entries reconstructed from memory (this container has no journal)
 case(
     424,
     claim="journalctl -o json lines become 'timestamp unit[pid] pN message' (host hoisted or suffixed to the unit when it varies, newlines escaped, binary messages stubbed); every entry's time to the millisecond, unit, pid, priority and message, the per-priority counts and the error messages are unchanged.",
@@ -2844,7 +2872,25 @@ def _probe_schema_original(s: dict, label: str) -> tuple:
     return label, props
 
 
+def _answers_521(ans: dict) -> dict:
+    """Spread the parsed facts over separate answers: required fields, enum values, argument defaults."""
+    if "graphql" in ans:
+        g = ans["graphql"]
+        return {"roots": g["roots"], "types (kind, interfaces, members with signature, deprecation, default, args)": g["types"],
+                "non-null members per type": {t: sorted(m for m, v in d["members"].items() if v[0].endswith("!")) for t, d in g["types"].items()},
+                "enum values per type": {t: d["enum"] for t, d in g["types"].items() if d["enum"]}, "union members": {t: d["union"] for t, d in g["types"].items() if d["union"]}}
+    if "schemas" in ans:
+        sc = ans["schemas"]
+        return {"schemas (path -> type, required)": sc, "required paths": {str(k): sorted(p for p, v in props.items() if v[1]) for k, props in sc.items()},
+                "enum-typed paths": {str(k): {p: v[0] for p, v in props.items() if "enum(" in v[0]} for k, props in sc.items()}}
+    return ans
+
+
 def probes_521(text: str) -> dict:
+    return _answers_521(_probes_521(text))
+
+
+def _probes_521(text: str) -> dict:
     lines = [x for x in text.split("\n") if x != ""] if text.startswith(("# graphql", "schema ")) else None
     if lines is not None and GQL_HEAD.match(lines[0]):
         return {"graphql": _probe_gql_encoded(lines)}
@@ -2951,6 +2997,7 @@ def _json_schema() -> str:
 
 _PLAIN_SCHEMA = jc({"type": "string", "enum": ["a", "b"]})
 
+# reconstructed from memory unless stated: GraphQL introspection result, cert-manager style CRD and JSON Schema reconstructed from memory (no network, no kubectl)
 case(
     521,
     claim="GraphQL introspection JSON becomes one block per type (kind, interfaces, union members, 'field: [Issue!]!' lines with deprecation, 'arg name: Type = default' lines, enum values) without __ types, and JSON Schema or CRD openAPIV3Schema becomes 'path*: type' lines with enums, arrays, maps and $ref targets named once; every type, field, argument with its type signature and default, enum value, required flag and enum list is unchanged.",
@@ -3112,6 +3159,7 @@ def _pypi(n: int = 60) -> str:
                "vulnerabilities": [{"id": "PYSEC-2023-74", "aliases": ["CVE-2023-32681"], "details": "Requests leaks Proxy-Authorization headers to destination servers on https redirects.", "fixed_in": ["2.31.0"], "link": "https://osv.dev/vulnerability/PYSEC-2023-74", "source": "osv", "summary": None, "withdrawn": None}]})
 
 
+# reconstructed from memory unless stated: npm packument and PyPI project JSON reconstructed from memory at reduced size (the idea measured 823 kB and 193 kB)
 case(
     606,
     claim="An npm packument or PyPI project JSON becomes a digest: package, latest version, dist-tags, the latest version's dependencies and engines (or requires-python, requires_dist and vulnerability ids), then one 'version date [deprecated or yanked: reason]' line per release in registry order; latest version, tags, dependencies, engines.node, the release date of every version and every deprecation or yank reason are unchanged.",
@@ -3276,6 +3324,7 @@ def _figma_doc(n_items: int = 26) -> str:
 
 _FIGMA_PRUNED = tidy_design_json(_figma_doc())
 
+# reconstructed from memory unless stated: Figma node tree reconstructed from memory with 17-digit float noise
 case(
     732,
     claim="In a Figma REST document, default-valued keys (blendMode NORMAL/PASS_THROUGH, visible true, opacity 1, empty effects/strokes/fills/exportSettings, TOP/LEFT constraints, ...) are dropped, {r,g,b,a} colours become hex, other floats round to 2 decimals; every node's id, name, type, text, children order, box, colour, non-default visibility, opacity, blend, effect, radius and font is unchanged.",
@@ -3420,6 +3469,7 @@ def _es_search(n: int = 40, same_index: bool = True, abnormal: bool = False) -> 
     return jp(body)
 
 
+# reconstructed from memory unless stated: Elasticsearch search response reconstructed from memory
 case(
     801,
     claim="An Elasticsearch/OpenSearch search response becomes '#es' header lines (total with relation, shared _index, the last sort, aggregations and other top-level keys such as _scroll_id, timed_out and failed shards when abnormal) plus one 'id TAB _source TAB extras' row per hit; every _source, _id, index, total, aggregation, highlight and non-duplicate fields entry is unchanged.",
@@ -4039,6 +4089,7 @@ _PY_DIFF = "diff --git a/app.py b/app.py\nindex 83db48f..bf2a3c1 100644\n--- a/a
 _MIXED_DIFF = _PY_DIFF + GIT_DIFF_C
 _JSON_DIFF = "diff --git a/package.json b/package.json\nindex 1..2 100644\n--- a/package.json\n+++ b/package.json\n@@ -1,4 +1,4 @@\n {\n-  \"execution_count\": 1,\n+  \"execution_count\": 2,\n   \"x\": \"abc\\n\",\n }\n"
 
+# reconstructed from memory unless stated: the three notebook diffs are real `git diff` output captured in this container (git 2.43, notebooks written with json.dump indent=1)
 case(
     880,
     claim="In 'diff --git' sections of .ipynb files, JSON string element lines are decoded to 'm|text', execution_count lines are folded to one '~|execution_count -a +b' per hunk, image payloads become '<blob mime N>' stubs, and a hunk whose only changes are counters and payloads keeps no context lines; every added, removed and context source line, every hunk header, every other line and every other file's diff is unchanged.",
@@ -4258,6 +4309,7 @@ def _dbt_catalog() -> str:
     return jp({"metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json", "dbt_version": "1.7.4", "generated_at": "2025-03-02T09:05:00.000000Z", "invocation_id": "5b0c4a1e", "env": {}}, "nodes": nodes, "sources": {}, "errors": None})
 
 
+# reconstructed from memory unless stated: dbt manifest, run_results and catalog reconstructed from memory (no dbt here)
 case(
     886,
     claim="A dbt manifest becomes one line per node and source (type, materialization, file, upstream nodes, test name and column), run_results one line per result with status, time, rows, failures and the message of every non-success (plus status counts and command), and catalog one line per relation with its columns; the upstream and downstream models of every node, every failing or erroring test with its message, skipped nodes and status counts are unchanged.",
@@ -4441,6 +4493,11 @@ class _SseReader:
         self.pending, self.name, self.data = [], None, []
 
 
+def _flat891(o: dict) -> dict:
+    return {"flavour, id, model, created, chunk count": (o["flavour"], o["id"], o["model"], o["created"], o["chunks"]), "text per choice or block": o["text"], "tool calls": o["tools"],
+            "finish or stop reason": o["finish"], "usage": o["usage"], "error events": o["errors"], "end state": o["end"], "raw tail of a cut stream": o["partial"]}
+
+
 def probes_891(text: str) -> dict:
     if text.startswith("[sse "):
         lines = text.split("\n")
@@ -4469,7 +4526,7 @@ def probes_891(text: str) -> dict:
                 out["end"] = ln[5:]
             elif ln.startswith("partial: "):
                 out["partial"] = ln[9:]
-        return {"stream": out}
+        return _flat891(out)
     if "\r" in text:
         return {"stream": None}
     r = _SseReader(text)
@@ -4555,7 +4612,7 @@ def probes_891(text: str) -> dict:
     kinds = [k for k, _a, _b in parsed]
     out["end"] = "partial" if "partial" in kinds else "done" if ("done" in kinds or any((n or j.get("type")) == "message_stop" for n, j in evs)) else "truncated"
     out["partial"] = _esc(next((a for k, a, _b in parsed if k == "partial"), None)) if "partial" in kinds else None
-    return {"stream": out}
+    return _flat891(out)
 
 
 def _openai_stream(text: str, tool: bool = False, error_at: int | None = None, cut: int | None = None) -> str:
@@ -4603,6 +4660,7 @@ def _anthropic_stream() -> str:
 
 _CURL_I = "HTTP/2 200 \r\ncontent-type: text/event-stream\r\n\r\n" + _openai_stream("hi there", cut=None).replace("\n", "\r\n")
 
+# reconstructed from memory unless stated: OpenAI and Anthropic streams reconstructed from memory (no network for curl -N)
 case(
     891,
     claim="OpenAI chat-completion chunk streams and Anthropic message event streams become a header (flavour, id, model, created, chunk count), the concatenated text per choice or block (escaped), tool calls with name, id and joined arguments, finish or stop reason, usage, every error event, and 'end: done|truncated|partial' with the raw tail of a stream cut mid-event; the text, tool arguments, reasons, usage, errors and end state are unchanged.",
@@ -4799,6 +4857,7 @@ def _vue_html() -> str:
 
 _PLAIN_HTML = '<!DOCTYPE html><html><head><title>About</title></head><body><h1>About us</h1><p>We make widgets. <!-- note to self: update copy --> Call us.</p><script>var a = "<!-- -->";</script></body></html>'
 
+# reconstructed from memory unless stated: Next.js, Angular and Nuxt pages reconstructed from memory
 case(
     1067,
     claim="In fetched SSR HTML, __NEXT_DATA__ keeps only its size, top-level and pageProps key lists, the run of self.__next_f.push scripts becomes one stub with count and size, __APOLLO_STATE__ keeps size, entry count and first 10 keys, and React '<!-- -->' and Suspense comments, Angular _ngcontent/_nghost/ng-reflect attributes and Vue data-v attributes are removed from markup; the visible-text DOM dump, every tag with its other attributes, every other script and style verbatim (JSON-LD, application code) and the payload sizes and key lists are unchanged.",
@@ -4993,11 +5052,11 @@ def probes_1154(text: str) -> dict:
     body = text[1:] if text.startswith("﻿") else text
     if body.startswith("// !$*UTF8*$!") and "objects = {" in body:
         try:
-            return {"pbxproj": _pbx_facts(text)}
+            return _pbx_facts(text)
         except (AssertionError, IndexError, KeyError, ValueError, TypeError, AttributeError):
             return {"pbxproj": "unparsable"}
     if body.startswith("Microsoft Visual Studio Solution File"):
-        return {"sln": _sln_facts(text)}
+        return _sln_facts(text)
     return {"document": None}
 
 
@@ -5078,6 +5137,7 @@ def _sln(n_projects: int = 12, odd: bool = True) -> str:
 _PBX = _pbxproj()
 _SLN = _sln()
 
+# reconstructed from memory unless stated: pbxproj and .sln reconstructed from memory (no Xcode or Visual Studio here)
 case(
     1154,
     claim="In a project.pbxproj every 24-hex object id becomes a short '§N' alias in order of first appearance (structure, names, comments and build settings kept), and in a .sln the ProjectConfigurationPlatforms rows of every project whose matrix is exactly the identity collapse to one '{GUID} = identity' line; the object graph (which target builds which file, groups, settings) and every project, configuration and mapping are unchanged.",
@@ -5244,7 +5304,7 @@ def probes_1162(text: str) -> dict:
                 svc = _svc2(rl.get("resource"))
                 for sl in rl.get("scopeLogs", []):
                     for r in sl.get("logRecords", []):
-                        kv = {"ts": _record_ts_probe(r), "level": _level_probe(r), "service": svc, "body": _otlp_val(r["body"]) if r.get("body") is not None else ""}
+                        kv = {"ts": _record_ts_probe(r), "level": _level_probe(r), "service": svc, "body": _unwrap2(r["body"]) if r.get("body") is not None else ""}
                         if r.get("traceId"):
                             kv["trace"] = str(r["traceId"])
                         if r.get("spanId"):
@@ -5347,6 +5407,7 @@ def _otlp_metrics_doc() -> dict:
 _OTLP_LOGS_NDJSON = "\n".join(jc(_otlp_logs_doc(b)) for b in range(3)) + "\n"
 _OTLP_METRICS = jc(_otlp_metrics_doc()) + "\n"
 
+# reconstructed from memory unless stated: OTLP logs and metrics reconstructed from memory in the collector file-exporter shape
 case(
     1162,
     claim="OTLP logs and metrics JSON (one document or one per line) become one logfmt line per log record (time to the millisecond, level, service, trace and span ids when present, body, unwrapped attributes) and one line per metric data point under a '# metric' header (value, or count/sum/min/max/buckets/bounds); record and data-point counts, severities, bodies, attributes, metric values and the service with the most errors are unchanged.",
@@ -5583,6 +5644,7 @@ def _flame_fixtures():
     ]
 
 
+# reconstructed from memory unless stated: flame graph SVG drawn by a small generator that follows flamegraph.pl's layout (normal and inverted); no inferno or perf here
 case(
     1168,
     claim="A flamegraph.pl/inferno SVG (normal or inverted) becomes folded stacks 'a;b;c N' rebuilt from the rect nesting (parent = the frame one row down whose x-extent holds the midpoint, self = samples minus children); the stack table reproduces the folded input the SVG was drawn from, and the total, hottest leaf, its callers, per-function self and inclusive samples are unchanged.",

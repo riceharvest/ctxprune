@@ -508,6 +508,179 @@ case(
 
 
 # ===============================================================================================================
+# #1085 LaTeX build log pack for pdflatex / latexmk output. Keep '!' errors with their 'l.NN' context, every
+# LaTeX/package/class warning (undefined citations and references, rerun hints), an Overfull/Underfull count and the
+# page count; drop the nested '(file' open/close lines, 'LaTeX Font Info', 'Package ... Info' and similar chatter.
+# RULE: the probe unwraps the 79-column hard wrap of the log first (a warning split across two physical lines must
+# still name its citation key), then lists errors with their l.NN line, undefined cites/refs, other warnings, the
+# box counts and the output line. No TeX Live here: logs are generated to the pdfTeX log format (reconstructed from
+# memory), including a citation key that wraps at column 79 and an error block with the standard help text.
+
+_TX_PKGS = ["article.cls", "size10.clo", "amsmath.sty", "amstext.sty", "amsgen.sty", "amsbsy.sty", "amsopn.sty", "amssymb.sty", "amsfonts.sty", "graphicx.sty", "keyval.sty", "graphics.sty", "trig.sty", "hyperref.sty", "natbib.sty", "geometry.sty", "xcolor.sty", "booktabs.sty", "url.sty", "listings.sty"]
+
+
+def _wrap79(s: str) -> list[str]:
+    return [s[i:i + 79] for i in range(0, len(s), 79)] or [""]
+
+
+def _latex_log(error: bool = False, long_key: bool = True) -> str:
+    L = ["This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023/Debian) (preloaded format=pdflatex 2024.1.10)  10 JAN 2024 12:00", "entering extended mode", " restricted \\write18 enabled.",
+         " %&-line parsing enabled.", "**main.tex", "(./main.tex", "LaTeX2e <2023-11-01> patch level 1", "L3 programming layer <2024-01-05>"]
+    for k, p in enumerate(_TX_PKGS):
+        L.append(f"(/usr/share/texlive/texmf-dist/tex/latex/{p.split('.')[0]}/{p}")
+        if p == "article.cls":
+            L.append("Document Class: article 2023/05/17 v1.4n Standard LaTeX document class")
+        if p == "amsmath.sty":
+            L.append("For additional information on amsmath, use the `?' option.")
+        L.append(")")
+    L += ["(./main.aux)", "*geometry* driver: auto-detecting", "*geometry* detected driver: pdftex"]
+    for k in range(1, 9):
+        L += [f"LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line {k * 3}.", f"LaTeX Font Info:    ... okay on input line {k * 3}.", f"Package hyperref Info: Link coloring OFF on input line {k * 3}."]
+    L += ["", "Overfull \\hbox (12.34pt too wide) in paragraph at lines 20--21", "[]\\OT1/cmr/m/n/10 Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod", " []", "",
+          "Underfull \\hbox (badness 10000) in paragraph at lines 30--31", "[]\\OT1/cmr/m/n/10 text", " []", "", "Overfull \\hbox (3.1pt too wide) in paragraph at lines 33--34", "[]\\OT1/cmr/m/n/10 Another long line that does not fit", " []", ""]
+    L += ["[1{/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}]"]
+    key = "knuth1984-the-tex-book-computers-and-typesetting-volume-a" if long_key else "knuth84"
+    L += _wrap79(f"LaTeX Warning: Citation `{key}' on page 2 undefined on input line 44.") + [""]
+    L += ["LaTeX Warning: Reference `fig:plot' on page 2 undefined on input line 51.", "", "Package natbib Warning: Citation `lamport94' on page 2 undefined on input line 52.", ""]
+    L += ["Overfull \\hbox (7.7pt too wide) in paragraph at lines 55--56", "[]\\OT1/cmr/m/n/10 yet another overfull box", " []", ""]
+    if error:
+        L += ["! Undefined control sequence.", "l.60 \\foo", "         bar", "The control sequence at the end of the top line", "of your error message was never \\def'ed.  If you proceed,", "it will be ignored.", "", "[2]"]
+    else:
+        L += ["[2] [3]"]
+    L += ["(./main.bbl) (./main.aux)", "LaTeX Warning: There were undefined references.", "", "LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.", "", " )"]
+    if error:
+        L += ["! LaTeX Error: File `missing.sty' not found.", "", "Type X to quit or <RETURN> to proceed,", "or enter new name. (Default extension: sty)", "", "Enter file name: ", "! Emergency stop.", "<read *> ", "         ", "l.3 \\usepackage{missing}", "                        ", "*** (cannot \\read from terminal in nonstop modes)", ""]
+        L += ["No pages of output.", "Transcript written on main.log."]
+    else:
+        L += ["Here is how much of TeX's memory you used:", " 5123 strings out of 476091", " 79890 string characters out of 5793800", "", "Output written on main.pdf (3 pages, 98765 bytes).", "Transcript written on main.log."]
+    return "\n".join(L) + "\n"
+
+
+LATEX_OK = _latex_log(error=False)
+LATEX_BROKEN = _latex_log(error=True)
+
+_TX_KEEP_START = re.compile(r"^(?:This is (?:pdfTeX|XeTeX|LuaTeX)|Output written on |No pages of output|Transcript written on |Runaway |Emergency stop)")
+_TX_WARN = re.compile(r"^(?:LaTeX|Package \S+|Class \S+) (?:Warning|Error):")
+_TX_BOX = re.compile(r"^(Overfull|Underfull) \\[hv]box")
+_TX_STUB = re.compile(r"^\[ctxprune: (?:(\d+) Overfull and (\d+) Underfull box warnings elided|(\d+) log lines elided)\]$")
+
+
+def pack_latex_log(text: str) -> str:
+    lines = text.split("\n")
+    n = len(lines)
+    out, dropped, over, under, i = [], 0, 0, 0, 0
+
+    def flush():
+        nonlocal dropped
+        if dropped:
+            out.append(f"[ctxprune: {dropped} log lines elided]")
+            dropped = 0
+
+    while i < n:
+        l = lines[i]
+        if l.startswith("!"):
+            flush()
+            j = i + 1
+            while j < n and j < i + 14 and not re.match(r"^l\.\d+ ", lines[j]):
+                j += 1
+            j = j + 2 if j < n and j < i + 14 and re.match(r"^l\.\d+ ", lines[j]) else i + 1
+            while j < n and j < i + 14 and lines[j].strip() and not lines[j].startswith("!") and j == i + 1:
+                j += 1
+            out += lines[i:min(j, n)]
+            i = min(j, n)
+        elif _TX_WARN.match(l):
+            flush()
+            j = i + 1
+            while j < n and lines[j].strip():
+                j += 1
+            out += lines[i:j]
+            i = j
+        elif _TX_BOX.match(l):
+            if _TX_BOX.match(l).group(1) == "Overfull":
+                over += 1
+            else:
+                under += 1
+            j = i + 1
+            while j < n and lines[j].strip():
+                j += 1
+            dropped += 0
+            i = j + 1 if j < n else j
+        elif _TX_KEEP_START.match(l):
+            flush()
+            out.append(l)
+            i += 1
+        elif _TX_STUB.match(l):
+            flush()
+            out.append(l)
+            i += 1
+        else:
+            if l.strip():
+                dropped += 1
+            i += 1
+    flush()
+    if over or under:
+        at = next((k for k, x in enumerate(out) if _TX_WARN.match(x)), len(out))
+        out.insert(at, f"[ctxprune: {over} Overfull and {under} Underfull box warnings elided]")
+    return shrink_only(text, "\n".join(out) + ("\n" if text.endswith("\n") else ""))
+
+
+def _unwrap(lines: list[str]) -> list[str]:
+    out, i = [], 0
+    while i < len(lines):
+        cur = lines[i]
+        while len(cur) == 79 and i + 1 < len(lines) and lines[i + 1].strip():
+            i += 1
+            cur += lines[i]
+        out.append(cur)
+        i += 1
+    return out
+
+
+def probes_1085(text: str) -> dict:
+    lines = _unwrap(text.split("\n"))
+    errors, cites, refs, warns, over, under, outp, version = [], [], [], [], 0, 0, [], []
+    for k, l in enumerate(lines):
+        if l.startswith("!"):
+            ctx = next((lines[j] for j in range(k + 1, min(k + 14, len(lines))) if re.match(r"^l\.\d+ ", lines[j])), None)
+            errors.append((l, ctx))
+        if m := re.match(r"^(?:LaTeX|Package \S+) Warning: Citation `(.*?)' on page (\d+) undefined on input line (\d+)", l):
+            cites.append((m.group(1), m.group(2), m.group(3)))
+        elif m := re.match(r"^(?:LaTeX|Package \S+) Warning: Reference `(.*?)' on page (\d+) undefined on input line (\d+)", l):
+            refs.append((m.group(1), m.group(2), m.group(3)))
+        elif _TX_WARN.match(l):
+            warns.append(l)
+        if m := _TX_BOX.match(l):
+            over += m.group(1) == "Overfull"
+            under += m.group(1) == "Underfull"
+        if m := _TX_STUB.match(l):
+            over += int(m.group(1) or 0)
+            under += int(m.group(2) or 0)
+        if re.match(r"^(?:Output written on |No pages of output|Transcript written on )", l):
+            outp.append(l)
+        if l.startswith("This is "):
+            version.append(l)
+    return {"errors with their l.NN context": errors, "undefined citations (key, page, line)": cites, "undefined references": refs, "other warnings": warns,
+            "Overfull and Underfull box counts": (over, under), "output / page count lines": outp, "TeX version line": version}
+
+
+case(
+    1085,
+    claim="Keeps the TeX version line, every '!' error with its 'l.NN' line and continuation, every LaTeX/Package/Class warning block (undefined citations and references, rerun hints, including a key hard-wrapped at column 79) and the 'Output written' / 'No pages of output' lines; the nested '(file' lines, font and package Info lines, memory statistics and page markers become '[ctxprune: N log lines elided]', and Overfull/Underfull boxes become one count line.",
+    loses="the names and order of loaded packages and files, the line numbers and text of each Overfull/Underfull box (only the counts survive), font and package Info lines, page markers, and TeX's memory statistics",
+    encode=pack_latex_log,
+    probes=probes_1085,
+    fixtures=lambda: [
+        Fixture("pdflatex log of a clean build: 20 packages, 6 boxes, 3 undefined, key wraps at column 79 (generated, reconstructed from memory)", LATEX_OK, True),
+        Fixture("the same with an undefined control sequence mid-log and a missing .sty at the end (generated)", LATEX_BROKEN, True),
+        Fixture("latexmk summary line only", "Latexmk: All targets (main.pdf) are up-to-date\n", False),
+        Fixture("a '!' with no l.NN line (truncated log) and a stub-looking line", "! Undefined control sequence.\nsome text\n[ctxprune: 9 log lines elided]\n", None),
+    ],
+    min_gain=0.5,
+)
+
+
+
+# ===============================================================================================================
 # #1151 Warnings inside a shared header print once per translation unit that includes it; only the 'In file included
 # from' chain differs. Keep one copy per distinct (context line, warning, echoed code) and say how many TUs hit it.
 # RULE: probe = every distinct header warning site with the number of translation units that reported it (a Counter
@@ -2223,6 +2396,7 @@ _P_STUB = re.compile(r"^\s*\[ctxprune: (\d+) (library frames folded|Java stack f
 _P_SAME = re.compile(r"^\s*\[ctxprune: same Python traceback as above \(\d+ lines\)\]$")
 _P_JAVA = re.compile(r"^\tat \S+\(.*\)$")
 _P_TB = "Traceback (most recent call last):"
+_P_NUMBERED = re.compile(r"^\s*(?:-+> )?\d+(?: .*)?$")  # the numbered source lines IPython prints under a frame header
 
 
 def _frame_items(lines, P):
@@ -2232,13 +2406,13 @@ def _frame_items(lines, P):
         p = P[i]
         if m := _P_IPY.match(p):
             j = i + 1
-            while j < n and P[j].strip():
+            while j < n and _P_NUMBERED.match(P[j]):
                 j += 1
             items.append(("ipy", i, j, bool(_P_LIB.search(m.group(1)))))
             i = j
         elif _P_CELL.match(p) and ("line" in p or p.startswith(("Input", "<ipython"))):
             j = i + 1
-            while j < n and P[j].strip():
+            while j < n and _P_NUMBERED.match(P[j]):
                 j += 1
             items.append(("ipy", i, j, False))
             i = j
@@ -2266,7 +2440,10 @@ def fold_runtime(text: str) -> str:
             k += 1
             continue
         run = [items[k]]
-        while k + 1 < len(items) and items[k + 1][3] and items[k + 1][0] == run[0][0] and items[k + 1][1] <= run[-1][2] + 1:
+        def adjacent(prev, nxt):  # no stray line between them (IPython frames are separated by exactly one blank line)
+            return nxt[1] == prev[2] or (nxt[1] == prev[2] + 1 and nxt[0] == "ipy" and not lines[prev[2]].strip())
+
+        while k + 1 < len(items) and items[k + 1][3] and items[k + 1][0] == run[0][0] and adjacent(run[-1], items[k + 1]):
             k += 1
             run.append(items[k])
         k += 1
@@ -2345,7 +2522,9 @@ def probes_1325(text: str) -> dict:
     if "------------------" in lines:
         a = lines.index("------------------")
         b = lines.index("------------------", a + 1) if "------------------" in lines[a + 1:] else a
-        cell = lines[a + 1:b]
+        block = lines[a + 1:b]
+        frame_like = lambda l: bool(_P_IPY.match(l) or _P_PY.match(l) or _P_STUB.match(l) or (_P_CELL.match(l) and "line" in l) or l.startswith("-" * 20))
+        cell = [] if any(frame_like(l) for l in block) or b - a > 60 else block
     return {"distinct exception lines": sorted(exc), "user frames with source pointer": sorted(set(user_frames), key=str), "failing cell source": cell,
             "library frames accounted for": libs, "java frames accounted for": java}
 
@@ -2363,10 +2542,243 @@ case(
         Fixture("pyspark: UDF raises ValueError, traceback repeated 3x with Java frames (real)", PYSPARK_UDF_ERROR, True),
         Fixture("CI log: notebook failure first, make error, spark failure last", COMPOSITE_1325, True),
         Fixture("a short traceback with only user frames", 'Traceback (most recent call last):\n  File "/work/app/job.py", line 12, in <module>\n    main()\n  File "/work/app/job.py", line 8, in main\n    raise ValueError("bad")\nValueError: bad\n', False),
-        Fixture("a single library frame (folding would not be shorter)", 'Traceback (most recent call last):\n  File "/a/site-packages/x.py", line 1, in f\n    g()\nKeyError: 1\n', False),
+        Fixture("a library frame between two user frames of a short classic traceback is folded too, not hidden", 'Traceback (most recent call last):\n  File "/work/app/a.py", line 3, in <module>\n    run()\n  File "/a/site-packages/x.py", line 1, in f\n    g()\n  File "/work/app/a.py", line 9, in run\n    boom()\nKeyError: 1\n', None),
         Fixture("text with a Traceback header inside a log line and no frames", "ERROR: job failed: Traceback (most recent call last):\n[ctxprune: same Python traceback as above (9 lines)]\n", None),
     ],
     min_gain=0.3,
+)
+
+
+
+# ===============================================================================================================
+# #214 xcodebuild: drop the per-step 'cd', 'export' and tool command lines under each step header (SwiftCompile, Ld,
+# CodeSign, ProcessInfoPlistFile, CompileC, ...). RULE: keep every header, every diagnostic with its echoed source,
+# the BUILD result and the failed-command list. No Mac here: the fixtures are generated to the xcodebuild step
+# format as documented in public CI logs, with realistic multi-hundred-character swift-frontend/clang command lines
+# (reconstructed from memory; the idea itself says 'from memory, unmeasured'). The trap the generator includes: an
+# echoed Swift/ObjC source line that starts with '/' (a doc comment) must not be mistaken for a command line.
+
+_XC_DD = "/Users/runner/Library/Developer/Xcode/DerivedData/App-bhqkdmfyxqrlsvbhvjtfhzmmqjoc"
+_XC_TC = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+_XC_SDK = "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator17.2.sdk"
+
+
+def _xc_swift_cmd(src: str) -> str:
+    flags = " ".join(f"-Xcc -I{_XC_DD}/Build/Intermediates.noindex/App.build/Debug-iphonesimulator/App.build/{d}" for d in ("swift-overrides.hmap", "DerivedSources-normal/arm64", "DerivedSources/arm64", "DerivedSources"))
+    return (f"{_XC_TC}/swift-frontend -frontend -c -primary-file /Users/runner/work/App/App/App/{src} -emit-module-path {_XC_DD}/Build/Intermediates.noindex/App.build/Debug-iphonesimulator/App.build/Objects-normal/arm64/{src[:-6]}.swiftmodule "
+            f"-target arm64-apple-ios17.0-simulator -sdk {_XC_SDK} -enable-objc-interop -enable-testing -g -module-cache-path {_XC_DD}/ModuleCache.noindex -swift-version 5 -Onone {flags} -module-name App -parse-as-library")
+
+
+def _xc_steps(files, fail_at=None):
+    out = ["Command line invocation:", "    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme App -destination \"platform=iOS Simulator,name=iPhone 15\" build", "",
+           "Prepare packages", "", "Computing target dependency graph and provisioning inputs", "", "Create build description", "Build description signature: 0d9c6a44f1a3bb7e4c3d5e2a1b9f8c77", "", f"CreateBuildDirectory {_XC_DD}/Build/Products",
+           "    cd /Users/runner/work/App/App/App.xcodeproj", f"    builtin-create-build-directory {_XC_DD}/Build/Products", "",
+           f"ProcessInfoPlistFile {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app/Info.plist /Users/runner/work/App/App/App/Info.plist (in target 'App' from project 'App')", "    cd /Users/runner/work/App/App",
+           f"    builtin-infoPlistUtility /Users/runner/work/App/App/App/Info.plist -producttype com.apple.product-type.application -genpkginfo {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app/PkgInfo -expandbuildsettings -format binary -platform iphonesimulator -o {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app/Info.plist", ""]
+    for k, f in enumerate(files):
+        out += [f"SwiftCompile normal arm64 Compiling\\ {f} /Users/runner/work/App/App/App/{f} (in target 'App' from project 'App')", "    cd /Users/runner/work/App/App", "    " + _xc_swift_cmd(f), ""]
+        if k == 1:
+            out += [f"/Users/runner/work/App/App/App/{f}:41:17: warning: variable 'tmp' was never used; consider replacing with '_' or removing it", "        let tmp = compute()", "            ~~~~^~~", ""]
+        if fail_at == k:
+            out += [f"/Users/runner/work/App/App/App/{f}:12:9: error: cannot find 'undefinedHelper' in scope", "        undefinedHelper()", "        ^~~~~~~~~~~~~~~", f"/Users/runner/work/App/App/App/{f}:20:5: error: cannot find 'fmt' in scope",
+                    "    /// docs mention fmt(...) here", "    fmt(3)", "    ^~~", ""]
+    if fail_at is None:
+        out += [f"Ld {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app/App normal (in target 'App' from project 'App')", "    cd /Users/runner/work/App/App",
+                f"    {_XC_TC}/clang -target arm64-apple-ios17.0-simulator -isysroot {_XC_SDK} -L{_XC_DD}/Build/Products/Debug-iphonesimulator -F{_XC_DD}/Build/Products/Debug-iphonesimulator -filelist {_XC_DD}/Build/Intermediates.noindex/App.build/Debug-iphonesimulator/App.build/Objects-normal/arm64/App.LinkFileList -Xlinker -rpath -Xlinker @executable_path/Frameworks -o {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app/App", "",
+                f"CodeSign {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app (in target 'App' from project 'App')", "    cd /Users/runner/work/App/App", f"    export CODESIGN_ALLOCATE={_XC_TC}/codesign_allocate", "", "    Signing Identity:     \"-\"", "",
+                f"    /usr/bin/codesign --force --sign - --timestamp\\=none --generate-entitlement-der {_XC_DD}/Build/Products/Debug-iphonesimulator/App.app", "", "** BUILD SUCCEEDED **", ""]
+    else:
+        out += ["** BUILD FAILED **", "", "", "The following build commands failed:", f"\tSwiftCompile normal arm64 Compiling\\ {files[fail_at]} /Users/runner/work/App/App/App/{files[fail_at]} (in target 'App' from project 'App')", "(1 failure)", ""]
+    return "\n".join(out)
+
+
+_XC_FILES = ["AppDelegate.swift", "ContentView.swift", "Model.swift", "NetworkClient.swift", "Store.swift", "Theme.swift", "Router.swift", "Settings.swift"]
+XCODE_GREEN = _xc_steps(_XC_FILES)
+XCODE_RED = _xc_steps(_XC_FILES[:5], fail_at=3)
+
+_X_STEPS = ("CreateBuildDirectory|MkDir|Touch|WriteAuxiliaryFile|RegisterExecutionPolicyException|SetMode|SetOwnerAndGroup|Copy|CpResource|CpHeader|Ditto|Strip|Validate|Libtool|Ld|CodeSign|"
+            "ProcessInfoPlistFile|ProcessProductPackaging|SwiftCompile|SwiftDriver|CompileC|CompileSwift|CompileAssetCatalog|CompileStoryboard|PhaseScriptExecution|GenerateDSYMFile|LinkStoryboards|CopySwiftLibs")
+_X_HEAD = re.compile(r"^(?:[A-Z][A-Za-z]+ .*\(in target '[^']*' from project '[^']*'\)|(?:" + _X_STEPS + r") \S.*)$")
+_X_CMD = re.compile(r"^    (?:cd \S+|export \S+=.*|setenv \S+ .*|unsetenv \S+|builtin-\S+.*|/(?:Applications|usr|bin|opt)/\S+.*|write-file .*)$")
+_X_DIAG = re.compile(r"^\S[^:]*:\d+:\d+: (?:error|warning|note): ")
+
+
+def drop_step_commands(text: str) -> str:
+    lines = text.split("\n")
+    out, state = [], None
+    for i, l in enumerate(lines):
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if l and not l[0].isspace():
+            if _X_DIAG.match(l):
+                state = "diag"
+            elif _X_HEAD.match(l) and re.match(r"^    cd \S+$", nxt):
+                state = "step"
+            else:
+                state = None
+        elif state == "step" and _X_CMD.match(l):
+            continue
+        out.append(l)
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_214(text: str) -> dict:
+    lines = text.split("\n")
+    steps, diags, results, echo = [], [], [], []
+    for i, l in enumerate(lines):
+        if l and not l[0].isspace():
+            if _X_HEAD.match(l):
+                steps.append(l)
+            elif m := re.match(r"^(\S[^:]*):(\d+):(\d+): (error|warning|note): (.*)$", l):
+                diags.append((m[1], int(m[2]), int(m[3]), m[4], m[5]))
+                echo.append([x for x in lines[i + 1:i + 4] if x.startswith("    ") and not re.match(r"^    (cd |export |builtin-|/Applications/)", x)])
+            elif re.match(r"^(\*\* BUILD |The following build commands failed|\(\d+ failures?\)|Testing failed)", l) or l.startswith("\t"):
+                results.append(l)
+        elif l.startswith("\t"):
+            results.append(l)
+    return {"step headers in order": steps, "diagnostics (file, line, col, severity, message)": diags, "echoed source under each diagnostic": echo, "build result and failed-command list": results}
+
+
+case(
+    214,
+    claim="Under each xcodebuild step header, drops the indented 'cd', 'export', 'builtin-*' and absolute-path tool command lines; every step header, every file:line:col diagnostic with its echoed source (even one starting with '/'), the BUILD SUCCEEDED/FAILED line and the failed-command list are unchanged.",
+    loses="the exact swift-frontend/clang/ld/codesign command lines, flag lists and working directories of every step (the saved original keeps them)",
+    encode=drop_step_commands,
+    probes=probes_214,
+    fixtures=lambda: [
+        Fixture("8 Swift files, link and codesign, one warning, BUILD SUCCEEDED (generated, reconstructed from memory)", XCODE_GREEN, True),
+        Fixture("5 files, errors in the 4th including an echoed '///' line, BUILD FAILED (generated)", XCODE_RED, True),
+        Fixture("xcodebuild -quiet: only diagnostics", "/Users/runner/work/App/App/App/A.swift:3:5: error: x\n    foo()\n    ^\n** BUILD FAILED **\n", False),
+        Fixture("not xcodebuild: a shell script with indented cd lines", "build:\n    cd src\n    make all\nSetup step\n    cd /tmp\n    /usr/bin/true\n", None),
+    ],
+    min_gain=0.5,
+)
+
+
+
+# ===============================================================================================================
+# #216 MSBuild / dotnet build: every warning and error is printed inline, again in the end summary, and once per
+# target framework, each line ending in [/abs/path/proj.csproj(::TargetFramework=tfm)]. Fold repeats to one line with
+# a count, hoist the project path into a legend. RULE: the probe checks, per distinct (file, position, severity,
+# code, message), the project it belongs to, how many times it was printed and for which target frameworks, plus
+# every non-diagnostic line (restore, '-> dll', 'Build succeeded.', 'N Warning(s)', 'Time Elapsed'). No .NET SDK
+# here: the logs are generated to the documented dotnet 8 format (and the older '[proj.csproj]' suffix without the
+# framework) with 12 distinct warnings, 2 target frameworks, and the summary repeating them (reconstructed from memory).
+
+_MS_DIAG = re.compile(r"^(?P<file>.+?)(?:\((?P<l>\d+),(?P<c>\d+)(?:,\d+,\d+)?\))? ?: (?P<sev>warning|error) (?P<code>[A-Z]+\d+): (?P<msg>.*?) \[(?P<proj>[^\]\[]+?\.\w*proj)(?:::TargetFramework=(?P<tfm>[^\]\[]+))?\]$")
+_MS_FOLDED = re.compile(r"^(?P<head>.+: (?:warning|error) [A-Z]+\d+: .*?) \[@(?P<id>\d+)\](?: x(?P<n>\d+))?(?: tfm=(?P<tfm>\S+))?$")
+_MS_LEGEND = re.compile(r"^\[ctxprune: @(\d+) = (.+)\]$")
+
+
+def _ms_warnings() -> list[tuple[str, int, int, str, str, str]]:
+    base = [("Program.cs", 10, 13, "warning", "CS0168", "The variable 'x' is declared but never used"), ("Program.cs", 21, 9, "warning", "CS8602", "Dereference of a possibly null reference."),
+            ("Services/UserService.cs", 44, 20, "warning", "CS8618", "Non-nullable property 'Name' must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring the property as nullable."),
+            ("Services/UserService.cs", 61, 17, "warning", "CS1998", "This async method lacks 'await' operators and will run synchronously. Consider using the 'await' operator to await non-blocking API calls."),
+            ("Models/Order.cs", 12, 23, "warning", "CS8625", "Cannot convert null literal to non-nullable reference type."), ("Models/Order.cs", 30, 5, "warning", "CS0649", "Field 'Order._id' is never assigned to, and will always have its default value 0"),
+            ("Controllers/HomeController.cs", 18, 33, "warning", "CS8600", "Converting null literal or possible null value to non-nullable type."), ("Controllers/HomeController.cs", 25, 13, "warning", "CS0219", "The variable 'count' is assigned but its value is never used"),
+            ("Data/Repo.cs", 77, 40, "warning", "CS8604", "Possible null reference argument for parameter 'id' in 'Task<User> Repo.Find(string id)'."), ("Data/Repo.cs", 90, 9, "warning", "CS0414", "The private field 'Repo._retries' is assigned but its value is never used"),
+            ("Util/Json.cs", 5, 1, "warning", "CS8019", "Unnecessary using directive."), ("App.csproj", 0, 0, "warning", "NU1903", "Package 'System.Text.Json' 6.0.0 has a known high severity vulnerability, https://github.com/advisories/GHSA-hh2w-p6rv-4g7w")]
+    return base
+
+
+def _msbuild_log(tfms, old_suffix=False, error=False) -> str:
+    proj = "/src/App/App.csproj"
+    suf = lambda t: f"[{proj}]" if old_suffix else f"[{proj}::TargetFramework={t}]"
+    diag = lambda w, t: (f"/src/App/{w[0]}({w[1]},{w[2]}): {w[3]} {w[4]}: {w[5]} {suf(t)}" if w[1] else f"{proj} : {w[3]} {w[4]}: {w[5]} {suf(t)}")
+    out = ["  Determining projects to restore...", f"  Restored {proj} (in 312 ms)."]
+    ws = _ms_warnings()
+    if error:
+        ws = ws[:6] + [("Services/UserService.cs", 70, 12, "error", "CS1002", "; expected")] + ws[6:]
+    for w in ws:
+        for t in tfms:
+            out.append(diag(w, t))
+    out += [f"  App -> /src/App/bin/Debug/{t}/App.dll" for t in tfms]
+    out += ["", "Build FAILED." if error else "Build succeeded.", ""]
+    for w in ws:
+        for t in tfms:
+            out.append(diag(w, t))
+    n_err = len(tfms) if error else 0
+    out += [f"    {len(ws) * len(tfms) - n_err} Warning(s)", f"    {n_err} Error(s)", "", "Time Elapsed 00:00:04.21", ""]
+    return "\n".join(out)
+
+
+MSBUILD_TWO_TFMS = _msbuild_log(["net8.0", "net6.0"])
+MSBUILD_OLD_SUFFIX = _msbuild_log(["net6.0", "netstandard2.0"], old_suffix=True)
+MSBUILD_ERROR = _msbuild_log(["net8.0", "net6.0"], error=True)
+
+
+def fold_msbuild(text: str) -> str:
+    lines = text.split("\n")
+    diags = [(i, m) for i, l in enumerate(lines) if (m := _MS_DIAG.match(l))]
+    if len(diags) < 2:
+        return text
+    projs: dict = {}
+    keys: OrderedDict = OrderedDict()
+    for i, m in diags:
+        pid = projs.setdefault(m["proj"], len(projs) + 1)
+        k = (m["file"], m["l"], m["c"], m["sev"], m["code"], m["msg"], pid)
+        e = keys.setdefault(k, {"n": 0, "tfms": [], "first": i})
+        e["n"] += 1
+        if m["tfm"] and m["tfm"] not in e["tfms"]:
+            e["tfms"].append(m["tfm"])
+    first_of = {e["first"]: (k, e) for k, e in keys.items()}
+    skip = {i for i, _ in diags} - set(first_of)
+    out = [f"[ctxprune: @{pid} = {p}]" for p, pid in projs.items()]
+    for i, l in enumerate(lines):
+        if i in skip:
+            continue
+        if i in first_of:
+            k, e = first_of[i]
+            pos = f"({k[1]},{k[2]})" if k[1] else ""
+            out.append(f"{k[0]}{pos}: {k[3]} {k[4]}: {k[5]} [@{k[6]}]" + (f" x{e['n']}" if e["n"] > 1 else "") + (f" tfm={','.join(e['tfms'])}" if e["tfms"] else ""))
+        else:
+            out.append(l)
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_msbuild(text: str) -> dict:
+    lines = text.split("\n")
+    legend = {m.group(1): m.group(2) for l in lines if (m := _MS_LEGEND.match(l))}
+    facts: dict = {}
+    other = []
+    for l in lines:
+        if _MS_LEGEND.match(l):
+            continue
+        if m := _MS_DIAG.match(l):
+            k = (m["file"], m["l"], m["c"], m["sev"], m["code"], m["msg"], m["proj"])
+            e = facts.setdefault(k, [0, set()])
+            e[0] += 1
+            if m["tfm"]:
+                e[1].add(m["tfm"])
+        elif (m := _MS_FOLDED.match(l)) and m["id"] in legend:
+            hm = re.match(r"^(?P<file>.+?)(?:\((?P<l>\d+),(?P<c>\d+)\))?: (?P<sev>warning|error) (?P<code>[A-Z]+\d+): (?P<msg>.*)$", m["head"])
+            if hm:
+                k = (hm["file"], hm["l"], hm["c"], hm["sev"], hm["code"], hm["msg"], legend[m["id"]])
+                e = facts.setdefault(k, [0, set()])
+                e[0] += int(m["n"] or 1)
+                if m["tfm"]:
+                    e[1].update(m["tfm"].split(","))
+            else:
+                other.append(l)
+        else:
+            other.append(l)
+    return {"per distinct diagnostic: project, times printed, target frameworks": sorted(((k, v[0], sorted(v[1])) for k, v in facts.items()), key=str), "other lines (restore, outputs, results, totals)": other}
+
+
+case(
+    216,
+    claim="Repeats of the same MSBuild diagnostic (same file, position, severity, code and message) across the inline list, the end summary and target frameworks become one line 'file(l,c): warning CODE: msg [@1] xN tfm=a,b' with the project path hoisted to one '[ctxprune: @1 = /path/App.csproj]' line; per distinct diagnostic the project, the number of times printed and the frameworks, and every other line ('Build succeeded.', 'N Warning(s)', ...) are unchanged.",
+    loses="the interleaved order of repeats (they collapse onto the first occurrence), which of the repeats came from the end summary rather than the inline list, and the project path text on each line (it is in the legend)",
+    encode=fold_msbuild,
+    probes=probes_msbuild,
+    fixtures=lambda: [
+        Fixture("dotnet build, 2 target frameworks, 12 warnings printed 4 times each (generated, dotnet 8 format, reconstructed from memory)", MSBUILD_TWO_TFMS, True),
+        Fixture("older SDK: '[proj.csproj]' suffix without ::TargetFramework (generated)", MSBUILD_OLD_SUFFIX, True),
+        Fixture("Build FAILED with an error CS1002 repeated like the warnings (generated)", MSBUILD_ERROR, True),
+        Fixture("a single warning (printed once): nothing to fold", "  Determining projects to restore...\n/src/App/Program.cs(10,13): warning CS0168: The variable 'x' is declared but never used [/src/App/App.csproj::TargetFramework=net8.0]\n    1 Warning(s)\n", False),
+        Fixture("dotnet test output", "Passed!  - Failed:     0, Passed:    42, Skipped:     0, Total:    42, Duration: 1 s\n", False),
+        Fixture("a diagnostic with no position and a bracket inside the message", "/src/App/App.csproj : warning NU1603: App depends on Foo (>= 1.0) [x] [/src/App/App.csproj]\n/src/App/App.csproj : warning NU1603: App depends on Foo (>= 1.0) [x] [/src/App/App.csproj]\n", None),
+    ],
+    min_gain=0.4,
 )
 
 
