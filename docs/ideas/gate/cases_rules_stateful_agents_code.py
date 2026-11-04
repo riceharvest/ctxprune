@@ -114,395 +114,484 @@ def _write(path: str, text: str, mode: int | None = None) -> str:
 
 
 # ===============================================================================================================
-# Stateful output ledgers: #141 line-shift-proof diagnostic delta, #142 run-invariant baseline (SIMS)
+# History rewriting: #288 stub aged Write/heredoc inputs, #593 todo completion as a fold boundary, #1324 relevance-ranked
+# stubbing (SIMS). Transcripts are generated deterministically in the Messages API shape (assistant tool_use blocks, user
+# tool_result blocks) and executed against a dict that plays the disk. NOTHING here measures a real model: the 'did the
+# model re-Read' questions of the ideas' Test lines need real transcripts; these sims check the mechanism, the invalidation
+# rules and the prompt-cache cost.
 
-# ---------------------------------------------------------------------------------------------------------------
-# #141 Diagnostics keyed by (file, severity, rule, message) with line and column ignored.
-# Fixtures: a real ruff 0.16.9 run per edit when ruff is installed (10 successive small edits of a real file), else a
-# stand-in linter that prints the same concise format; mypy and tsc samples are reconstructed from memory.
-
-_DIAG = [
-    re.compile(r"^(?P<file>[^\s:(]+):(?P<line>\d+):(?P<col>\d+): (?P<rule>[A-Z]+\d+)(?: \[\*\])? (?P<msg>.+)$"),                          # ruff concise, flake8
-    re.compile(r"^(?P<file>[^\s:(]+):(?P<line>\d+): (?P<sev>error|warning|note): (?P<msg>.+?)(?:  \[(?P<rule>[\w-]+)\])?$"),               # mypy
-    re.compile(r"^(?P<file>[^\s(]+)\((?P<line>\d+),(?P<col>\d+)\): (?P<sev>error|warning) (?P<rule>TS\d+): (?P<msg>.+)$"),                 # tsc
-]
-_LINE_REF = re.compile(r"\b(on line|at line|line) \d+")
+_tok_cache: dict[str, int] = {}
 
 
-def diag_key(line: str):
-    """(file, severity, rule, message with embedded 'line N' references flattened) or None when the line is not a diagnostic."""
-    for rx in _DIAG:
-        m = rx.match(line)
-        if m:
-            g = m.groupdict()
-            return (g["file"], g.get("sev") or "", g.get("rule") or "", _LINE_REF.sub(r"\1 N", g["msg"]))
-    return None
+def _mtok(msg) -> int:
+    s = json.dumps(msg, sort_keys=True)
+    if s not in _tok_cache:
+        _tok_cache[s] = tokens(s)
+    return _tok_cache[s]
 
 
-class DiagLedger:
-    """Remembers the last diagnostics per (cwd, command family); shows only what changed. State lives in a JSON file."""
-
-    def __init__(self, state_dir: str):
-        self.dir = state_dir
-        os.makedirs(os.path.join(state_dir, "outputs"), exist_ok=True)
-        self.n = 0
-
-    def _state_path(self):
-        return os.path.join(self.dir, "state.json")
-
-    def _load(self) -> dict:
-        try:
-            st = json.load(open(self._state_path(), encoding="utf-8"))
-            return st if isinstance(st, dict) else {}
-        except (OSError, ValueError):
-            return {}  # missing or corrupt: behave like a first run
-
-    def show(self, family: str, output: str) -> str:
-        lines = output.split("\n")
-        diags = [(l, diag_key(l)) for l in lines if diag_key(l)]
-        if not diags:
-            return output  # not a diagnostics run (crash, usage error, clean summary only): verbatim, and the stored state is NOT replaced
-        self.n += 1
-        saved = os.path.join(self.dir, "outputs", f"{self.n:03d}.txt")
-        _write(saved, output)
-        st = self._load()
-        prev = st.get(family)
-        st[family] = [[l, list(k)] for l, k in diags]
-        _write(self._state_path(), json.dumps(st))
-        if not prev:
-            return output
-        pk = Counter(tuple(k) for _l, k in prev)
-        ck = Counter(k for _l, k in diags)
-        new = [l for l, k in diags if ck[k] > pk[k] and pk[k] == 0]
-        grew = {k: [l for l, kk in diags if kk == k] for k in ck if 0 < pk[k] < ck[k]}
-        gone = [l for l, k in prev if pk[tuple(k)] > ck[tuple(k)] and ck[tuple(k)] == 0]
-        shrank = {tuple(k): [l for l, kk in prev if tuple(kk) == tuple(k)] for k in pk if 0 < ck[k] < pk[k]}
-        unchanged = sum(min(pk[k], ck[k]) for k in ck)
-        out = [f"[ctxprune: vs previous run: +{len(new) + sum(ck[k] - pk[k] for k in grew)} new, -{len(gone) + sum(pk[k] - ck[k] for k in shrank)} resolved, {unchanged} unchanged; line numbers of unchanged items may have moved; full output: {saved}]"]
-        out += [f"+ {l}" for l in new]
-        for k, ls in grew.items():
-            out += [f"+ {ck[k] - pk[k]} more of this ({ck[k]} now):"] + [f"  {l}" for l in ls]
-        out += [f"- {l}" for l in gone]
-        for k, ls in shrank.items():
-            out += [f"- {pk[k] - ck[k]} fewer of this ({ck[k]} now); before: {ls[0]}"]
-        out += [l for l in lines if l.strip() and not diag_key(l) and not l.startswith(" ")]  # summary lines of the current run, always
-        return "\n".join(out) + "\n"
+def _request_cost(requests: list[list[dict]]) -> float:
+    """Billed token-equivalents of a series of API requests under prompt caching: the longest common prefix with the PREVIOUS
+    request is a cache read (0.1x), everything after it a write (1.25x). Rewriting an old message therefore re-bills all that follows."""
+    cost, prev = 0.0, []
+    for req in requests:
+        k = 0
+        while k < min(len(prev), len(req)) and prev[k] == req[k]:
+            k += 1
+        cost += 0.1 * sum(_mtok(m) for m in req[:k]) + 1.25 * sum(_mtok(m) for m in req[k:])
+        prev = req
+    return cost
 
 
-def _apply_delta(prev_keys: Counter, delta: str) -> Counter:
-    """The reader's view: previous key multiset plus the delta must equal the current diagnostics."""
-    cur = Counter(prev_keys)
-    lines = delta.split("\n")
-    i = 1
-    while i < len(lines):
-        l = lines[i]
-        if l.startswith("+ ") and diag_key(l[2:]):
-            cur[diag_key(l[2:])] += 1
-        elif l.startswith("- ") and diag_key(l[2:]):
-            cur[diag_key(l[2:])] -= 1
-        elif l.startswith("+ ") and "more of this" in l:
-            n = int(l.split()[1])
-            j = i + 1
-            while j < len(lines) and lines[j].startswith("  ") and diag_key(lines[j].strip()):
-                j += 1
-            cur[diag_key(lines[i + 1].strip())] += n
-            i = j - 1
-        elif l.startswith("- ") and "fewer of this" in l:
-            cur[diag_key(l.split("before: ", 1)[1])] -= int(l.split()[1])
-        i += 1
-    return +cur
+def _code(g, name: str, n: int) -> str:
+    out = [f'"""{name}: generated module."""', "import os", "import json", ""]
+    for i in range(n // 6):
+        out += [f"def {name}_{i}(x, y={i}):", f'    """Handle case {i}."""', f"    total = x * {i + 2} + y", f"    if total > {100 + next(g) % 900}:", f"        return {{'case': {i}, 'total': total}}", "    return None", ""]
+    return "\n".join(out).rstrip("\n") + "\n"
 
 
-def _stand_in_ruff(src: str, name="a.py") -> str:
-    """ruff-concise formatted output for F401, F841 and E501 only (used when ruff is not installed)."""
-    out = []
-    tree = ast.parse(src)
-    imported = {}
-    for st in tree.body:
-        if isinstance(st, ast.Import):
-            for a in st.names:
-                imported[a.asname or a.name] = st.lineno
-    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    for nm, ln in imported.items():
-        if nm not in used:
-            out.append((ln, 1, f"F401 [*] `{nm}` imported but unused"))
-    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
-        stores = {t.id: t.lineno for s in ast.walk(fn) if isinstance(s, ast.Assign) for t in s.targets if isinstance(t, ast.Name)}
-        loads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-        for v, ln in stores.items():
-            if v not in loads:
-                out.append((ln, 5, f"F841 Local variable `{v}` is assigned to but never used"))
-    for i, l in enumerate(src.split("\n"), 1):
-        if len(l) > 88:
-            out.append((i, 89, f"E501 Line too long ({len(l)} > 88)"))
-    out.sort()
-    body = "".join(f"{name}:{ln}:{c}: {m}\n" for ln, c, m in out)
-    return body + (f"Found {len(out)} error{'s' if len(out) != 1 else ''}.\n" if out else "All checks passed!\n")
+def _transcript_288(n: int = 44, seed: int = 288):
+    """Messages plus the final disk. Returns (messages, disk, truth) where truth lists what each Write/heredoc really was."""
+    g = _lcg(seed)
+    msgs, disk, truth = [], {}, []
+    tid = [0]
+
+    def call(name, inp, result, error=False, text=""):
+        tid[0] += 1
+        i = f"toolu_{tid[0]:03d}"
+        msgs.append({"role": "assistant", "content": ([{"type": "text", "text": text}] if text else []) + [{"type": "tool_use", "id": i, "name": name, "input": inp}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": i, "content": result, **({"is_error": True} if error else {})}]})
+        return i
+
+    paths = [f"src/mod{k}.py" for k in range(8)]
+    for t in range(n):
+        k = t % 11
+        p = paths[next(g) % len(paths)]
+        if k in (0, 3, 6):  # Write a module
+            c = _code(g, p.split("/")[-1][:-3], 40 + next(g) % 70)
+            disk[p] = c
+            truth.append(("write", p, c, "ok", t))
+            call("Write", {"file_path": p, "content": c}, f"File created successfully at: {p}", text=f"Creating {p}.")
+        elif k == 1:  # heredoc write of a test file
+            body = _code(g, "test_" + p.split("/")[-1][:-3], 30 + next(g) % 30)
+            tp = "tests/" + p.split("/")[-1].replace("mod", "test_mod")
+            disk[tp] = body
+            truth.append(("heredoc", tp, body, "ok", t))
+            call("Bash", {"command": f"cat > {tp} <<'EOF'\n{body.rstrip(chr(10))}\nEOF\npytest -q {tp}"}, "1 passed in 0.02s")
+        elif k == 2:  # heredoc that RUNS a script: not a file write
+            call("Bash", {"command": "python3 - <<'EOF'\n" + "\n".join(f"print({i} * {i})" for i in range(25)) + "\nEOF"}, "\n".join(str(i * i) for i in range(25)))
+        elif k == 4 and p in disk:  # Edit
+            old = f"total = x * "
+            disk[p] = disk[p].replace(old, "total = 2 * x * ", 1)
+            call("Edit", {"file_path": p, "old_string": old, "new_string": "total = 2 * x * "}, f"The file {p} has been updated.")
+        elif k == 5:  # Read
+            call("Read", {"file_path": p}, disk.get(p, "File does not exist."), error=p not in disk)
+        elif k == 7:  # a Write that fails: the content is NOT on disk
+            c = _code(g, "readonly", 60)
+            truth.append(("write", "/etc/protected.py", c, "error", t))
+            call("Write", {"file_path": "/etc/protected.py", "content": c}, "EACCES: permission denied, open '/etc/protected.py'", error=True)
+        elif k == 8:  # Write a file and later delete it (scratch)
+            c = _code(g, "scratch", 50)
+            sp = f"scratch/s{t}.py"
+            disk[sp] = c
+            truth.append(("write", sp, c, "deleted", t))
+            call("Write", {"file_path": sp, "content": c}, f"File created successfully at: {sp}")
+            del disk[sp]
+            call("Bash", {"command": f"rm {sp}"}, "")
+        elif k == 9:
+            call("Bash", {"command": "pytest -q"}, "." * 30 + "\n30 passed in 0.31s")
+        else:
+            c = "line one\nline two\n"  # tiny Write: not worth stubbing
+            disk["notes.txt"] = c
+            truth.append(("write", "notes.txt", c, "tiny", t))
+            call("Write", {"file_path": "notes.txt", "content": c}, "File created successfully at: notes.txt")
+    return msgs, disk, truth
 
 
-def _edit_series() -> list[str]:
-    """Ten successive small edits of one file (inserting lines above everything, fixing and introducing findings, moving a function)."""
-    funcs = [f"def f{i}(a):\n    tmp{i} = a + {i}\n    return a\n" for i in range(10)]
-    src = ["import os", "import sys", "import json", "import re", ""]
-    body = list(funcs) + ['LONG = "' + "x" * 110 + '"\n']
-    versions = []
-
-    def text():
-        return "\n".join(src) + "\n" + "\n".join(body)
-
-    versions.append(text())
-    src[:0] = ["# header", "# more header", "#", "# license", "# text", ""]; versions.append(text())               # 1 shift
-    src.remove("import re"); versions.append(text())                                                              # 2 fix one F401
-    src.insert(6, "import glob"); versions.append(text())                                                         # 3 new F401, shift 1
-    body[:0] = ["def helper():\n    return 1\n\n\n"]; versions.append(text())                                      # 4 shift
-    body[3] = body[3].replace("    tmp2 = a + 2\n    return a", "    tmp2 = a + 2\n    return tmp2"); versions.append(text())   # 5 fix one F841
-    body.append(body.pop(5)); versions.append(text())                                                             # 6 move a function
-    src[:0] = ['"""Module docstring."""', ""]; versions.append(text())                                            # 7 shift
-    body[-1:] = ['LONG = "short"\n']; versions.append(text())                                                     # 8 fix E501
-    body.insert(2, "def g(a):\n    dup = 1\n    dup2 = 2\n    return a\n"); versions.append(text())                # 9 two new F841
-    return versions
+_HEREDOC = re.compile(r"^(?P<head>cat\s*>>?\s*(?P<path>[\w./-]+)\s*<<-?\s*['\"]?(?P<tag>\w+)['\"]?\n)(?P<body>.*?)(?P<tail>\n(?P=tag)(?:\n.*)?)$", re.S)
 
 
-def _delta_series(outputs: list[str]):
-    """Runs a ledger over successive outputs; returns (plain line-diff tokens, delta tokens, deltas)."""
-    import difflib
-    with tempfile.TemporaryDirectory() as d:
-        led = DiagLedger(d)
-        plain = delta = 0
-        deltas, prev_keys = [], None
-        for i, out in enumerate(outputs):
-            shown = led.show("ruff check .", out)
-            cur_keys = Counter(diag_key(l) for l in out.split("\n") if diag_key(l))
-            if i:
-                plain += tokens("\n".join(l for l in difflib.unified_diff(outputs[i - 1].split("\n"), out.split("\n"), lineterm="", n=0) if not l.startswith(("---", "+++", "@@"))))
-                delta += tokens(shown)
-                assert _apply_delta(prev_keys, shown) == cur_keys, f"reader view: previous diagnostics + delta != current diagnostics at step {i}\n{shown}"
-            deltas.append(shown)
-            prev_keys = cur_keys
-        return plain, delta, deltas
+def stub_history(msgs: list[dict], disk: dict, age: int = 10, min_chars: int = 200) -> tuple[list[dict], list[dict]]:
+    """Replace the content of aged Write inputs and the body of aged `cat > file <<EOF` commands by path, line count and hash.
+    Never touches: young messages, a Write whose result was an error, a file that is not on disk now, script heredocs
+    (`python3 - <<EOF`), short content. Pure function of (msgs, disk, age): same input, same bytes."""
+    out = json.loads(json.dumps(msgs))
+    results = {b["tool_use_id"]: b for m in msgs if m["role"] == "user" for b in m["content"] if b.get("type") == "tool_result"}
+    n_asst = [i for i, m in enumerate(msgs) if m["role"] == "assistant"]
+    aged = {i for j, i in enumerate(n_asst) if len(n_asst) - 1 - j >= age}
+    stats = []
+
+    def stub(path, text):
+        cur = disk.get(path)
+        return f"[ctxprune: {text.count(chr(10)) + (not text.endswith(chr(10)))} lines, sha1 {_sha(text)}; {'on disk at this path' if cur == text else 'on disk at this path, changed since'}: Read it if needed]"
+
+    for i in aged:
+        for b in out[i]["content"]:
+            if b.get("type") != "tool_use" or results.get(b["id"], {}).get("is_error") or b["id"] not in results:
+                continue
+            if b["name"] == "Write":
+                path, text = b["input"].get("file_path", ""), b["input"].get("content", "")
+                if len(text) >= min_chars and path in disk:
+                    b["input"]["content"] = stub(path, text)
+                    stats.append({"msg": i, "kind": "write", "path": path, "sha": _sha(text), "chars": len(text)})
+            elif b["name"] == "Bash":
+                cmd = b["input"].get("command", "")
+                m = _HEREDOC.match(cmd)
+                if m and len(m.group("body")) >= min_chars and m.group("path") in disk:
+                    b["input"]["command"] = m.group("head") + stub(m.group("path"), m.group("body") + "\n") + m.group("tail")
+                    stats.append({"msg": i, "kind": "heredoc", "path": m.group("path"), "sha": _sha(m.group("body") + "\n"), "chars": len(m.group("body"))})
+    return out, stats
 
 
-_MYPY_1 = """app/db.py:14: error: Name "rows" already defined on line 9  [no-redef]
-app/db.py:40: error: Incompatible return value type (got "None", expected "int")  [return-value]
-app/db.py:40: note: Did you forget to return something?
-app/api.py:7: error: Argument 1 to "load" has incompatible type "str"; expected "Path"  [arg-type]
-Found 3 errors in 2 files (checked 12 source files)
-"""
-_MYPY_2 = """app/db.py:19: error: Name "rows" already defined on line 14  [no-redef]
-app/db.py:45: error: Incompatible return value type (got "None", expected "int")  [return-value]
-app/db.py:45: note: Did you forget to return something?
-app/api.py:12: error: Argument 1 to "load" has incompatible type "str"; expected "Path"  [arg-type]
-Found 3 errors in 2 files (checked 12 source files)
-"""
-_TSC_1 = "src/a.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.\nsrc/a.ts(31,9): error TS2345: Argument of type 'null' is not assignable to parameter of type 'string'.\n\nFound 2 errors in the same file, starting at: src/a.ts:10\n"
-
-
-def sim_141() -> dict:
-    # --- ten successive edits, real ruff when installed, else the stand-in
-    versions = _edit_series()
-    real = shutil.which("ruff") is not None
-    with tempfile.TemporaryDirectory() as d:
-        outs = []
-        for v in versions:
-            if real:
-                _write(os.path.join(d, "a.py"), v)
-                rc, out, _ = _run(["ruff", "check", "--isolated", "--no-cache", "--select", "F,E", "--output-format=concise", "a.py"], cwd=d)
-                outs.append(out)
-            else:
-                outs.append(_stand_in_ruff(v))
-    assert all(diag_key(l) for o in outs for l in o.split("\n") if re.match(r"a\.py:\d+:\d+:", l)), "every diagnostic line must parse"
-    plain, delta, deltas = _delta_series(outs)
-    assert delta < 0.5 * plain, f"the keyed delta must be less than half the plain line-diff over 10 edits ({delta} vs {plain} tokens)"
-    # which steps were pure line shifts: the delta says 0 new, 0 resolved
-    shift_steps = [i for i in (1, 4, 7) if re.search(r"\+0 new, -0 resolved", deltas[i])]
-    assert shift_steps == [1, 4, 7], f"a pure line shift (steps 1, 4, 7) must produce an empty delta; got {shift_steps}"
-    assert "+0 new, -1 resolved" in deltas[2] and "+1 new, -0 resolved" in deltas[3] and "+0 new, -0 resolved" in deltas[6], "fix, introduce and move are told apart"
-    assert "+2 new" in deltas[9], deltas[9]
-    # --- mypy: 'already defined on line 9' moves with the edit; flattening keeps the key stable
-    with tempfile.TemporaryDirectory() as d:
-        led = DiagLedger(d)
-        led.show("mypy .", _MYPY_1)
-        s = led.show("mypy .", _MYPY_2)
-        assert "+0 new, -0 resolved, 4 unchanged" in s, s
-        assert diag_key('app/db.py:14: error: Name "rows" already defined on line 9  [no-redef]') == diag_key('app/db.py:19: error: Name "rows" already defined on line 14  [no-redef]')
-        assert diag_key("src/a.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.") == ("src/a.ts", "error", "TS2322", "Type 'string' is not assignable to type 'number'.")
-        # --- must NOT apply / invalidation
-        first = led.show("tsc", _TSC_1)
-        assert first == _TSC_1, "first run of a family: verbatim"
-        assert led.show("mypy --strict .", _MYPY_2) == _MYPY_2, "a different command family has its own (empty) history"
-        crash = "Traceback (most recent call last):\n  File \"/usr/bin/mypy\", line 3, in <module>\nKeyError: 'x'\n"
-        assert led.show("mypy .", crash) == crash, "a crash is not a diagnostics run: verbatim"
-        s2 = led.show("mypy .", _MYPY_2.replace("app/api.py:12", "app/api.py:13"))
-        assert "+0 new, -0 resolved, 4 unchanged" in s2, "the crash did not overwrite the stored state"
-        clean = "Success: no issues found in 12 source files\n"
-        assert led.show("mypy .", clean) == clean, "a clean run has no diagnostics lines: verbatim (and it is already tiny)"
-        # duplicates: two identical messages in one file are counted, not collapsed
-        dup1 = "a.py:3:5: F841 Local variable `x` is assigned to but never used\na.py:9:5: F841 Local variable `x` is assigned to but never used\nFound 2 errors.\n"
-        dup2 = "a.py:12:5: F841 Local variable `x` is assigned to but never used\nFound 1 error.\n"
-        led.show("dup", dup1)
-        sd = led.show("dup", dup2)
-        assert "-1 resolved" in sd and "1 unchanged" in sd and "1 fewer of this (1 now)" in sd, sd
-        sd3 = led.show("dup", dup1)
-        assert "+1 new" in sd3 and "1 more of this (2 now)" in sd3 and dup1.split("\n")[1] in sd3, "when a repeated key grows, every current location is listed"
-        # corrupt state: first-run behaviour, then healed
-        _write(os.path.join(d, "state.json"), "{not json")
-        assert led.show("mypy .", _MYPY_1) == _MYPY_1
-        assert "unchanged" in led.show("mypy .", _MYPY_2)
-        # originals stay on disk
-        m = re.search(r"full output: (\S+)\]", s)
-        assert open(m.group(1), encoding="utf-8").read() == _MYPY_2
-    return {"ruff": "real 0.16.9 output" if real else "stand-in linter (ruff not installed)", "tokens_plain_line_diff_10_edits": plain, "tokens_keyed_delta_10_edits": delta,
-            "saving": f"{1 - delta / plain:.0%}", "pure_shift_steps_with_empty_delta": len(shift_steps)}
+def sim_288() -> dict:
+    msgs, disk, truth = _transcript_288()
+    stubbed, stats = stub_history(msgs, disk)
+    before, after = sum(_mtok(m) for m in msgs), sum(_mtok(m) for m in stubbed)
+    assert after < 0.75 * before, f"stubbing aged Write and heredoc inputs should cut the request by over 25% ({before} -> {after} tokens)"
+    kinds = Counter(s["kind"] for s in stats)
+    assert kinds["write"] >= 5 and kinds["heredoc"] >= 3, kinds
+    # --- reader view: every stub names the path, the line count and a hash that the disk can reproduce (or says it changed)
+    for s in stats:
+        blk = next(b for b in stubbed[s["msg"]]["content"] if b.get("type") == "tool_use" and (s["kind"] == "write" and b["name"] == "Write" and b["input"]["file_path"] == s["path"] or s["kind"] == "heredoc" and b["name"] == "Bash" and s["path"] in b["input"]["command"].split("\n")[0]))
+        text = blk["input"]["content"] if s["kind"] == "write" else blk["input"]["command"]
+        assert f"sha1 {s['sha']}" in text and "lines" in text and "Read it if needed" in text
+        if "changed since" not in text:
+            assert _sha(disk[s["path"]]) == s["sha"], f"{s['path']}: the stub says the file is on disk unchanged but the disk differs"
+        else:
+            later = [m for m in msgs[s["msg"] + 1:] if m["role"] == "assistant" for b in m["content"] if b.get("type") == "tool_use" and (b["input"].get("file_path") == s["path"] or s["path"] in b["input"].get("command", ""))]
+            assert later, f"{s['path']}: marked changed, so a later Edit or Write must exist in the history"
+    # --- must NOT be stubbed
+    young = [i for i, m in enumerate(msgs) if m["role"] == "assistant"][-10:]
+    assert all(msgs[i] == stubbed[i] for i in young), "the last ten assistant turns are untouched"
+    writes = [b["input"] for m in stubbed for b in m["content"] if b.get("type") == "tool_use" and b["name"] == "Write"]
+    for kind, path, content, state, t in truth:
+        if state in ("error", "deleted", "tiny"):
+            assert any(w.get("file_path") == path and w.get("content") == content for w in writes), f"the {state} write at turn {t} must keep its content: it may be the only copy"
+    assert any("python3 - <<'EOF'" in b["input"].get("command", "") and "print(" in b["input"]["command"] for m in stubbed for b in m["content"] if b.get("type") == "tool_use" and b["name"] == "Bash"), "script heredocs keep their body"
+    # a file that is not on disk now is never stubbed
+    gone = stub_history(msgs, {k: v for k, v in disk.items() if not k.startswith("src/")})[1]
+    assert not any(s["path"].startswith("src/") for s in gone), "no disk copy, no stub"
+    # fail-open: junk shapes pass through
+    junk = [{"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "Write", "input": {}}]}, {"role": "user", "content": [{"type": "text", "text": "hi"}]}] * 12
+    assert stub_history(junk, {})[0] == junk
+    # --- determinism and prefix stability as the transcript grows: a message changes at most once (full -> stub), never again
+    seen: dict[int, list[str]] = {}
+    for k in range(20, len(msgs) + 1, 2):
+        sk, _ = stub_history(msgs[:k], disk)
+        for i, m in enumerate(sk):
+            v = json.dumps(m, sort_keys=True)
+            if not seen.setdefault(i, [v]) or seen[i][-1] != v:
+                seen[i].append(v)
+    assert all(len(v) <= 2 for v in seen.values()), "a message may flip from full to stub once, never back or between stubs"
+    assert stub_history(msgs, disk) == stub_history(msgs, disk)
+    # --- prompt-cache economics: stubbing every turn rewrites the prefix every turn; stubbing in batches does it rarely
+    n_req = len(msgs) // 2
+    plain_reqs = [msgs[:2 * (t + 1)] for t in range(n_req)]
+    per_turn = [stub_history(msgs[:2 * (t + 1)], disk)[0] for t in range(n_req)]
+    batched = [stub_history(msgs[:2 * (t // 10 * 10 + 1)], disk)[0] + msgs[2 * (t // 10 * 10 + 1):2 * (t + 1)] for t in range(n_req)]
+    t0 = int(n_req * 0.6)
+    once = [plain_reqs[t] if t < t0 else stub_history(msgs[:2 * t0], disk)[0] + msgs[2 * t0:2 * (t + 1)] for t in range(n_req)]  # one rewrite at 60% of the session
+    c_plain, c_turn, c_batch, c_once = _request_cost(plain_reqs), _request_cost(per_turn), _request_cost(batched), _request_cost(once)
+    assert c_batch < c_turn and c_once < c_turn, "fewer rewrites must beat stubbing every turn once the cache is accounted for"
+    assert c_turn > c_plain, "stubbing every turn costs MORE than not stubbing, although it sends fewer tokens: every rewrite re-bills the cached prefix after it"
+    return {"request_tokens": f"{before} -> {after} ({-100 * (before - after) / before:+.0f}%)", "stubbed_writes": kinds["write"], "stubbed_heredocs": kinds["heredoc"],
+            "billed_equivalents_no_stubbing": round(c_plain), "billed_stub_every_turn": round(c_turn), "billed_stub_in_batches_of_10": round(c_batch), "billed_one_rewrite_at_60pct": round(c_once),
+            "tool_use_signature_check": "not verifiable offline: the idea's premise that tool_use inputs are not signature-checked was NOT tested"}
 
 
 case(
-    141,
-    claim="Diagnostics keyed by (file, severity, rule, message) ignoring line and column give an empty delta for pure line shifts, tell fixes, new findings and moves apart, count duplicates, flatten 'on line N' inside messages, and cost under half of a plain line-diff over ten successive edits (real ruff when installed); the previous set plus the delta reproduces the current set, first runs, crashes, clean runs and other command families come back verbatim, and the full output stays on disk.",
-    sim=sim_141,
+    288,
+    claim="Write inputs and `cat > file <<EOF` bodies older than ten assistant turns become one line (line count, sha1, 'on disk at this path'); young turns, failed or deleted writes, short content, script heredocs and files not on disk now keep their content, every stub's hash is reproducible from the disk or marked changed with a later Edit in history, a message flips at most once, and the sim shows that stubbing every turn re-bills the cached prefix while batches of ten do not.",
+    sim=sim_288,
 )
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# #142 run-invariant baseline: lines present in each of the last K runs collapse to a count
+# #593 todo completion as a fold boundary
 
-_PROTECT = re.compile(r"(?i)\b(fail|failed|failure|failures|error|errors|traceback|assert|assertionerror|exception|panic|fatal|denied)\b|^E {3}|^FAILED |^>")
-
-
-class Baseline:
-    K = 3
-
-    def __init__(self, state_dir: str):
-        self.dir = state_dir
-        os.makedirs(os.path.join(state_dir, "outputs"), exist_ok=True)
-        self.n = 0
-
-    @staticmethod
-    def family(cwd: str, argv: list[str]) -> str:
-        """cwd + program + the flags that change the shape of the output (-q, -v, --tb=..); not test selectors, not paths."""
-        flags = sorted(a for a in argv[1:] if re.fullmatch(r"-q+|-v+|--tb=\S+|--color=\S+|--no-header|-x|--verbose|--quiet", a))
-        return f"{cwd}|{os.path.basename(argv[0])}|{' '.join(flags)}"
-
-    def _path(self):
-        return os.path.join(self.dir, "history.json")
-
-    def _hist(self) -> dict:
-        try:
-            h = json.load(open(self._path(), encoding="utf-8"))
-            return h if isinstance(h, dict) else {}
-        except (OSError, ValueError):
-            return {}
-
-    def show(self, fam: str, output: str) -> str:
-        h = self._hist()
-        runs = h.get(fam, [])
-        h[fam] = (runs + [output.split("\n")])[-self.K:]
-        _write(self._path(), json.dumps(h))
-        if len(runs) < self.K:
-            return output  # not enough history to know what is invariant
-        base = Counter(runs[0])
-        for r in runs[1:]:
-            base &= Counter(r)
-        lines = output.split("\n")
-        hidden, visible = [], []
-        for l in lines:
-            if l.strip() and base[l] > 0 and not _PROTECT.search(l):
-                base[l] -= 1
-                hidden.append(l)
-            else:
-                visible.append(l)
-        if len(hidden) < 3:
-            return output
-        self.n += 1
-        saved = os.path.join(self.dir, "outputs", f"{self.n:03d}.txt")
-        _write(saved, output)
-        res = f"[ctxprune: {len(hidden)} lines identical in each of the last {self.K} runs of this command are hidden; full output: {saved}]\n" + "\n".join(visible)
-        return res if len(res) < len(output) else output
+def _todo(items: list[tuple[str, str]]) -> dict:
+    return {"todos": [{"content": c, "status": s, "activeForm": c} for c, s in items]}
 
 
-def _pytest_run(n_tests: int, failing: dict[str, str], secs: float, version="9.1.1", root="/work/shop") -> str:
-    prog = "".join("F" if i in {int(k) for k in failing} else "." for i in range(n_tests))
-    out = ["============================= test session starts ==============================", f"platform linux -- Python 3.13.18, pytest-{version}, pluggy-1.6.0", f"rootdir: {root}", "configfile: pyproject.toml", "plugins: anyio-4.9.0, cov-6.0.0, xdist-3.6.1",
-           f"collected {n_tests} items", "", f"tests/test_shop.py {prog}   [100%]", ""]
-    if failing:
-        out += ["=================================== FAILURES ==================================="]
-        for k, msg in failing.items():
-            out += [f"________________________________ test_case_{k} _________________________________", "", f"    def test_case_{k}():", f">       assert total() == {msg}", f"E       assert 300 == {msg}", "", "tests/test_shop.py:8: AssertionError"]
-        out += ["=========================== short test summary info ============================"] + [f"FAILED tests/test_shop.py::test_case_{k} - assert 300 == {m}" for k, m in failing.items()]
-        out += [f"========================= {len(failing)} failed, {n_tests - len(failing)} passed in {secs:.2f}s =========================", ""]
-    else:
-        out += [f"============================= {n_tests} passed in {secs:.2f}s ==============================", ""]
-    return "\n".join(out)
+def _transcript_593(seed: int = 593):
+    """Messages for a session with five todos: normal spans, an overlap, a batch completion, a reopened todo, a todo that names a file."""
+    g = _lcg(seed)
+    msgs: list[dict] = []
+    truth: dict[str, str] = {}  # tool_use id -> owning todo ('' = unattributable)
+    store_files = {f"src/{n}.py": _code(g, n, 60 + next(g) % 60) for n in ("cart", "tax", "coupons", "shipping", "users", "search")}
+    n_id = [0]
+
+    def tool(name, inp, result, owner, error=False):
+        n_id[0] += 1
+        i = f"toolu_{n_id[0]:03d}"
+        truth[i] = owner
+        msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": i, "name": name, "input": inp}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": i, "content": result, **({"is_error": True} if error else {})}]})
+
+    def todos(items):
+        n_id[0] += 1
+        msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"toolu_todo{n_id[0]}", "name": "TodoWrite", "input": _todo(items)}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"toolu_todo{n_id[0]}", "content": "Todos have been modified successfully"}]})
+
+    T = ["Fix cart total rounding", "Add tax tests for src/tax.py", "Wire coupons into checkout", "Update shipping docs", "Clean up users module"]
+    pend = lambda *done_state: [(T[i], s) for i, s in enumerate(done_state)]  # noqa: E731
+    todos(pend("in_progress", "pending", "pending", "pending", "pending"))
+    for f in ("cart", "cart", "tax"):
+        tool("Read", {"file_path": f"src/{f}.py"}, store_files[f"src/{f}.py"], T[0])
+    tool("Bash", {"command": "pytest tests/test_cart.py -q"}, "F" + "." * 20 + "\nFAILED tests/test_cart.py::test_total - assert 299 == 300\n1 failed, 20 passed in 0.31s", T[0], error=True)
+    tool("Edit", {"file_path": "src/cart.py", "old_string": "round(", "new_string": "int(round("}, "The file src/cart.py has been updated.", T[0])
+    tool("Bash", {"command": "pytest tests/test_cart.py -q"}, "." * 21 + "\n21 passed in 0.30s", T[0])
+    todos(pend("completed", "in_progress", "pending", "pending", "pending"))                                          # span 1 closes; todo 2 names src/tax.py
+    tool("Read", {"file_path": "src/tax.py"}, store_files["src/tax.py"], T[1])
+    tool("Grep", {"pattern": "def tax_"}, "\n".join(f"src/tax.py:{i}:def tax_{i}(x):" for i in range(40)), T[1])
+    todos(pend("completed", "in_progress", "in_progress", "pending", "pending"))                                      # overlap: two in progress
+    tool("Read", {"file_path": "src/coupons.py"}, store_files["src/coupons.py"], "")                                   # ambiguous
+    tool("Read", {"file_path": "src/shipping.py"}, store_files["src/shipping.py"], "")
+    todos(pend("completed", "completed", "completed", "in_progress", "pending"))                                      # both close; their spans are ambiguous: nothing folds
+    tool("Read", {"file_path": "docs/shipping.md"}, "# Shipping\n" + "\n".join(f"rate {i}: {10 + i} EUR" for i in range(60)), T[3])
+    tool("Bash", {"command": "grep -rn rate docs/"}, "\n".join(f"docs/shipping.md:{i}:rate {i}" for i in range(30)), T[3])
+    todos(pend("completed", "completed", "completed", "completed", "in_progress"))                                    # span 4 closes
+    tool("Read", {"file_path": "src/users.py"}, store_files["src/users.py"], T[4])
+    tool("Read", {"file_path": "src/search.py"}, store_files["src/search.py"], T[4])
+    todos(pend("completed", "completed", "completed", "completed", "completed"))                                      # span 5 closes
+    todos(pend("completed", "completed", "completed", "completed", "in_progress"))                                    # todo 5 reopened
+    tool("Read", {"file_path": "src/users.py"}, store_files["src/users.py"], T[4])
+    return msgs, truth, T
 
 
-def _npm_test_run(failed: int, secs: float) -> str:
-    dep = [f"npm WARN deprecated {p}@{v}: this package is no longer supported" for p, v in (("request", "2.88.2"), ("uuid", "3.4.0"), ("har-validator", "5.1.5"), ("core-js", "2.6.12"), ("left-pad", "1.3.0"), ("mkdirp", "0.5.1"))] * 2
-    out = dep + ["", "> shop@1.0.0 test", "> jest --ci", ""]
-    out += ["PASS  src/cart.test.js", "PASS  src/tax.test.js"] + (["FAIL  src/checkout.test.js", "  ● checkout › applies coupon", "    expect(received).toBe(expected)", "    Expected: 270", "    Received: 300"] if failed else ["PASS  src/checkout.test.js"])
-    out += ["", f"Tests:       {failed} failed, {41 - failed} passed, 41 total" if failed else "Tests:       41 passed, 41 total", f"Time:        {secs:.3f} s", "Ran all test suites.", ""]
-    return "\n".join(out)
-
-
-def sim_142() -> dict:
-    with tempfile.TemporaryDirectory() as d:
-        bl = Baseline(d)
-        fam = Baseline.family("/work/shop", ["pytest", "tests/test_shop.py", "-k", "cart", "-q"])
-        assert fam == Baseline.family("/work/shop", ["pytest", "tests/other.py", "-q"]) != Baseline.family("/work/shop", ["pytest", "-v"]) != Baseline.family("/work/other", ["pytest", "-q"])
-        # five runs of pytest with small edits: pass, pass, one new test, a failure, the same failure again, then a fix
-        runs = [_pytest_run(10, {}, 0.02), _pytest_run(10, {}, 0.03), _pytest_run(11, {}, 0.02), _pytest_run(11, {"7": "280"}, 0.03), _pytest_run(11, {"7": "280"}, 0.02), _pytest_run(11, {}, 0.03)]
-        shown = [bl.show(fam, r) for r in runs]
-        assert shown[:3] == runs[:3], "no hiding before three prior runs exist"
-        assert shown[3] != runs[3] and "lines identical in each of the last 3 runs" in shown[3], "from the fourth run the invariant lines are hidden"
-        # --- the safety checks, on every run: failure lines visible, count honest, nothing unaccounted for
-        tot_before = tot_after = 0
-        for k in range(3, 6):
-            vis, orig = shown[k], runs[k]
-            m = re.match(r"\[ctxprune: (\d+) lines identical.*full output: (\S+)\]\n", vis)
-            if not m:
+def fold_spans(msgs: list[dict], keep_min: int = 3) -> tuple[list[dict], dict, list[int]]:
+    """Fold the tool results of every todo span that a TodoWrite 'completed' event closes. Returns (messages, store, rewrite events).
+    Span = from the TodoWrite that sets exactly one todo in_progress to the one that completes it; a span in which another todo was also
+    in_progress is ambiguous and never folds; results naming a file that a still-open todo's text names stay; a todo that is completed
+    without ever being in_progress has no span."""
+    out = json.loads(json.dumps(msgs))
+    store: dict[str, str] = {}
+    status: dict[str, str] = {}
+    open_span: dict[str, dict] = {}  # todo -> {start, ambiguous}
+    rewrites: list[int] = []
+    for i, m in enumerate(msgs):
+        for b in m["content"] if m["role"] == "assistant" else []:
+            if b.get("type") != "tool_use" or b["name"] != "TodoWrite":
                 continue
-            hidden_n, path = int(m.group(1)), m.group(2)
-            body = vis[m.end():].split("\n")
-            assert open(path, encoding="utf-8").read() == orig, "the original is on disk"
-            assert len(orig.split("\n")) - len(body) == hidden_n, "the stated count equals the number of lines actually hidden"
-            for l in orig.split("\n"):
-                if _PROTECT.search(l):
-                    assert l in body, f"a failure or assertion line was hidden: {l!r}"
-            missing = Counter(orig.split("\n")) - Counter(body)
-            assert sum(missing.values()) == hidden_n and all(c > 0 for c in missing.values()), "visible + hidden == original, as multisets"
-            tot_before, tot_after = tot_before + len(orig), tot_after + len(vis)
-        assert "FAILED tests/test_shop.py::test_case_7 - assert 300 == 280" in shown[4], "the failing test that fails in all prior runs too is still shown"
-        assert "1 failed, 10 passed" in shown[4]
-        # --- invalidation by construction
-        # a tool upgrade changes the banner line: it is visible again immediately and is not baseline until three runs carry it
-        up = bl.show(fam, _pytest_run(11, {}, 0.03, version="9.2.0"))
-        assert "pytest-9.2.0" in up and "pytest-9.1.1" not in up
-        # a line missing from ONE of the last three runs is not baseline
-        bl2 = Baseline(os.path.join(d, "b2"))
-        flaky = [f"stable banner line number {i} padded out to a realistic width" for i in "abcde"]
-        for r in (flaky + ["w"], flaky, flaky + ["w"]):
-            bl2.show("f", "\n".join(r) + "\n")
-        out = bl2.show("f", "\n".join(flaky + ["w"]) + "\n")
-        assert "\nw\n" in "\n" + out and "5 lines identical" in out, out
-        # corrupt history fails open
-        _write(os.path.join(d, "history.json"), "[1,")
-        assert bl.show(fam, runs[0]) == runs[0]
-        # --- npm test: the family where the idea pays (a fixed wall of deprecation warnings)
-        nb = Baseline(os.path.join(d, "npm"))
-        nfam = Baseline.family("/work/shop", ["npm", "test"])
-        nruns = [_npm_test_run(0, 2.1), _npm_test_run(0, 2.2), _npm_test_run(1, 2.4), _npm_test_run(1, 2.3), _npm_test_run(0, 2.0)]
-        nshown = [nb.show(nfam, r) for r in nruns]
-        assert nshown[3] == nruns[3] or "lines identical" in nshown[3]
-        assert "FAIL  src/checkout.test.js" in nshown[3] and "Expected: 270" in nshown[3] and "Received: 300" in nshown[3], "the failing suite is never hidden"
-        saving = 1 - len(nshown[4]) / len(nruns[4])
-        assert saving > 0.4, f"a fixed wall of npm deprecation warnings should be hidden, saved {saving:.0%}"
-        assert "Tests:       41 passed, 41 total" in nshown[4], "the result line is visible"
-        py_saving = 1 - tot_after / tot_before
-        assert py_saving > 0.15
-    return {"pytest_chars_saved_runs_4_to_6": f"{py_saving:.0%}", "npm_test_chars_saved_run_5": f"{saving:.0%}", "lines_hidden_pytest_run_4": int(re.match(r"\[ctxprune: (\d+)", shown[3]).group(1)),
-            "failure_lines_hidden": 0}
+            try:
+                cur = {t["content"]: t["status"] for t in b["input"]["todos"]}
+            except (KeyError, TypeError):
+                continue  # malformed payload: ignore the event
+            inprog = [c for c, s in cur.items() if s == "in_progress"]
+            for c in inprog:
+                if status.get(c) != "in_progress":
+                    open_span[c] = {"start": i, "ambiguous": False}
+            if len(inprog) > 1:  # two todos in progress at once: nothing in their spans can be attributed
+                for c in inprog:
+                    open_span[c]["ambiguous"] = True
+            for c, s in cur.items():
+                if s == "completed" and status.get(c) == "in_progress" and c in open_span:
+                    sp = open_span.pop(c)
+                    if sp["ambiguous"]:
+                        continue
+                    still_open_text = " ".join(k for k, v in cur.items() if v != "completed")
+                    folded_any = False
+                    for j in range(sp["start"] + 1, i):
+                        for blk in out[j]["content"] if out[j]["role"] == "user" else []:
+                            if blk.get("type") != "tool_result" or blk.get("folded") or not isinstance(blk["content"], str) or len(blk["content"]) < 300:
+                                continue
+                            use = next(u for u in msgs[j - 1]["content"] if u.get("type") == "tool_use" and u["id"] == blk["tool_use_id"])
+                            target = use["input"].get("file_path") or use["input"].get("command") or use["input"].get("pattern", "")
+                            if any(w in still_open_text for w in re.findall(r"[\w./-]+\.py", str(target))):
+                                continue  # a todo that is still open names this file
+                            rid = "r-" + _sha(blk["content"])
+                            store[rid] = blk["content"]
+                            first = blk["content"].split("\n", 1)[0][:80]
+                            blk["content"] = f"[folded {rid}: {use['name']} {str(target)[:60]} ({blk['content'].count(chr(10)) + 1} lines): {first}]"
+                            blk["folded"] = True
+                            folded_any = True
+                    if folded_any:
+                        rewrites.append(i)
+            status.update(cur)
+    return out, store, rewrites
+
+
+def sim_593() -> dict:
+    msgs, truth, T = _transcript_593()
+    folded, store, rewrites = fold_spans(msgs)
+    before, after = sum(_mtok(m) for m in msgs), sum(_mtok(m) for m in folded)
+    f_ids = {b["tool_use_id"] for m in folded if m["role"] == "user" for b in m["content"] if b.get("folded")}
+    # --- independent oracle: the generator knows which todo owned each call
+    ok_owner = {i for i, o in truth.items() if o in (T[0], T[3], T[4])}  # unambiguous, closed spans (T[1] names src/tax.py and is held back below)
+    assert f_ids <= ok_owner, f"folded results that do not belong to a closed, unambiguous span: {f_ids - ok_owner}"
+    ambiguous = {i for i, o in truth.items() if o == ""}
+    assert not (f_ids & ambiguous), "results from an overlapped (ambiguous) span must not fold"
+    assert f_ids, "something folds"
+    # span 1 has two Reads of cart.py and one of tax.py; todo 2 ('Add tax tests for src/tax.py') is still open when span 1 closes, so tax.py stays
+    t1 = [i for i, o in truth.items() if o == T[0]]
+    tax_read = next(i for i in t1 if next(u for m in msgs for u in m["content"] if u.get("id") == i)["input"].get("file_path") == "src/tax.py")
+    assert tax_read not in f_ids, "a file named by a still-open todo is not folded"
+    assert sum(1 for i in t1 if i in f_ids) == 2, 'both big Reads of cart.py fold; the short pytest, Edit results (under 300 chars) stay'
+    # the todo that was never in progress when completed and the span of the overlap: no folds for T[1], T[2]
+    assert not any(truth[i] in (T[1], "") for i in f_ids)
+    # --- reader view: every stub names the tool and target and carries a saved id; unfold returns the original byte for byte
+    for m in folded:
+        for b in m["content"] if m["role"] == "user" else []:
+            if b.get("folded"):
+                rid = re.search(r"\[folded (r-[0-9a-f]{8}):", b["content"]).group(1)
+                assert rid in store and _sha(store[rid]) == rid[2:], "unfold(id) returns exactly what the tool returned"
+                assert re.search(r"\[folded r-[0-9a-f]{8}: (Read|Bash|Grep) \S", b["content"])
+    # identifiers that the assistant mentions later are still in the stub (the path), so the agent knows what to unfold
+    later_mentions = {"src/cart.py"}
+    for m in folded:
+        for b in m["content"] if m["role"] == "user" else []:
+            if b.get("folded") and "src/cart.py" in b["content"]:
+                later_mentions.discard("src/cart.py")
+    assert not later_mentions, "the folded cart.py reads keep their path in the stub"
+    # --- no TodoWrite at all (other agents), malformed payloads, empty history: nothing folds, nothing raises
+    plain = [m for m in msgs if not any(b.get("name") == "TodoWrite" or (b.get("type") == "tool_result" and "Todos have been" in str(b.get("content"))) for b in m["content"])]
+    assert fold_spans(plain)[0] == plain and fold_spans([])[0] == []
+    bad = json.loads(json.dumps(msgs))
+    for m in bad:
+        for b in m["content"] if m["role"] == "assistant" else []:
+            if b.get("name") == "TodoWrite":
+                b["input"] = {"todos": "nope"}
+    assert fold_spans(bad)[0] == bad, "malformed TodoWrite payloads are ignored"
+    # --- history is rewritten once per closing event, not once per turn
+    assert len(rewrites) == len(set(rewrites)) and len(rewrites) <= 3, rewrites
+    plain_reqs = [msgs[:2 * (t + 1)] for t in range(len(msgs) // 2)]
+    fold_reqs = [fold_spans(msgs[:2 * (t + 1)])[0] for t in range(len(msgs) // 2)]
+    c0, c1 = _request_cost(plain_reqs), _request_cost(fold_reqs)
+    return {"tool_result_tokens_folded": sum(_mtok(m) for m in msgs) - after, "request_tokens": f"{before} -> {after} ({-100 * (before - after) / before:+.0f}%)", "results_folded": len(f_ids),
+            "rewrite_events": len(rewrites), "billed_no_folding": round(c0), "billed_with_folding": round(c1)}
 
 
 case(
-    142,
-    claim="Lines identical in each of the last three runs of a command family (cwd, program, output-shaping flags) are hidden behind one counted header with the full output saved; failure, assertion and error lines are never hidden even when they repeat in every run, a line missing from any prior run or changed by a tool upgrade stays visible, and corrupt history fails open.",
-    sim=sim_142,
+    593,
+    claim="When a TodoWrite event completes a todo that was the only one in progress, the tool results since it started become one-line stubs (tool, target, first line, saved id; unfold returns the original byte for byte); overlapping todos, a todo completed without a span, files named by a still-open todo, malformed payloads and sessions without todos fold nothing, and history is rewritten once per closing event.",
+    sim=sim_593,
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1324 rank aged tool results by relevance to the current prompt, not by age
+
+_TOPICS = {
+    "auth": ("login_required", "TokenStore", "auth/session.py", "session token expiry refresh login cookie"),
+    "cart": ("compute_total", "CartLine", "shop/cart.py", "cart total price line quantity rounding discount"),
+    "search": ("build_index", "QueryParser", "search/index.py", "search index query ranking tokenizer shard"),
+    "billing": ("issue_invoice", "VatRule", "billing/invoice.py", "invoice vat tax billing customer ledger"),
+    "deploy": ("rollout_plan", "CanaryGate", "ops/deploy.py", "deploy canary rollout release rollback health"),
+    "mail": ("send_digest", "SmtpPool", "notify/mail.py", "mail smtp digest notification queue retry"),
+    "export": ("write_report", "CsvSink", "reports/export.py", "export csv report download stream encoding"),
+    "perf": ("profile_hot_path", "LruCache", "core/cache.py", "performance cache latency profile hot path memory"),
+}
+
+
+def _auc_pairs(scores: list[float], labels: list[int]) -> float:
+    pos = [s for s, y in zip(scores, labels) if y]
+    neg = [s for s, y in zip(scores, labels) if not y]
+    return sum((p > n) + 0.5 * (p == n) for p in pos for n in neg) / (len(pos) * len(neg))
+
+
+def _auc_ranks(scores: list[float], labels: list[int]) -> float:
+    """Mann-Whitney U from average ranks: a different algorithm from the pairwise count above."""
+    order = sorted(range(len(scores)), key=lambda i: scores[i])
+    ranks = [0.0] * len(scores)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and scores[order[j + 1]] == scores[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = (i + j) / 2 + 1
+        i = j + 1
+    n_pos = sum(labels)
+    n_neg = len(labels) - n_pos
+    return (sum(r for r, y in zip(ranks, labels) if y) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+
+def _session_1324(seed: int, revisit: float = 0.5):
+    """60 tool results about eight topics, a last prompt about one topic, and who is reused later. Reuse model (mine, stated):
+    P(reused) = .8 if the result is about the prompt's topic, else .03 + .3 * exp(-age / 25)."""
+    g = _lcg(seed)
+    names = list(_TOPICS)
+    results = []
+    cur = names[next(g) % 8]
+    for t in range(60):
+        if next(g) % 100 > revisit * 100 * 0.4:
+            cur = names[next(g) % 8] if next(g) % 3 == 0 else cur
+        topic = names[next(g) % 8] if next(g) % 100 < 70 else cur
+        fn, cls, path, words = _TOPICS[topic]
+        vocab = words.split()
+        text = f"{path}\n" + "\n".join(f"{vocab[next(g) % len(vocab)]} {fn if next(g) % 4 == 0 else 'value'} {vocab[next(g) % len(vocab)]} {cls if next(g) % 5 == 0 else 'node'}" for _ in range(30 + next(g) % 30))
+        results.append({"turn": t, "topic": topic, "text": text, "path": path})
+    last_topic = names[next(g) % 8]
+    prompt = f"please look at the {_TOPICS[last_topic][3].split()[0]} problem again, especially {_TOPICS[last_topic][3].split()[1]} and {_TOPICS[last_topic][3].split()[2]}"
+    labels = []
+    for r in results:
+        p = 0.8 if r["topic"] == last_topic else 0.03 + 0.3 * math.exp(-(59 - r["turn"]) / 25)  # recency helps a little for everything else
+        labels.append(1 if next(g) % 1000 < p * 1000 else 0)
+    return results, prompt, last_topic, labels
+
+
+def sim_1324() -> dict:
+    # --- the metric itself: two algorithms agree
+    rng = _lcg(5)
+    for _ in range(30):
+        sc = [next(rng) % 7 for _ in range(25)]
+        lb = [int(next(rng) % 3 == 0) for _ in range(25)]
+        if 0 < sum(lb) < len(lb):
+            assert abs(_auc_pairs(sc, lb) - _auc_ranks(sc, lb)) < 1e-12
+    # --- AUC of age vs BM25-to-latest-prompt as reuse predictors, over 20 seeded sessions (aged = older than 8 turns)
+    a_age, a_bm = [], []
+    kept_bm = kept_age = reused_total = 0
+    for seed in range(20):
+        results, prompt, topic, labels = _session_1324(seed)
+        aged = [i for i, r in enumerate(results) if r["turn"] < 52]
+        sc_bm = _bm25(_terms(prompt), [_terms(results[i]["text"]) for i in aged])
+        sc_age = [results[i]["turn"] for i in aged]  # younger (larger turn) = higher score
+        lab = [labels[i] for i in aged]
+        if 0 < sum(lab) < len(lab):
+            a_age.append(_auc_ranks(sc_age, lab))
+            a_bm.append(_auc_ranks(sc_bm, lab))
+        # equal budget: keep 12 of the aged results by each score, count the reused ones kept
+        k = 12
+        top_bm = sorted(range(len(aged)), key=lambda j: (-sc_bm[j], j))[:k]
+        top_age = sorted(range(len(aged)), key=lambda j: (-sc_age[j], j))[:k]
+        kept_bm += sum(lab[j] for j in top_bm)
+        kept_age += sum(lab[j] for j in top_age)
+        reused_total += sum(lab)
+    auc_age, auc_bm = sum(a_age) / len(a_age), sum(a_bm) / len(a_bm)
+    assert auc_bm > auc_age + 0.1, f"relevance must beat age on this reuse model ({auc_bm:.2f} vs {auc_age:.2f})"
+    assert kept_bm > kept_age, "at an equal keep budget the relevance rule keeps more of the results that were reused"
+
+    # --- the policy: which aged results to stub. Keep = youngest 8, top-K by BM25, any result naming a path the prompt names, errors.
+    def to_stub(results, prompt, k=12, young=8):
+        aged = [i for i, r in enumerate(results) if r["turn"] < len(results) - young]
+        if not _terms(prompt):
+            return sorted(aged, key=lambda i: results[i]["turn"])[: max(0, len(aged) - k)]  # no prompt to rank against: fall back to age
+        sc = _bm25(_terms(prompt), [_terms(results[i]["text"]) for i in aged])
+        keep = {aged[j] for j in sorted(range(len(aged)), key=lambda j: (-sc[j], j))[:k] if sc[j] > 0}
+        named = {i for i in aged if results[i]["path"] in prompt or any(w in prompt for w in re.findall(r"[a-z_]+\(\)|[\w/]+\.py", results[i]["text"])[:0])}
+        return [i for i in aged if i not in keep and i not in named and not results[i].get("error")]
+
+    results, prompt, topic, labels = _session_1324(3)
+    stubbed = to_stub(results, prompt)
+    assert stubbed and len(stubbed) < len(results)
+    # a result whose path the prompt names is never stubbed, however old and however low its BM25 score
+    results[2]["path"] = "ops/deploy.py"
+    forced = to_stub(results, prompt + " and also fix ops/deploy.py")
+    assert 2 not in forced, "an explicitly named path pins the result"
+    assert to_stub(results, "") == sorted(range(len(results) - 8), key=lambda i: results[i]["turn"])[: max(0, len(results) - 8 - 12)], "an empty prompt falls back to age"
+    results[5]["error"] = True
+    assert 5 not in to_stub(results, prompt), "results marked as errors are never stubbed"
+    # --- the honest failure: a prompt that uses other words than the file ('the config' for settings.py) scores zero and the result is stubbed
+    cfg = [{"turn": 0, "topic": "x", "text": "settings.py\nDEBUG = False\nSECRET_KEY = 'x'\nALLOWED_HOSTS = []", "path": "settings.py"}] + [{"turn": t, "topic": "y", "text": "unrelated output about caching and retries " * 3, "path": f"f{t}.py"} for t in range(1, 30)]
+    assert 0 in to_stub(cfg, "why is the config ignored on startup", k=3), "vocabulary mismatch: BM25 does not see that 'config' means settings.py (the stub still names the path)"
+    # --- determinism
+    assert to_stub(results, prompt) == to_stub(results, prompt)
+    return {"auc_age": round(auc_age, 2), "auc_bm25_to_latest_prompt": round(auc_bm, 2), "reused_results_kept_at_budget_12_bm25_vs_age": f"{kept_bm} vs {kept_age} of {reused_total}",
+            "caveat": "synthetic reuse model written for this sim: shows the mechanism and the failure case, not the idea's real-transcript AUC"}
+
+
+case(
+    1324,
+    claim="Aged tool results are ranked for stubbing by BM25 against the latest prompt instead of by age: on seeded synthetic sessions the AUC as a reuse predictor and the reused results kept at an equal budget both beat age (two independent AUC algorithms agree), a result whose path the prompt names, an error result and everything when the prompt is empty are handled by pin and fallback rules, and a vocabulary mismatch ('config' vs settings.py) is shown to be stubbed.",
+    sim=sim_1324,
 )

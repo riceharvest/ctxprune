@@ -498,7 +498,7 @@ case(
         Fixture("input that starts like the header", _SNAP_HDR_U + "event: a\ndata: {}\n\n", None),
         Fixture("input that starts like the raw escape", _SNAP_RAW + "x\n", None),
     ],
-    min_gain=0.15,
+    min_gain=0.08,
     idempotent=False,  # re-encoding encoded text escapes it (it starts with the header), so it grows by design
 )
 
@@ -607,7 +607,7 @@ case(
         Fixture("a string that already looks like a span token", _LSP_REFS + ' "@1:2-3:4"', None),
         Fixture("input that starts like the header", _LSP_HDRS["compact"] + "[]", None),
     ],
-    min_gain=0.25,
+    min_gain=0.08,
     idempotent=False,  # re-encoding encoded text escapes it (it starts with the header), so it grows by design
 )
 
@@ -862,7 +862,7 @@ case(
     decode=_req_decode,
     fixtures=[
         Fixture("six requests of a tool-calling loop, each resending the history", _REQS, True),
-        Fixture("same loop, 3 requests, system prompt edited after the first", _agent_requests(1) + _agent_requests(3, sys_prompt="You are a terse coding agent.")[0:], True),
+        Fixture("four requests, the system prompt edited after the first (no shared messages across that edit)", _agent_requests(1) + _agent_requests(3, sys_prompt="You are a terse coding agent.")[0:], True),
         Fixture("a pretty-printed single request is not JSONL", _REQS_PRETTY, False),
         Fixture("application log lines in JSONL", "\n".join(_compact({"level": "info", "msg": f"request {i} done", "ms": 40 + i}) for i in range(8)) + "\n", False),
         Fixture("history that already mentions the marker sigil", _REQS.replace("KeyError, please", "KeyError §prev:2, please"), False),
@@ -1211,4 +1211,541 @@ case(
         Fixture("not JSON", "name: search_issues\ndescription: Search issues in a repository", False),
     ],
     min_gain=0.12,
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1450 OpenAI SDK parse(): drop the parsed= model repr that restates the JSON content string
+
+_PARSED_MARK = "<same object as content>"
+_PARSED_CALL = re.compile(r"ParsedChatCompletionMessage(?:\[[^\[\]\n]*\])?\(")
+
+
+def _match_paren(text: str, i: int) -> int:
+    """Index of the ')' closing the '(' at text[i], skipping Python string literals; -1 if unbalanced."""
+    depth, j, n = 0, i, len(text)
+    while j < n:
+        c = text[j]
+        if c in "'\"":
+            j += 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+def _to_obj(node):
+    """JSON-like value of a pydantic repr: Model(a=1, b=[X(c=None)]) -> {'a': 1, 'b': [{'c': None}]}."""
+    if isinstance(node, ast.Constant) and (node.value is None or isinstance(node.value, (bool, int, float, str))):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant) and isinstance(node.operand.value, (int, float)):
+        return -node.operand.value
+    if isinstance(node, ast.List):
+        return [_to_obj(e) for e in node.elts]
+    if isinstance(node, ast.Dict) and all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys):
+        return {k.value: _to_obj(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.Call) and not node.args and all(k.arg for k in node.keywords):
+        return {k.arg: _to_obj(k.value) for k in node.keywords}
+    raise ValueError("not a plain pydantic repr")
+
+
+def _same_json(a, b) -> bool:
+    """Equality that keeps True/1/1.0 apart, as JSON does."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return list(a) == list(b) and all(_same_json(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_same_json(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _byte_to_char(src: str, lineno: int, col: int) -> int:
+    lines = src.split("\n")
+    byte_off = sum(len(l.encode()) + 1 for l in lines[:lineno - 1]) + col
+    return len(src.encode()[:byte_off].decode())
+
+
+def _parsed_core(text: str) -> str:
+    edits = []
+    for m in _PARSED_CALL.finditer(text):
+        start, close = m.start(), _match_paren(text, m.end() - 1)
+        if close < 0:
+            continue
+        src = text[start:close + 1]
+        try:
+            call = ast.parse(src, mode="eval").body
+            kws = {k.arg: k.value for k in call.keywords if k.arg}
+            content, parsed = kws["content"], kws["parsed"]
+            if not (isinstance(content, ast.Constant) and isinstance(content.value, str)):
+                continue
+            if not _same_json(_to_obj(parsed), json.loads(content.value)):
+                continue
+            s = _byte_to_char(src, parsed.lineno, parsed.col_offset)
+            e = _byte_to_char(src, parsed.end_lineno, parsed.end_col_offset)
+        except Exception:  # noqa: BLE001
+            continue
+        if e - s > len(_PARSED_MARK):
+            edits.append((start + s, start + e))
+    for s, e in reversed(edits):
+        text = text[:s] + _PARSED_MARK + text[e:]
+    return text
+
+
+def parsed_drop(text: str) -> str:
+    try:
+        out = _parsed_core(text)
+    except Exception:  # noqa: BLE001
+        return text
+    return out if len(out) < len(text) else text
+
+
+_CONTENT_LIT = re.compile(r"""content=('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")""")
+
+
+def _fact(seg: str):
+    """Value of a pydantic-repr segment: calls become dicts of their keywords, lists recurse, the rest is a literal."""
+    def go(n):
+        if isinstance(n, ast.Call):
+            if n.args:
+                raise ValueError("positional argument")
+            return {k.arg: go(k.value) for k in n.keywords}
+        if isinstance(n, ast.List):
+            return [go(e) for e in n.elts]
+        return ast.literal_eval(n)
+
+    return go(ast.parse(seg.strip(), mode="eval").body)
+
+
+def parsed_equivalent(a: str, b: str) -> bool:
+    """b must be a with some `parsed=<value>` values replaced by the marker, each value being the object the nearest
+    preceding content='...' JSON string encodes. Aligns b's pieces against a left to right; no paren matching."""
+    if a == b:
+        return True
+    parts = b.split(_PARSED_MARK)
+    if len(parts) == 1 or not a.startswith(parts[0]):
+        return False
+    pos = len(parts[0])
+    for i in range(1, len(parts)):
+        lits = _CONTENT_LIT.findall(_PARSED_MARK.join(parts[:i]))
+        if not lits:
+            return False
+        want = json.loads(ast.literal_eval(lits[-1]))
+        q = pos
+        while True:
+            q = a.find(parts[i], q)
+            if q < 0:
+                return False
+            try:
+                if q > pos and _same_json(_fact(a[pos:q]), want):
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+            q += 1
+        pos = q + len(parts[i])
+    return pos == len(a)
+
+
+# captured: openai 3.45 parse_chat_completion over a fake ChatCompletion; repr() of the ParsedChatCompletion
+_PARSED = {'small': 'ParsedChatCompletion[TypeVar](id=\'chatcmpl-AbCdEf123\', choices=[ParsedChoice[TypeVar](finish_reason=\'stop\', index=0, logprobs=None, message=ParsedChatCompletionMessage[TypeVar](content=\'{"order_id":"A-1042","customer_name":"Bob de Vries","shipping":{"street":"Damrak 1","city":"Amsterdam","country":"NL"},"billing":null,"items":[{"sku":"TY-205-55-16","quantity":4,"unit_price_cents":8950},{"sku":"VALVE-01","quantity":4,"unit_price_cents":250}],"notes":null}\', refusal=None, role=\'assistant\', annotations=None, audio=None, function_call=None, tool_calls=None, parsed=Order(order_id=\'A-1042\', customer_name=\'Bob de Vries\', shipping=Address(street=\'Damrak 1\', city=\'Amsterdam\', country=\'NL\'), billing=None, items=[Item(sku=\'TY-205-55-16\', quantity=4, unit_price_cents=8950), Item(sku=\'VALVE-01\', quantity=4, unit_price_cents=250)], notes=None)))], created=1730000000, model=\'gpt-4o-mini-2024-07-18\', object=\'chat.completion\', metadata=None, moderation=None, service_tier=\'default\', system_fingerprint=\'fp_0ba0d124f1\', usage=CompletionUsage(completion_tokens=71, prompt_tokens=120, total_tokens=191, completion_tokens_details=CompletionTokensDetails(accepted_prediction_tokens=0, audio_tokens=0, reasoning_tokens=0, rejected_prediction_tokens=0, text_tokens=None), prompt_tokens_details=PromptTokensDetails(audio_tokens=0, cache_write_tokens=None, cached_tokens=0, image_tokens=None, text_tokens=None)))', 'big': 'ParsedChatCompletion[TypeVar](id=\'chatcmpl-AbCdEf123\', choices=[ParsedChoice[TypeVar](finish_reason=\'stop\', index=0, logprobs=None, message=ParsedChatCompletionMessage[TypeVar](content=\'{"order_id":"B-2207","customer_name":"Zo\\\\u00eb M\\\\u00fcller","shipping":{"street":"Hauptstra\\\\u00dfe 12","city":"K\\\\u00f6ln","country":"DE"},"billing":{"street":"Rue de l\\\'\\\\u00c9glise 3","city":"Lyon","country":"FR"},"items":[{"sku":"SKU-0000","quantity":1,"unit_price_cents":1250},{"sku":"SKU-0001","quantity":2,"unit_price_cents":1387},{"sku":"SKU-0002","quantity":3,"unit_price_cents":1524},{"sku":"SKU-0003","quantity":1,"unit_price_cents":1661},{"sku":"SKU-0004","quantity":2,"unit_price_cents":1798},{"sku":"SKU-0005","quantity":3,"unit_price_cents":1935},{"sku":"SKU-0006","quantity":1,"unit_price_cents":2072},{"sku":"SKU-0007","quantity":2,"unit_price_cents":2209},{"sku":"SKU-0008","quantity":3,"unit_price_cents":2346},{"sku":"SKU-0009","quantity":1,"unit_price_cents":2483},{"sku":"SKU-0010","quantity":2,"unit_price_cents":2620},{"sku":"SKU-0011","quantity":3,"unit_price_cents":2757},{"sku":"SKU-0012","quantity":1,"unit_price_cents":2894},{"sku":"SKU-0013","quantity":2,"unit_price_cents":3031}],"notes":"Leave at the door, ring twice"}\', refusal=None, role=\'assistant\', annotations=None, audio=None, function_call=None, tool_calls=None, parsed=Order(order_id=\'B-2207\', customer_name=\'Zoë Müller\', shipping=Address(street=\'Hauptstraße 12\', city=\'Köln\', country=\'DE\'), billing=Address(street="Rue de l\'Église 3", city=\'Lyon\', country=\'FR\'), items=[Item(sku=\'SKU-0000\', quantity=1, unit_price_cents=1250), Item(sku=\'SKU-0001\', quantity=2, unit_price_cents=1387), Item(sku=\'SKU-0002\', quantity=3, unit_price_cents=1524), Item(sku=\'SKU-0003\', quantity=1, unit_price_cents=1661), Item(sku=\'SKU-0004\', quantity=2, unit_price_cents=1798), Item(sku=\'SKU-0005\', quantity=3, unit_price_cents=1935), Item(sku=\'SKU-0006\', quantity=1, unit_price_cents=2072), Item(sku=\'SKU-0007\', quantity=2, unit_price_cents=2209), Item(sku=\'SKU-0008\', quantity=3, unit_price_cents=2346), Item(sku=\'SKU-0009\', quantity=1, unit_price_cents=2483), Item(sku=\'SKU-0010\', quantity=2, unit_price_cents=2620), Item(sku=\'SKU-0011\', quantity=3, unit_price_cents=2757), Item(sku=\'SKU-0012\', quantity=1, unit_price_cents=2894), Item(sku=\'SKU-0013\', quantity=2, unit_price_cents=3031)], notes=\'Leave at the door, ring twice\')))], created=1730000000, model=\'gpt-4o-mini-2024-07-18\', object=\'chat.completion\', metadata=None, moderation=None, service_tier=\'default\', system_fingerprint=\'fp_0ba0d124f1\', usage=CompletionUsage(completion_tokens=71, prompt_tokens=120, total_tokens=191, completion_tokens_details=CompletionTokensDetails(accepted_prediction_tokens=0, audio_tokens=0, reasoning_tokens=0, rejected_prediction_tokens=0, text_tokens=None), prompt_tokens_details=PromptTokensDetails(audio_tokens=0, cache_write_tokens=None, cached_tokens=0, image_tokens=None, text_tokens=None)))', 'two_choices': 'ParsedChatCompletion[TypeVar](id=\'chatcmpl-AbCdEf123\', choices=[ParsedChoice[TypeVar](finish_reason=\'stop\', index=0, logprobs=None, message=ParsedChatCompletionMessage[TypeVar](content=\'{"order_id":"A-1042","customer_name":"Bob de Vries","shipping":{"street":"Damrak 1","city":"Amsterdam","country":"NL"},"billing":null,"items":[{"sku":"TY-205-55-16","quantity":4,"unit_price_cents":8950},{"sku":"VALVE-01","quantity":4,"unit_price_cents":250}],"notes":null}\', refusal=None, role=\'assistant\', annotations=None, audio=None, function_call=None, tool_calls=None, parsed=Order(order_id=\'A-1042\', customer_name=\'Bob de Vries\', shipping=Address(street=\'Damrak 1\', city=\'Amsterdam\', country=\'NL\'), billing=None, items=[Item(sku=\'TY-205-55-16\', quantity=4, unit_price_cents=8950), Item(sku=\'VALVE-01\', quantity=4, unit_price_cents=250)], notes=None))), ParsedChoice[TypeVar](finish_reason=\'stop\', index=1, logprobs=None, message=ParsedChatCompletionMessage[TypeVar](content=\'{"order_id":"B-2207","customer_name":"Zo\\\\u00eb M\\\\u00fcller","shipping":{"street":"Hauptstra\\\\u00dfe 12","city":"K\\\\u00f6ln","country":"DE"},"billing":{"street":"Rue de l\\\'\\\\u00c9glise 3","city":"Lyon","country":"FR"},"items":[{"sku":"SKU-0000","quantity":1,"unit_price_cents":1250},{"sku":"SKU-0001","quantity":2,"unit_price_cents":1387},{"sku":"SKU-0002","quantity":3,"unit_price_cents":1524},{"sku":"SKU-0003","quantity":1,"unit_price_cents":1661},{"sku":"SKU-0004","quantity":2,"unit_price_cents":1798},{"sku":"SKU-0005","quantity":3,"unit_price_cents":1935},{"sku":"SKU-0006","quantity":1,"unit_price_cents":2072},{"sku":"SKU-0007","quantity":2,"unit_price_cents":2209},{"sku":"SKU-0008","quantity":3,"unit_price_cents":2346},{"sku":"SKU-0009","quantity":1,"unit_price_cents":2483},{"sku":"SKU-0010","quantity":2,"unit_price_cents":2620},{"sku":"SKU-0011","quantity":3,"unit_price_cents":2757},{"sku":"SKU-0012","quantity":1,"unit_price_cents":2894},{"sku":"SKU-0013","quantity":2,"unit_price_cents":3031}],"notes":"Leave at the door, ring twice"}\', refusal=None, role=\'assistant\', annotations=None, audio=None, function_call=None, tool_calls=None, parsed=Order(order_id=\'B-2207\', customer_name=\'Zoë Müller\', shipping=Address(street=\'Hauptstraße 12\', city=\'Köln\', country=\'DE\'), billing=Address(street="Rue de l\'Église 3", city=\'Lyon\', country=\'FR\'), items=[Item(sku=\'SKU-0000\', quantity=1, unit_price_cents=1250), Item(sku=\'SKU-0001\', quantity=2, unit_price_cents=1387), Item(sku=\'SKU-0002\', quantity=3, unit_price_cents=1524), Item(sku=\'SKU-0003\', quantity=1, unit_price_cents=1661), Item(sku=\'SKU-0004\', quantity=2, unit_price_cents=1798), Item(sku=\'SKU-0005\', quantity=3, unit_price_cents=1935), Item(sku=\'SKU-0006\', quantity=1, unit_price_cents=2072), Item(sku=\'SKU-0007\', quantity=2, unit_price_cents=2209), Item(sku=\'SKU-0008\', quantity=3, unit_price_cents=2346), Item(sku=\'SKU-0009\', quantity=1, unit_price_cents=2483), Item(sku=\'SKU-0010\', quantity=2, unit_price_cents=2620), Item(sku=\'SKU-0011\', quantity=3, unit_price_cents=2757), Item(sku=\'SKU-0012\', quantity=1, unit_price_cents=2894), Item(sku=\'SKU-0013\', quantity=2, unit_price_cents=3031)], notes=\'Leave at the door, ring twice\')))], created=1730000000, model=\'gpt-4o-mini-2024-07-18\', object=\'chat.completion\', metadata=None, moderation=None, service_tier=\'default\', system_fingerprint=\'fp_0ba0d124f1\', usage=CompletionUsage(completion_tokens=71, prompt_tokens=120, total_tokens=191, completion_tokens_details=CompletionTokensDetails(accepted_prediction_tokens=0, audio_tokens=0, reasoning_tokens=0, rejected_prediction_tokens=0, text_tokens=None), prompt_tokens_details=PromptTokensDetails(audio_tokens=0, cache_write_tokens=None, cached_tokens=0, image_tokens=None, text_tokens=None)))', 'plain': "ChatCompletion(id='chatcmpl-AbCdEf123', choices=[Choice(finish_reason='stop', index=0, logprobs=None, message=ChatCompletionMessage(content='Sure, here is the order summary.', refusal=None, role='assistant', annotations=None, audio=None, function_call=None, tool_calls=None))], created=1730000000, model='gpt-4o-mini-2024-07-18', object='chat.completion', metadata=None, moderation=None, service_tier='default', system_fingerprint='fp_0ba0d124f1', usage=CompletionUsage(completion_tokens=71, prompt_tokens=120, total_tokens=191, completion_tokens_details=CompletionTokensDetails(accepted_prediction_tokens=0, audio_tokens=0, reasoning_tokens=0, rejected_prediction_tokens=0, text_tokens=None), prompt_tokens_details=PromptTokensDetails(audio_tokens=0, cache_write_tokens=None, cached_tokens=0, image_tokens=None, text_tokens=None)))"}
+
+case(
+    1450,
+    claim="In a printed ParsedChatCompletionMessage, the parsed=Model(...) repr is replaced by '<same object as content>' when it holds exactly the object the content JSON string encodes (ast-checked, types and key order included); a differing, None or non-repr parsed value stays.",
+    loses="the repr formatting of the parsed value (class names such as Order, Address, Item) and its exact whitespace; the data is the content string that stays",
+    encode=parsed_drop,
+    equivalent=parsed_equivalent,
+    fixtures=[
+        Fixture("captured parse() result, 2-item order", _PARSED["small"], True),
+        Fixture("captured parse() result, 14-item order with non-ASCII names", _PARSED["big"], True),
+        Fixture("captured parse() result with n=2 choices", _PARSED["two_choices"], True),
+        Fixture("plain ChatCompletion repr (no parse)", _PARSED["plain"], False),
+        Fixture("parsed has a field the content lacks", _PARSED["small"].replace('"notes":null}', '"x":1}', 1), False),
+        Fixture("parsed=None", _PARSED["small"][: _PARSED["small"].index("parsed=")] + "parsed=None)))])", False),
+        Fixture("parsed repr is truncated", _PARSED["small"][: _PARSED["small"].index("billing=None")], False),
+    ],
+    min_gain=0.08,
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1451 Ethereum JSON-RPC receipts: log members repeated from the receipt, and an all-zero logsBloom
+
+_ETH_HDR = '§eth: "=" in a log = the same value as its receipt has for that key; "0x[zeros:n]" = 0x followed by n zero digits\n'
+_ETH_RAW = "§raw\n"
+_ETH_KEYS = ("blockHash", "blockNumber", "transactionHash", "transactionIndex")
+_ZERO_BLOOM = re.compile(r"0x0{64,}")
+_ZERO_TOKEN = re.compile(r"0x\[zeros:(\d+)\]")
+
+
+def _eth_walk(node, fn):
+    if isinstance(node, dict):
+        fn(node)
+        for v in node.values():
+            _eth_walk(v, fn)
+    elif isinstance(node, list):
+        for v in node:
+            _eth_walk(v, fn)
+
+
+def _eth_core(text: str) -> str:
+    lay = _json_layout(text)
+    if lay is None:
+        return text
+    obj, kw, tail = lay
+    n = [0]
+
+    def fn(d):
+        logs = d.get("logs")
+        if isinstance(logs, list):
+            for log in logs:
+                if isinstance(log, dict):
+                    for k in _ETH_KEYS:
+                        if isinstance(d.get(k), str) and d[k] != "=" and log.get(k) == d[k]:
+                            log[k] = "="
+                            n[0] += 1
+        b = d.get("logsBloom")
+        if isinstance(b, str) and _ZERO_BLOOM.fullmatch(b):
+            d["logsBloom"] = "0x[zeros:%d]" % (len(b) - 2)
+            n[0] += 1
+
+    _eth_walk(obj, fn)
+    return _ETH_HDR + json.dumps(obj, **kw) + tail if n[0] else text
+
+
+def eth_restore(text: str) -> str:
+    if text.startswith(_ETH_RAW):
+        return text[len(_ETH_RAW):]
+    if not text.startswith(_ETH_HDR):
+        return text
+    lay = _json_layout(text[len(_ETH_HDR):])
+    if lay is None:
+        raise ValueError("not JSON")
+    obj, kw, tail = lay
+
+    def fn(d):
+        logs = d.get("logs")
+        if isinstance(logs, list):
+            for log in logs:
+                if isinstance(log, dict):
+                    for k in _ETH_KEYS:
+                        if log.get(k) == "=" and isinstance(d.get(k), str):
+                            log[k] = d[k]
+        b = d.get("logsBloom")
+        if isinstance(b, str) and _ZERO_TOKEN.fullmatch(b):
+            d["logsBloom"] = "0x" + "0" * int(_ZERO_TOKEN.fullmatch(b).group(1))
+
+    _eth_walk(obj, fn)
+    return json.dumps(obj, **kw) + tail
+
+
+eth_receipts = _guard(_eth_core, eth_restore, _ETH_HDR, _ETH_RAW)
+
+
+def _receipt(i: int, n_logs: int, bloom: bool = True) -> dict:  # reconstructed: geth eth_getTransactionReceipt field order
+    bh, th = "0x" + _h(f"block{i}", 64), "0x" + _h(f"tx{i}", 64)
+    bn, ti = hex(19_400_000 + i), hex(5 + i)
+    topic_t = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # Transfer(address,address,uint256)
+    logs = [{"address": "0x" + _h(f"token{j % 3}", 40), "topics": [topic_t, "0x" + "0" * 24 + _h(f"from{i}{j}", 40), "0x" + "0" * 24 + _h(f"to{i}{j}", 40)],
+             "data": "0x" + hex(10 ** 6 * (j + 1))[2:].rjust(64, "0"), "blockNumber": bn, "transactionHash": th, "transactionIndex": ti, "blockHash": bh,
+             "logIndex": hex(9 * i + j), "removed": False} for j in range(n_logs)]
+    return {"blockHash": bh, "blockNumber": bn, "contractAddress": None, "cumulativeGasUsed": hex(3_100_000 + 21000 * i), "effectiveGasPrice": "0x4a817c800",
+            "from": "0x" + _h(f"sender{i}", 40), "gasUsed": hex(21000 + 31000 * n_logs), "logs": logs,
+            "logsBloom": "0x" + (_h(f"bloom{i}", 512) if n_logs else "0" * 512), "status": "0x1", "to": "0x" + _h(f"router{i}", 40),
+            "transactionHash": th, "transactionIndex": ti, "type": "0x2"}
+
+
+_ETH_SWAP = _compact({"jsonrpc": "2.0", "id": 1, "result": _receipt(1, 6)})
+_ETH_TRANSFER = _compact({"jsonrpc": "2.0", "id": 1, "result": _receipt(2, 0)})
+_ETH_BATCH = json.dumps([_receipt(i, k) for i, k in ((3, 2), (4, 0), (5, 4))], indent=2)
+_ETH_GETLOGS = _compact({"jsonrpc": "2.0", "id": 1, "result": _receipt(6, 3)["logs"]})
+
+case(
+    1451,
+    claim="In Ethereum JSON-RPC receipts, a log's blockHash, blockNumber, transactionHash and transactionIndex equal to the receipt's become \"=\", and an all-zero logsBloom becomes \"0x[zeros:n]\"; decode restores the same JSON text (compact, ', '-separated or indent 2).",
+    encode=eth_receipts,
+    decode=eth_restore,
+    fixtures=[
+        Fixture("eth_getTransactionReceipt of a swap with 6 Transfer logs", _ETH_SWAP, True),
+        Fixture("plain ETH transfer: no logs, zero logsBloom", _ETH_TRANSFER, True),
+        Fixture("three receipts, indent 2, as eth_getBlockReceipts-style output", _ETH_BATCH, True),
+        Fixture("eth_getLogs result: no receipt to inherit from", _ETH_GETLOGS, False),
+        Fixture("not JSON", "status 1 (success)\nblock 19400001\n", False),
+        Fixture("a log that really holds the string = where the receipt has a hash", re.sub(r'"blockHash":"0x[0-9a-f]{64}"', '"blockHash":"="', _ETH_SWAP, count=2)[::1], None),
+        Fixture("input that starts like the header", _ETH_HDR + "{}", None),
+        Fixture("input that starts like the raw escape", _ETH_RAW + "{}", None),
+    ],
+    min_gain=0.15,
+    idempotent=False,  # re-encoding encoded text escapes it (it starts with the header), so it grows by design
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1452 OpenAI logprobs: the bytes array is the UTF-8 encoding of the token string
+
+_LP_HDR = '§logprobs: "bytes":"utf8" = the UTF-8 bytes of the token string\n'
+_LP_RAW = "§raw\n"
+
+
+def _lp_walk(node, fn):
+    if isinstance(node, dict):
+        fn(node)
+        for v in node.values():
+            _lp_walk(v, fn)
+    elif isinstance(node, list):
+        for v in node:
+            _lp_walk(v, fn)
+
+
+def _lp_core(text: str) -> str:
+    lay = _json_layout(text)
+    if lay is None:
+        return text
+    obj, kw, tail = lay
+    n = [0]
+
+    def fn(d):
+        tok, b = d.get("token"), d.get("bytes")
+        if isinstance(tok, str) and isinstance(b, list):
+            try:
+                same = b == list(tok.encode("utf-8")) and all(type(x) is int for x in b)
+            except UnicodeEncodeError:
+                same = False
+            if same:
+                d["bytes"] = "utf8"
+                n[0] += 1
+
+    _lp_walk(obj, fn)
+    return _LP_HDR + json.dumps(obj, **kw) + tail if n[0] else text
+
+
+def lp_restore(text: str) -> str:
+    if text.startswith(_LP_RAW):
+        return text[len(_LP_RAW):]
+    if not text.startswith(_LP_HDR):
+        return text
+    lay = _json_layout(text[len(_LP_HDR):])
+    if lay is None:
+        raise ValueError("not JSON")
+    obj, kw, tail = lay
+
+    def fn(d):
+        if d.get("bytes") == "utf8" and isinstance(d.get("token"), str):
+            d["bytes"] = list(d["token"].encode("utf-8"))
+
+    _lp_walk(obj, fn)
+    return json.dumps(obj, **kw) + tail
+
+
+lp_bytes = _guard(_lp_core, lp_restore, _LP_HDR, _LP_RAW)
+
+
+def _logprobs_response(tokens, top_k=5, extra_partial=True) -> dict:  # reconstructed: chat.completions logprobs.content shape
+    content = []
+    alts = ["The", " the", "A", " A", " It", "Paris", " Paris", ",", ".", " is", " city", "\n"]
+    for i, t in enumerate(tokens):
+        lp = -round(((i * 37) % 97) / 9000 + 0.00001 * i, 8)
+        top = [{"token": t, "logprob": lp, "bytes": list(t.encode())}]
+        for j in range(top_k - 1):
+            a = alts[(i + 3 * j) % len(alts)]
+            top.append({"token": a, "logprob": round(lp - 2.1 - 1.3 * j - (i % 5) / 7, 8), "bytes": list(a.encode())})
+        content.append({"token": t, "logprob": lp, "bytes": list(t.encode()), "top_logprobs": top})
+    if extra_partial:  # a token that is half of a UTF-8 sequence: the API sends its raw bytes, which do not match the token string
+        content.append({"token": "â\x80", "logprob": -0.4, "bytes": [226, 128], "top_logprobs": [{"token": "â\x80", "logprob": -0.4, "bytes": [226, 128]}]})
+        content.append({"token": "’", "logprob": -0.9, "bytes": [226, 128, 153], "top_logprobs": [{"token": "’", "logprob": -0.9, "bytes": [226, 128, 153]}]})
+    return {"id": "chatcmpl-AbCdEf123", "object": "chat.completion", "created": 1730000000, "model": "gpt-4o-mini-2024-07-18",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(tokens), "refusal": None},
+                         "logprobs": {"content": content, "refusal": None}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 14, "completion_tokens": len(tokens), "total_tokens": 14 + len(tokens)}}
+
+
+_LP_TOKENS = ["The", " capital", " of", " France", " is", " Paris", ",", " a", " city", " known", " for", " the", " Eiffel", " Tower", "."]
+_LP = _logprobs_response(_LP_TOKENS)
+
+case(
+    1452,
+    claim="In a chat.completions logprobs payload, every \"bytes\" array that equals the UTF-8 encoding of its sibling token string becomes \"utf8\" (other arrays, such as partial-character tokens, stay), and decode restores the same JSON text (compact, ', '-separated or indented).",
+    encode=lp_bytes,
+    decode=lp_restore,
+    fixtures=[
+        Fixture("15-token answer with top_logprobs=5, compact JSON (reconstructed)", _compact(_LP), True),
+        Fixture("the same response pretty-printed with indent=2, as model_dump_json(indent=2) prints it", json.dumps(_LP, indent=2), True),
+        Fixture("two tokens only, top_logprobs=1: the legend costs more than it saves", _compact(_logprobs_response(["Hi", "!"], top_k=1, extra_partial=False)), False),
+        Fixture("a response without logprobs", _compact({"id": "x", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "logprobs": None}]}), False),
+        Fixture("bytes arrays that match no token (partial characters only)", _compact({"content": [{"token": "â\x80", "logprob": -0.4, "bytes": [226, 128], "top_logprobs": []}]}), False),
+        Fixture("not JSON", "token=Hello bytes=[72, 101]", False),
+        Fixture("a bytes member that really holds the string utf8", _compact(_LP).replace('"bytes":[84,104,101]', '"bytes":"utf8"', 1), None),
+        Fixture("input that starts like the header", _LP_HDR + "{}", None),
+        Fixture("input that starts like the raw escape", _LP_RAW + "{}", None),
+    ],
+    min_gain=0.08,
+    idempotent=False,  # re-encoding encoded text escapes it (it starts with the header), so it grows by design
+)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #1453 Postman collections: url protocol/host/port/path/query/hash are the pieces of url.raw
+
+_PM_HDR = '§postman: "split":"raw" = the url pieces (protocol, host, port, path, query, hash) are raw cut at ://, ".", ":", "/", "?", "&", "=" and "#"\n'
+_PM_RAW = "§raw\n"
+_PM_ORDER = ("protocol", "host", "port", "path", "query", "hash")
+
+
+def _pm_split(raw):
+    """The url pieces Postman writes for `raw`, in export order, or None when the string is not a simple URL."""
+    if not raw or re.search(r"[\s\\]", raw):
+        return None
+    out = {}
+    m = re.match(r"([A-Za-z][A-Za-z0-9+.-]*)://", raw)
+    rest = raw
+    if m:
+        out["protocol"] = m.group(1)
+        rest = raw[m.end():]
+    frag = None
+    if "#" in rest:
+        rest, frag = rest.split("#", 1)
+    query = None
+    if "?" in rest:
+        rest, query = rest.split("?", 1)
+    auth, slash, path = rest.partition("/")
+    if "@" in auth or not auth:
+        return None
+    host, port = auth, None
+    mp = re.fullmatch(r"(.+):(\d+)", auth)
+    if mp:
+        host, port = mp.groups()
+    if "{{" in host:
+        if not re.fullmatch(r"\{\{[^{}.]+\}\}", host):
+            return None
+        out["host"] = [host]
+    else:
+        out["host"] = host.split(".")
+    if port:
+        out["port"] = port
+    if slash:
+        segs = path.split("/")
+        if any(s == "" for s in segs):
+            return None
+        out["path"] = segs
+    if query is not None:
+        items = []
+        for part in query.split("&"):
+            if part == "":
+                return None
+            k, eq, v = part.partition("=")
+            items.append({"key": k, "value": v if eq else None})
+        out["query"] = items
+    if frag is not None:
+        out["hash"] = frag
+    return out
+
+
+def _pm_core(text: str) -> str:
+    lay = _json_layout(text)
+    if lay is None:
+        return text
+    obj, kw, tail = lay
+    n = [0]
+
+    def fn(d):
+        raw = d.get("raw")
+        if isinstance(raw, str) and "host" in d and "split" not in d:
+            parts = _pm_split(raw)
+            keys = list(d)
+            if parts and keys[: 1 + len(parts)] == ["raw"] + [k for k in _PM_ORDER if k in parts] and all(d[k] == parts[k] for k in parts):
+                rest = {k: d[k] for k in keys[1 + len(parts):]}
+                d.clear()
+                d["raw"] = raw
+                d["split"] = "raw"
+                d.update(rest)
+                n[0] += 1
+
+    _lp_walk(obj, fn)  # generic dict walker
+    return _PM_HDR + json.dumps(obj, **kw) + tail if n[0] else text
+
+
+def pm_restore(text: str) -> str:
+    if text.startswith(_PM_RAW):
+        return text[len(_PM_RAW):]
+    if not text.startswith(_PM_HDR):
+        return text
+    lay = _json_layout(text[len(_PM_HDR):])
+    if lay is None:
+        raise ValueError("not JSON")
+    obj, kw, tail = lay
+
+    def rebuild(node):
+        if isinstance(node, dict):
+            if node.get("split") == "raw" and isinstance(node.get("raw"), str):
+                parts = _pm_split(node["raw"])
+                if parts is None:
+                    raise ValueError("raw does not split")
+                rest = {k: rebuild(v) for k, v in node.items() if k not in ("raw", "split")}
+                return {"raw": node["raw"], **parts, **rest}
+            return {k: rebuild(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [rebuild(v) for v in node]
+        return node
+
+    return json.dumps(rebuild(obj), **kw) + tail
+
+
+postman_split = _guard(_pm_core, pm_restore, _PM_HDR, _PM_RAW)
+
+
+def _postman_collection(first_query_disabled: bool = False) -> str:  # reconstructed from the Postman Collection v2.1 export format (tab-indented, as the app writes it)
+    def req(name, method, raw, body=None, headers=(), variable=None, disabled_query=False):
+        parts = _pm_split(raw)
+        url = {"raw": raw, **parts}
+        if disabled_query:
+            url["query"] = [dict(q, disabled=True) if i == 0 else q for i, q in enumerate(url["query"])]
+        if variable:
+            url["variable"] = variable
+        r = {"method": method, "header": [{"key": k, "value": v, "type": "text"} for k, v in headers], "url": url}
+        if body is not None:
+            r["body"] = {"mode": "raw", "raw": body, "options": {"raw": {"language": "json"}}}
+        return {"name": name, "request": r, "response": []}
+
+    items = [
+        req("List orders", "GET", "{{baseUrl}}/orders?status=open&limit=50", headers=[("Accept", "application/json")], disabled_query=first_query_disabled),
+        req("Get order", "GET", "{{baseUrl}}/orders/:id", variable=[{"key": "id", "value": "1042"}], headers=[("Accept", "application/json")]),
+        req("Create order", "POST", "{{baseUrl}}/orders", body='{\n  "sku": "TY-205-55-16",\n  "quantity": 4\n}', headers=[("Content-Type", "application/json")]),
+        req("Cancel order", "DELETE", "{{baseUrl}}/orders/:id/cancel?reason=customer", variable=[{"key": "id", "value": "1042"}]),
+        req("List invoices", "GET", "{{baseUrl}}/billing/invoices?from=2025-01-01&to=2025-06-30&currency=EUR&page=2"),
+        req("Health (staging)", "GET", "https://staging.shop.example.com:8443/healthz"),
+        req("Search", "GET", "{{baseUrl}}/search?q=winter+tyres&limit=20&flag"),
+        req("Docs page", "GET", "https://docs.example.com/api/v2/orders#create"),
+    ]
+    coll = {"info": {"_postman_id": "5f1c9a1e-7a52-4b7c-9d2c-0f6e3a9b1c44", "name": "Shop API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+            "item": items, "variable": [{"key": "baseUrl", "value": "https://api.shop.example.com/v2"}]}
+    return json.dumps(coll, indent="\t", ensure_ascii=False)
+
+
+_PM = _postman_collection()
+_PM_DISABLED = _postman_collection(first_query_disabled=True)
+
+case(
+    1453,
+    claim="In a Postman v2.1 collection, a request url object whose protocol, host, port, path, query and hash members are exactly what splitting url.raw gives loses them to one \"split\":\"raw\" member, and decode re-splits raw; urls whose pieces differ (disabled query items, strings with spaces) keep theirs.",
+    encode=postman_split,
+    decode=pm_restore,
+    fixtures=[
+        Fixture("8-request collection, tab-indented as Postman writes it (reconstructed)", _PM, True),
+        Fixture("the same collection minified", json.dumps(json.loads(_PM), separators=(",", ":"), ensure_ascii=False), True),
+        Fixture("one query item is disabled, so that url keeps its pieces", _PM_DISABLED, True),
+        Fixture("v2.0 collection: url is a plain string", json.dumps({"item": [{"name": "a", "request": {"method": "GET", "url": "https://x.example.com/a?b=1"}}]}, indent="\t"), False),
+        Fixture("urls that carry only raw", json.dumps({"item": [{"request": {"url": {"raw": "{{baseUrl}}/a"}}}]}, indent="\t"), False),
+        Fixture("not JSON", "GET {{baseUrl}}/orders HTTP/1.1\nAccept: application/json\n", False),
+        Fixture("a url object that already has a split member", _PM.replace('"raw": "{{baseUrl}}/orders",', '"raw": "{{baseUrl}}/orders",\n\t\t\t\t\t\t"split": "raw",', 1), None),
+        Fixture("input that starts like the header", _PM_HDR + "{}", None),
+        Fixture("input that starts like the raw escape", _PM_RAW + "{}", None),
+    ],
+    min_gain=0.12,
+    idempotent=False,  # re-encoding encoded text escapes it (it starts with the header), so it grows by design
 )

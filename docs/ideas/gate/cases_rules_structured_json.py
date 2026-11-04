@@ -3780,7 +3780,7 @@ def _diff_events(text: str) -> list:
         meaningful = any(k and k[0] in ("str", "raw") and k[1] in ("+", "-") for k in kinds)
         ctr = [0, 0]
         for k in kinds:
-            if k and k[0] == "ctr":
+            if k and k[0] == "ctr" and k[1] in ("+", "-"):
                 ctr[k[1] == "+"] += 1
         for k in kinds:
             if k is None or k[0] == "ctr":
@@ -3861,4 +3861,570 @@ case(
         Fixture("a notebook hunk that already holds a decoded-looking line", GIT_DIFF_C.replace('+   "execution_count": 4,', '+|x\n+   "execution_count": 4,'), None),
     ],
     min_gain=0.3,
+)
+
+
+# ===============================================================================================================
+# #886 Digest dbt manifest, run_results and catalog JSON reads.
+# manifest: one tab-separated line per node and source (unique_id, resource type, materialization, file, upstream nodes, test name and
+# column); run_results: one line per result (status, time, rows, failures, and the message of anything that did not succeed) plus
+# status counts; catalog: relation, type and column list per node. The full file stays on disk; raw_code, compiled_code, macros, docs,
+# checksums, timing arrays, adapter responses and the parent/child maps are not shown.
+
+DBT_HEAD = re.compile(r"# dbt (manifest|run_results|catalog)(?: (.*))?$")
+_DBT_OK = ("success", "pass")
+
+
+def _dbt_kind(o) -> str | None:
+    v = str(((o.get("metadata") or {}).get("dbt_schema_version")) or "") if isinstance(o, dict) else ""
+    if "manifest" in v and isinstance(o.get("nodes"), dict):
+        return "manifest"
+    if "run-results" in v and isinstance(o.get("results"), list):
+        return "run_results"
+    if "catalog" in v and isinstance(o.get("nodes"), dict):
+        return "catalog"
+    return None
+
+
+def _cell(x) -> str:
+    return _norm(x) if x not in (None, "") else "-"
+
+
+def _manifest_rows(o: dict) -> list[str]:
+    rows = []
+    for uid, n in list(o["nodes"].items()) + list((o.get("sources") or {}).items()):
+        rtype = n.get("resource_type")
+        mat = (n.get("config") or {}).get("materialized") if rtype != "source" else None
+        deps = (n.get("depends_on") or {}).get("nodes", []) if isinstance(n.get("depends_on"), dict) else []
+        extra = {}
+        if (n.get("test_metadata") or {}).get("name"):
+            extra["test"] = n["test_metadata"]["name"]
+        if n.get("column_name"):
+            extra["column"] = n["column_name"]
+        rows.append("\t".join([_cell(uid), _cell(rtype), _cell(mat), _cell(n.get("original_file_path")), jc(deps), jc(extra) if extra else "-"]))
+    return rows
+
+
+def _results_rows(o: dict) -> list[str]:
+    rows = []
+    for r in o["results"]:
+        st = str(r.get("status"))
+        ar = r.get("adapter_response") or {}
+        rows.append("\t".join([_cell(r.get("unique_id")), _cell(st), f"{round(float(r.get('execution_time') or 0), 1)}s", _cell(ar.get("rows_affected")) if isinstance(ar, dict) else "-",
+                               _cell(r.get("failures")), "-" if st in _DBT_OK else _cell(r.get("message"))]))
+    return rows
+
+
+def _catalog_rows(o: dict) -> list[str]:
+    rows = []
+    for uid, n in o["nodes"].items():
+        md = n.get("metadata") or {}
+        cols = sorted((n.get("columns") or {}).values(), key=lambda c: (c.get("index", 0), str(c.get("name"))))
+        rows.append("\t".join([_cell(uid), _cell(".".join(str(md.get(k)) for k in ("database", "schema", "name"))), _cell(md.get("type")), jc([[str(c.get("name")), str(c.get("type"))] for c in cols])]))
+    return rows
+
+
+@total
+def digest_dbt_artifact(text: str) -> str:
+    o = jload(text)
+    kind = _dbt_kind(o)
+    if kind is None:
+        return text
+    ver = _tok((o["metadata"].get("dbt_version")) or "-")
+    if kind == "manifest":
+        rows = _manifest_rows(o)
+        head = f"# dbt manifest dbt={ver} nodes={len(o['nodes'])} sources={len(o.get('sources') or {})}"
+    elif kind == "run_results":
+        rows = _results_rows(o)
+        counts = Counter(str(r.get("status")) for r in o["results"])
+        head = f"# dbt run_results dbt={ver} cmd={_tok((o.get('args') or {}).get('which', '-'))} counts={jc(dict(sorted(counts.items())))}"
+    else:
+        rows = _catalog_rows(o)
+        head = f"# dbt catalog dbt={ver} nodes={len(o['nodes'])}"
+    if any("\n" in x for x in rows):
+        return text
+    return gate(text, "\n".join([head] + rows) + "\n")
+
+
+def probes_886(text: str) -> dict:
+    o = jload(text)
+    kind = _dbt_kind(o) if o is not _BAD else None
+    if kind == "manifest":
+        recs = {}
+        for uid, n in list(o["nodes"].items()) + list((o.get("sources") or {}).items()):
+            rt = n.get("resource_type")
+            deps = (n.get("depends_on") or {}).get("nodes", []) if isinstance(n.get("depends_on"), dict) else []
+            tm = (n.get("test_metadata") or {}).get("name")
+            recs[_cell(uid)] = (_cell(rt), _cell((n.get("config") or {}).get("materialized") if rt != "source" else None), _cell(n.get("original_file_path")), list(deps),
+                                {k: v for k, v in (("test", tm), ("column", n.get("column_name"))) if v})
+        return _manifest_facts(recs, ver=_tok(o["metadata"].get("dbt_version") or "-"))
+    if kind == "run_results":
+        res = [(_cell(r.get("unique_id")), _cell(r.get("status")), f"{round(float(r.get('execution_time') or 0), 1)}s",
+                _cell((r.get("adapter_response") or {}).get("rows_affected")) if isinstance(r.get("adapter_response") or {}, dict) else "-", _cell(r.get("failures")),
+                "-" if str(r.get("status")) in _DBT_OK else _cell(r.get("message"))) for r in o["results"]]
+        return _results_facts(res, _tok((o.get("args") or {}).get("which", "-")), Counter(str(r.get("status")) for r in o["results"]))
+    if kind == "catalog":
+        recs = {}
+        for uid, n in o["nodes"].items():
+            md = n.get("metadata") or {}
+            cols = sorted((n.get("columns") or {}).values(), key=lambda c: (c.get("index", 0), str(c.get("name"))))
+            recs[_cell(uid)] = (_cell(".".join(str(md.get(k)) for k in ("database", "schema", "name"))), _cell(md.get("type")), [[str(c.get("name")), str(c.get("type"))] for c in cols])
+        return {"catalog": recs}
+    lines = [x for x in text.split("\n") if x]
+    h = DBT_HEAD.match(lines[0]) if lines else None
+    if not h:
+        return {"dbt": None}
+    rows = [x.split("\t") for x in lines[1:]]
+    if h.group(1) == "manifest":
+        recs = {r[0]: (r[1], r[2], r[3], json.loads(r[4]), json.loads(r[5]) if r[5] != "-" else {}) for r in rows}
+        return _manifest_facts(recs, ver=re.match(r"dbt=(\S+)", h.group(2)).group(1))
+    if h.group(1) == "run_results":
+        m = re.match(r"dbt=(\S+) cmd=(\S+) counts=(.*)$", h.group(2))
+        return _results_facts([tuple(r) for r in rows], m.group(2), Counter(json.loads(m.group(3))))
+    return {"catalog": {r[0]: (r[1], r[2], json.loads(r[3])) for r in rows}}
+
+
+def _manifest_facts(recs: dict, ver: str) -> dict:
+    down = defaultdict(list)
+    for uid, (_rt, _m, _p, deps, _e) in recs.items():
+        for d in deps:
+            down[d].append(uid)
+    return {"dbt version": ver, "nodes (type, materialization, file, upstream, test/column)": recs,
+            "upstream models of each model": {u: [d for d in r[3] if d.startswith("model.")] for u, r in recs.items() if r[0] == "model"},
+            "downstream of each node": {u: sorted(v) for u, v in down.items()}, "node count per type": sorted(Counter(r[0] for r in recs.values()).items())}
+
+
+def _results_facts(res: list, which: str, counts: Counter) -> dict:
+    return {"command": which, "results (id, status, time, rows, failures, message)": res, "status counts": sorted(counts.items()),
+            "failed or errored": [(r[0], r[1], r[5]) for r in res if r[1] not in _DBT_OK and r[1] != "skipped"], "skipped": [r[0] for r in res if r[1] == "skipped"]}
+
+
+_SQL = "with source as (\n    select * from {{ source('raw', 'orders') }}\n),\nrenamed as (\n    select id as order_id, customer_id, status, amount_cents / 100.0 as amount, created_at from source\n)\nselect * from renamed\n"
+
+
+def _dbt_manifest() -> str:
+    nodes, parents = {}, {}
+    models = ["stg_orders", "stg_customers", "stg_payments", "orders", "customers", "order_items", "revenue_daily", "ltv", "churn", "marts_finance", "marts_growth", "dim_dates"]
+    for i, m in enumerate(models):
+        uid = f"model.shop.{m}"
+        deps = [] if m.startswith("stg_") else [f"model.shop.{models[(i * 3) % 3]}", f"model.shop.{models[(i + 1) % 3]}"] + ([f"model.shop.{models[3]}"] if i > 5 else [])
+        deps = list(dict.fromkeys(deps)) + ([f"source.shop.raw.{m[4:]}"] if m.startswith("stg_") else [])
+        nodes[uid] = {"database": "analytics", "schema": "public", "name": m, "resource_type": "model", "package_name": "shop", "path": f"{'staging' if m.startswith('stg_') else 'marts'}/{m}.sql", "original_file_path": f"models/{'staging' if m.startswith('stg_') else 'marts'}/{m}.sql",
+                      "unique_id": uid, "fqn": ["shop", m], "alias": m, "checksum": {"name": "sha256", "checksum": hexid(i, 64, "ck").lower()}, "config": {"enabled": True, "alias": None, "schema": None, "database": None, "tags": ["daily"], "meta": {}, "group": None,
+                      "materialized": "view" if m.startswith("stg_") else "incremental" if m in ("order_items", "revenue_daily") else "table", "incremental_strategy": None, "persist_docs": {}, "post-hook": [], "pre-hook": [], "quoting": {}, "column_types": {}, "full_refresh": None, "unique_key": None,
+                      "on_schema_change": "ignore", "on_configuration_change": "apply", "grants": {}, "packages": [], "docs": {"show": True, "node_color": None}, "contract": {"enforced": False, "alias_types": True}}, "tags": ["daily"], "description": f"{m} model. " * 10, "columns": {c: {"name": c, "description": f"The {c} of the order. " * 4, "meta": {}, "data_type": None, "constraints": [], "quote": None, "tags": []} for c in ("order_id", "customer_id", "status", "amount")},
+                      "meta": {}, "group": None, "docs": {"show": True, "node_color": None}, "patch_path": f"shop://models/schema.yml", "build_path": None, "deferred": False, "unrendered_config": {"materialized": "table"}, "created_at": 1730000000.5, "relation_name": f'"analytics"."public"."{m}"',
+                      "raw_code": _SQL * 3, "language": "sql", "refs": [], "sources": [], "metrics": [], "depends_on": {"macros": ["macro.dbt.is_incremental", "macro.dbt.ref"], "nodes": deps}, "compiled_path": None, "compiled": True, "compiled_code": _SQL * 3, "extra_ctes_injected": True, "extra_ctes": [], "contract": {"enforced": False}}
+        parents[uid] = deps
+    for i, (m, col, t) in enumerate([("orders", "order_id", "unique"), ("orders", "order_id", "not_null"), ("customers", "customer_id", "unique"), ("stg_payments", "amount", "not_null"), ("ltv", "customer_id", "unique"), ("dim_dates", "date_day", "not_null")]):
+        uid = f"test.shop.{t}_{m}_{col}.{hexid(i, 10, 'tt').lower()}"
+        nodes[uid] = {"database": "analytics", "schema": "public_dbt_test__audit", "name": f"{t}_{m}_{col}", "resource_type": "test", "package_name": "shop", "path": f"{t}_{m}_{col}.sql", "original_file_path": "models/marts/schema.yml", "unique_id": uid,
+                      "config": {"enabled": True, "severity": "ERROR", "materialized": "test", "tags": [], "meta": {}, "fail_calc": "count(*)", "warn_if": "!= 0", "error_if": "!= 0"}, "column_name": col, "test_metadata": {"name": t, "kwargs": {"column_name": col, "model": f"{{{{ get_where_subquery(ref('{m}')) }}}}"}, "namespace": None},
+                      "raw_code": "{{ test_" + t + "(**_dbt_generic_test_kwargs) }}" * 4, "compiled_code": "select * from analytics.public." + m + " where " + col + " is null", "depends_on": {"macros": ["macro.dbt.test_" + t], "nodes": [f"model.shop.{m}"]}, "checksum": {"name": "none", "checksum": ""}}
+    nodes["seed.shop.countries"] = {"resource_type": "seed", "unique_id": "seed.shop.countries", "name": "countries", "original_file_path": "seeds/countries.csv", "config": {"materialized": "seed", "tags": []}, "raw_code": "", "depends_on": {"macros": [], "nodes": []}}
+    sources = {f"source.shop.raw.{s}": {"resource_type": "source", "unique_id": f"source.shop.raw.{s}", "source_name": "raw", "name": s, "database": "raw", "schema": "public", "loader": "fivetran", "original_file_path": "models/staging/sources.yml", "columns": {}, "freshness": {"warn_after": {"count": 12, "period": "hour"}}} for s in ("orders", "customers", "payments")}
+    macros = {f"macro.dbt.macro_{k}": {"name": f"macro_{k}", "resource_type": "macro", "package_name": "dbt", "path": f"macros/m{k}.sql", "original_file_path": f"macros/m{k}.sql", "unique_id": f"macro.dbt.macro_{k}", "macro_sql": "{% macro macro_" + str(k) + "(relation, columns) %}\n" + "    select {{ columns | join(', ') }} from {{ relation }} where 1=1\n" * 12 + "{% endmacro %}", "depends_on": {"macros": []}, "docs": {"show": True}, "arguments": []} for k in range(30)}
+    child = defaultdict(list)
+    for u, ds in parents.items():
+        for d in ds:
+            child[d].append(u)
+    return jp({"metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v11.json", "dbt_version": "1.7.4", "generated_at": "2025-03-02T09:00:00.000000Z", "invocation_id": "5b0c4a1e-2f6b-4d1c-9a3a-0c1f7d0f1a22", "env": {}, "project_name": "shop", "adapter_type": "postgres"},
+               "nodes": nodes, "sources": sources, "macros": macros, "docs": {}, "exposures": {}, "metrics": {}, "groups": {}, "selectors": {}, "disabled": {}, "parent_map": parents, "child_map": dict(child), "group_map": {}, "saved_queries": {}, "semantic_models": {}})
+
+
+def _dbt_run_results() -> str:
+    r = rng(14)
+    res = []
+    ids = [f"test.shop.unique_orders_order_id.{hexid(1, 10, 't').lower()}"] + [f"model.shop.{m}" for m in ("stg_orders", "stg_customers", "stg_payments", "orders", "customers", "order_items", "revenue_daily", "ltv", "churn")] + \
+          [f"test.shop.not_null_{c}.{hexid(i, 10, 'n').lower()}" for i, c in enumerate(("orders_id", "customers_id", "payments_amount", "ltv_customer"))] + ["model.shop.marts_finance", "model.shop.marts_growth", "test.shop.unique_ltv_customer_id.77aa88bb99"]
+    for i, uid in enumerate(ids):
+        status = "success" if uid.startswith("model") else "pass"
+        msg = "CREATE VIEW" if uid.startswith("model") else None
+        failures = 0 if uid.startswith("test") else None
+        if i == 0:
+            status, failures, msg = "fail", 3, "Got 3 results, configured to fail if != 0"  # a failing test first
+        if uid == "model.shop.order_items":
+            status, msg = "error", 'Database Error in model order_items (models/marts/order_items.sql)\n  column "amount_cents" does not exist\n  LINE 5: amount_cents / 100.0 as amount'  # a runtime error in the middle
+        if uid == "test.shop.not_null_payments_amount.%s" % hexid(2, 10, "n").lower():
+            status, failures, msg = "warn", 12, "Got 12 results, configured to warn if != 0"
+        if i >= len(ids) - 3:
+            status, msg, failures = "skipped", "SKIPPED" if uid.startswith("model") else "SKIPPED due to upstream failure", None  # skipped at the end
+        res.append({"status": status, "timing": [{"name": "compile", "started_at": "2025-03-02T09:00:01.100000Z", "completed_at": "2025-03-02T09:00:01.150000Z"}, {"name": "execute", "started_at": "2025-03-02T09:00:01.160000Z", "completed_at": "2025-03-02T09:00:02.400000Z"}],
+                    "thread_id": f"Thread-{i % 4 + 1} (worker)", "execution_time": 0.1 + r.random() * 3, "adapter_response": {"_message": "SELECT 1500" if status == "success" else "SELECT 0", "code": "SELECT", "rows_affected": 1500 if status == "success" else 0},
+                    "message": msg, "failures": failures, "unique_id": uid, "compiled": True, "compiled_code": _SQL * 2, "relation_name": f'"analytics"."public"."{uid.split(".")[2]}"', "batch_results": None})
+    return jc({"metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v5.json", "dbt_version": "1.7.4", "generated_at": "2025-03-02T09:00:03.000000Z", "invocation_id": "5b0c4a1e", "env": {}}, "results": res, "elapsed_time": 5.2,
+               "args": {"which": "build", "select": [], "exclude": [], "threads": 4, "target": "dev", "profiles_dir": "/home/dev/.dbt", "vars": {}, "state": None, "log_format": "default"}})
+
+
+def _dbt_catalog() -> str:
+    nodes = {f"model.shop.{m}": {"metadata": {"type": "BASE TABLE" if i % 2 else "VIEW", "schema": "public", "name": m, "database": "analytics", "comment": None, "owner": "dbt"},
+                                 "columns": {c: {"type": t, "index": k + 1, "name": c, "comment": None} for k, (c, t) in enumerate([("order_id", "integer"), ("customer_id", "integer"), ("status", "text"), ("amount", "numeric"), ("created_at", "timestamp without time zone")])},
+                                 "stats": {"has_stats": {"id": "has_stats", "label": "Has Stats?", "value": False, "include": False, "description": "Indicates whether there are statistics for this table"}}, "unique_id": f"model.shop.{m}"}
+             for i, m in enumerate(["stg_orders", "orders", "customers", "ltv"])}
+    return jp({"metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json", "dbt_version": "1.7.4", "generated_at": "2025-03-02T09:05:00.000000Z", "invocation_id": "5b0c4a1e", "env": {}}, "nodes": nodes, "sources": {}, "errors": None})
+
+
+case(
+    886,
+    claim="A dbt manifest becomes one line per node and source (type, materialization, file, upstream nodes, test name and column), run_results one line per result with status, time, rows, failures and the message of every non-success (plus status counts and command), and catalog one line per relation with its columns; the upstream and downstream models of every node, every failing or erroring test with its message, skipped nodes and status counts are unchanged.",
+    loses="raw_code, compiled_code, macros, docs, exposures, checksums, config keys other than materialized, column descriptions, parent_map/child_map (derivable from depends_on), timing arrays, adapter responses, thread ids, catalog stats and column comments, success messages, and JSON whitespace; the full artifact stays on disk",
+    encode=digest_dbt_artifact,
+    probes=safe_probes(probes_886),
+    fixtures=lambda: [
+        Fixture("manifest.json: 12 models, 6 tests, a seed, 3 sources, 30 macros", _dbt_manifest(), True),
+        Fixture("run_results.json of dbt build: failing test first, error in the middle, warn, skipped last", _dbt_run_results(), True),
+        Fixture("catalog.json", _dbt_catalog(), True),
+        Fixture("dbt_project.yml as JSON is not an artifact", jp({"name": "shop", "version": "1.0.0", "profile": "shop", "model-paths": ["models"]}), False),
+        Fixture("package.json", PACKAGE_JSON, False),
+        Fixture("input that starts like a digest", "# dbt catalog dbt=1 nodes=0\n", None),
+    ],
+    min_gain=0.5,
+)
+
+
+# ===============================================================================================================
+# #891 Reassemble SSE and streaming-chunk JSON into final text (OpenAI chat chunks and Anthropic messages events).
+# '[sse <flavour> id=.. model=.. chunks=N]' then text[choice], thinking[block], tool[choice][index] name id: args, finish/stop reason,
+# usage, every error event, and 'end: done|truncated|partial' (with the raw tail of a stream cut mid-event). Text is escaped (\\ and
+# \n). A stream it cannot read completely (bad JSON before the last event, unknown fields, unknown flavour) is left unchanged.
+
+SSE_HEAD = re.compile(r"\[sse (openai|anthropic) id=(\S+) model=(\S+) chunks=(\d+)\]$")
+
+
+def _esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+class _NoSse(Exception):
+    pass
+
+
+def _sse_events(text: str):
+    """[(event name, data string, raw non-empty lines)] in order; raises _NoSse on anything that is not plain SSE."""
+    if "\r" in text:
+        raise _NoSse
+    events = []
+    for piece in text.split("\n\n"):
+        lines = [x for x in piece.split("\n") if x != ""]
+        name, data = None, []
+        for x in lines:
+            if x.startswith(":"):
+                continue
+            field, _, val = x.partition(":")
+            val = val[1:] if val.startswith(" ") else val
+            if field == "event":
+                name = val
+            elif field == "data":
+                data.append(val)
+            elif field not in ("id", "retry"):
+                raise _NoSse
+        if data or name:
+            events.append((name, "\n".join(data), lines))
+    if not events:
+        raise _NoSse
+    return events
+
+
+def _tool_line(c, i, t) -> str:
+    return f"tool[{c}][{i}] {_tok(t.get('name'))} {_tok(t.get('id'))}: {_esc(t.get('args', ''))}"
+
+
+@total
+def reassemble_sse(text: str) -> str:
+    events = _sse_events(text)
+    chunks, done, partial = [], False, None
+    for k, (name, data, lines) in enumerate(events):
+        if data == "[DONE]":
+            done = True
+            continue
+        j = jload(data) if data else {}
+        if j is _BAD:
+            if k != len(events) - 1:
+                return text
+            partial = "\n".join(lines)
+            continue
+        if not isinstance(j, dict):
+            return text
+        chunks.append((name, j))
+    if not chunks:
+        return text
+    openai = any("choices" in j or str(j.get("object", "")).startswith("chat.completion") for _n, j in chunks)
+    anth = any((n or j.get("type")) in ("message_start", "content_block_delta", "message_delta") for n, j in chunks)
+    if openai == anth:
+        return text
+    meta, texts, tools, finish, usage, errors = {}, {}, {}, {}, {}, []
+    blocks: dict[int, dict] = {}
+    for name, j in chunks:
+        if openai:
+            if "error" in j and "choices" not in j:
+                errors.append(jc(j["error"]))
+                continue
+            for key in ("id", "model", "created"):
+                if key not in meta and j.get(key) is not None:
+                    meta[key] = j[key]
+            if isinstance(j.get("usage"), dict):
+                usage = j["usage"]
+            for ch in j.get("choices") or []:
+                c = ch.get("index", 0)
+                d = ch.get("delta") or {}
+                if isinstance(d.get("content"), str):
+                    texts[c] = texts.get(c, "") + d["content"]
+                for tc in d.get("tool_calls") or []:
+                    t = tools.setdefault((c, tc.get("index", 0)), {"args": ""})
+                    fn = tc.get("function") or {}
+                    if tc.get("id"):
+                        t["id"] = tc["id"]
+                    if fn.get("name"):
+                        t["name"] = fn["name"]
+                    t["args"] += fn.get("arguments") or ""
+                if ch.get("finish_reason"):
+                    finish[c] = ch["finish_reason"]
+        else:
+            typ = name or j.get("type")
+            if typ == "message_start":
+                msg = j.get("message") or {}
+                meta = {"id": msg.get("id"), "model": msg.get("model")}
+                usage.update(msg.get("usage") or {})
+            elif typ == "content_block_start":
+                cb = j.get("content_block") or {}
+                blocks[j.get("index", 0)] = {"kind": cb.get("type", "text"), "id": cb.get("id"), "name": cb.get("name"), "buf": cb.get("text", "") if cb.get("type") == "text" else ""}
+            elif typ == "content_block_delta":
+                b = blocks.setdefault(j.get("index", 0), {"kind": "text", "id": None, "name": None, "buf": ""})
+                d = j.get("delta") or {}
+                b["buf"] += d.get("text") or d.get("partial_json") or d.get("thinking") or ""
+            elif typ == "message_delta":
+                if (j.get("delta") or {}).get("stop_reason"):
+                    finish[0] = j["delta"]["stop_reason"]
+                usage.update(j.get("usage") or {})
+            elif typ == "error":
+                errors.append(jc(j.get("error")))
+            elif typ == "message_stop":
+                done = True
+    flavour = "openai" if openai else "anthropic"
+    out = [f"[sse {flavour} id={_tok(meta.get('id'))} model={_tok(meta.get('model'))} chunks={len(chunks)}]"]
+    if openai:
+        out[0] = out[0].replace(f"chunks={len(chunks)}", f"created={_tok(meta.get('created'))} chunks={len(chunks)}")
+        out += [f"text[{c}]: {_esc(t)}" for c, t in sorted(texts.items())]
+        out += [_tool_line(c, i, t) for (c, i), t in sorted(tools.items())]
+        out += [f"finish[{c}]: {_tok(r)}" for c, r in sorted(finish.items())]
+    else:
+        for i, b in sorted(blocks.items()):
+            if b["kind"] == "text":
+                out.append(f"text[{i}]: {_esc(b['buf'])}")
+            elif b["kind"] == "thinking":
+                out.append(f"thinking[{i}]: {_esc(b['buf'])}")
+            else:
+                out.append(f"tool[{i}] {_tok(b['name'])} {_tok(b['id'])}: {_esc(b['buf'])}")
+        out += [f"stop: {_tok(finish[0])}"] if 0 in finish else []
+    if usage:
+        out.append("usage: " + jc(usage))
+    out += [f"error: {e}" for e in errors]
+    out.append("end: " + ("partial" if partial is not None else "done" if done else "truncated"))
+    if partial is not None:
+        out.append("partial: " + _esc(partial))
+    return gate(text, "\n".join(out) + "\n")
+
+
+class _SseReader:
+    """Probe-side SSE reader: a line-by-line state machine with the same accumulation rules, written independently of the encoder."""
+
+    def __init__(self, text: str):
+        self.items, self.pending, self.name, self.data = [], [], None, []
+        for ln in text.split("\n"):
+            if ln == "":
+                self._dispatch()
+            else:
+                self.pending.append(ln)
+                if ln.startswith("event:"):
+                    self.name = ln[6:].removeprefix(" ")
+                elif ln.startswith("data:"):
+                    self.data.append(ln[5:].removeprefix(" "))
+        self._dispatch()
+
+    def _dispatch(self):
+        if self.name is not None or self.data:
+            self.items.append((self.name, "\n".join(self.data), "\n".join(self.pending)))
+        self.pending, self.name, self.data = [], None, []
+
+
+def probes_891(text: str) -> dict:
+    if text.startswith("[sse "):
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        m = SSE_HEAD.match(re.sub(r" created=\S+", "", lines[0]))
+        created = re.search(r" created=(\S+)", lines[0])
+        out = {"flavour": m.group(1), "id": m.group(2), "model": m.group(3), "chunks": int(m.group(4)), "created": created.group(1) if created else None,
+               "text": {}, "tools": {}, "finish": {}, "usage": None, "errors": [], "end": None, "partial": None}
+        for ln in lines[1:]:
+            if t := re.match(r"text\[(\d+)\]: (.*)$", ln):
+                out["text"][int(t.group(1))] = t.group(2)
+            elif t := re.match(r"thinking\[(\d+)\]: (.*)$", ln):
+                out["text"][f"thinking {t.group(1)}"] = t.group(2)
+            elif t := re.match(r"tool\[(\d+)\]\[(\d+)\] (\S+) (\S+): (.*)$", ln):
+                out["tools"][(int(t.group(1)), int(t.group(2)))] = (t.group(3), t.group(4), t.group(5))
+            elif t := re.match(r"tool\[(\d+)\] (\S+) (\S+): (.*)$", ln):
+                out["tools"][(0, int(t.group(1)))] = (t.group(2), t.group(3), t.group(4))
+            elif t := re.match(r"(?:finish\[(\d+)\]|stop): (\S+)$", ln):
+                out["finish"][int(t.group(1) or 0)] = t.group(2)
+            elif ln.startswith("usage: "):
+                out["usage"] = json.loads(ln[7:])
+            elif ln.startswith("error: "):
+                out["errors"].append(json.loads(ln[7:]))
+            elif ln.startswith("end: "):
+                out["end"] = ln[5:]
+            elif ln.startswith("partial: "):
+                out["partial"] = ln[9:]
+        return {"stream": out}
+    if "\r" in text:
+        return {"stream": None}
+    r = _SseReader(text)
+    parsed = []
+    for k, (name, data, raw) in enumerate(r.items):
+        if data == "[DONE]":
+            parsed.append(("done", None, None))
+            continue
+        try:
+            j = json.loads(data) if data else {}
+        except ValueError:
+            if k == len(r.items) - 1:
+                parsed.append(("partial", raw, None))
+                continue
+            return {"stream": None}
+        if not isinstance(j, dict):
+            return {"stream": None}
+        parsed.append(("event", name, j))
+    evs = [(n, j) for kind, n, j in parsed if kind == "event"]
+    if not evs:
+        return {"stream": None}
+    is_openai = any("choices" in j or str(j.get("object", "")).startswith("chat.completion") for _n, j in evs)
+    is_anth = any((n or j.get("type")) in ("message_start", "content_block_delta", "message_delta") for n, j in evs)
+    if is_openai == is_anth:
+        return {"stream": None}
+    out = {"flavour": "openai" if is_openai else "anthropic", "chunks": len(evs), "text": {}, "tools": {}, "finish": {}, "usage": None, "errors": [], "end": None, "partial": None, "created": None}
+    meta, usage, ordered, bufs = {}, {}, [], {}
+    for n, j in evs:
+        if is_openai:
+            if "error" in j and "choices" not in j:
+                out["errors"].append(j["error"])
+                continue
+            for key in ("id", "model", "created"):
+                if meta.get(key) is None and j.get(key) is not None:
+                    meta[key] = j[key]
+            if isinstance(j.get("usage"), dict):
+                usage = j["usage"]
+            for ch in j.get("choices") or []:
+                c = ch.get("index", 0)
+                d = ch.get("delta") or {}
+                if isinstance(d.get("content"), str):
+                    out["text"][c] = out["text"].get(c, "") + d["content"]
+                for tc in d.get("tool_calls") or []:
+                    slot = bufs.setdefault((c, tc.get("index", 0)), {"name": None, "id": None, "args": ""})
+                    f = tc.get("function") or {}
+                    slot["id"] = tc.get("id") or slot["id"]
+                    slot["name"] = f.get("name") or slot["name"]
+                    slot["args"] += f.get("arguments") or ""
+                if ch.get("finish_reason"):
+                    out["finish"][c] = ch["finish_reason"]
+        else:
+            typ = n or j.get("type")
+            if typ == "message_start":
+                meta = {"id": (j.get("message") or {}).get("id"), "model": (j.get("message") or {}).get("model")}
+                usage = {**usage, **((j.get("message") or {}).get("usage") or {})}
+            elif typ == "content_block_start":
+                cb = j.get("content_block") or {}
+                bufs[j.get("index", 0)] = {"kind": cb.get("type", "text"), "name": cb.get("name"), "id": cb.get("id"), "buf": cb.get("text", "") if cb.get("type") == "text" else ""}
+            elif typ == "content_block_delta":
+                slot = bufs.setdefault(j.get("index", 0), {"kind": "text", "name": None, "id": None, "buf": ""})
+                d = j.get("delta") or {}
+                slot["buf"] += d.get("text") or d.get("partial_json") or d.get("thinking") or ""
+            elif typ == "message_delta":
+                if (j.get("delta") or {}).get("stop_reason"):
+                    out["finish"][0] = j["delta"]["stop_reason"]
+                usage = {**usage, **(j.get("usage") or {})}
+            elif typ == "error":
+                out["errors"].append(j.get("error"))
+    if is_openai:
+        out["tools"] = {k: (_tok(v["name"]), _tok(v["id"]), _esc(v["args"])) for k, v in bufs.items()}
+        out["created"] = _tok(meta.get("created"))
+    else:
+        for i, b in bufs.items():
+            if b["kind"] == "text":
+                out["text"][i] = b["buf"]
+            elif b["kind"] == "thinking":
+                out["text"][f"thinking {i}"] = b["buf"]
+            else:
+                out["tools"][(0, i)] = (_tok(b["name"]), _tok(b["id"]), _esc(b["buf"]))
+        out["created"] = None
+    out["text"] = {k: _esc(v) for k, v in out["text"].items()}
+    out.update(id=_tok(meta.get("id")), model=_tok(meta.get("model")), usage=usage or None)
+    kinds = [k for k, _a, _b in parsed]
+    out["end"] = "partial" if "partial" in kinds else "done" if ("done" in kinds or any((n or j.get("type")) == "message_stop" for n, j in evs)) else "truncated"
+    out["partial"] = _esc(next((a for k, a, _b in parsed if k == "partial"), None)) if "partial" in kinds else None
+    return {"stream": out}
+
+
+def _openai_stream(text: str, tool: bool = False, error_at: int | None = None, cut: int | None = None) -> str:
+    base = {"id": "chatcmpl-9XkQ2LwVdE3a", "object": "chat.completion.chunk", "created": 1715000000, "model": "gpt-4o-2024-05-13", "system_fingerprint": "fp_80a1bad4c7"}
+    chunk = lambda delta, fr=None: jc({**base, "choices": [{"index": 0, "delta": delta, "logprobs": None, "finish_reason": fr}]})  # noqa: E731
+    out = [chunk({"role": "assistant", "content": ""})] if not tool else [chunk({"role": "assistant", "content": None, "tool_calls": [{"index": 0, "id": "call_Zk3", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]})]
+    if tool:
+        for frag in ['{"ci', 'ty": "Par', 'is", "un', 'it": "c"}']:
+            out.append(chunk({"tool_calls": [{"index": 0, "function": {"arguments": frag}}]}))
+        out.append(chunk({"tool_calls": [{"index": 1, "id": "call_Qm9", "type": "function", "function": {"name": "get_time", "arguments": '{"tz": "CET"}'}}]}))
+    else:
+        words = text.split(" ")
+        for i, w in enumerate(words):
+            out.append(chunk({"content": w + (" " if i < len(words) - 1 else "")}))
+    out.append(chunk({}, "tool_calls" if tool else "stop"))
+    out.append(jc({**base, "choices": [], "usage": {"prompt_tokens": 31, "completion_tokens": len(out), "total_tokens": 31 + len(out)}}))
+    events = [f"data: {c}\n\n" for c in out]
+    if error_at is not None:
+        events = events[:error_at] + ['data: {"error": {"message": "The server had an error while processing your request. Sorry about that!", "type": "server_error", "code": null}}\n\n']
+    else:
+        events.append("data: [DONE]\n\n")
+    s = "".join(events)
+    return s[:cut] if cut else s
+
+
+_PROSE = ("Paris is the capital of France, and the weather there is mild in spring: highs near 18 degrees, \"light\" rain on some days.\nPack a jacket, an umbrella \u2602 and comfortable shoes; "
+          "the Metro runs until 1am. C:\\temp is not a Paris path. Enjoy! " * 3).strip()
+
+
+def _anthropic_stream() -> str:
+    ev = lambda name, d: f"event: {name}\ndata: {jc(d)}\n\n"  # noqa: E731
+    out = [ev("message_start", {"type": "message_start", "message": {"id": "msg_01XFDUDYJgAACzvnptvVoYEL", "type": "message", "role": "assistant", "model": "claude-3-5-sonnet-20241022", "content": [], "stop_reason": None, "usage": {"input_tokens": 25, "output_tokens": 1}}}),
+           ev("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}), ev("ping", {"type": "ping"})]
+    for w in ["The user wants", " the weather", " in Paris."]:
+        out.append(ev("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": w}}))
+    out += [ev("content_block_stop", {"type": "content_block_stop", "index": 0}), ev("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}})]
+    for w in _PROSE.split(" ")[:40]:
+        out.append(ev("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": w + " "}}))
+    out += [ev("content_block_stop", {"type": "content_block_stop", "index": 1}), ev("content_block_start", {"type": "content_block_start", "index": 2, "content_block": {"type": "tool_use", "id": "toolu_01A09q90qw90lq917835lq9", "name": "get_weather", "input": {}}})]
+    for frag in ['{"loc', 'ation": "Par', 'is, FR"}']:
+        out.append(ev("content_block_delta", {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": frag}}))
+    out += [ev("content_block_stop", {"type": "content_block_stop", "index": 2}), ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": {"output_tokens": 112}}), ev("message_stop", {"type": "message_stop"})]
+    return "".join(out)
+
+
+_CURL_I = "HTTP/2 200 \r\ncontent-type: text/event-stream\r\n\r\n" + _openai_stream("hi there", cut=None).replace("\n", "\r\n")
+
+case(
+    891,
+    claim="OpenAI chat-completion chunk streams and Anthropic message event streams become a header (flavour, id, model, created, chunk count), the concatenated text per choice or block (escaped), tool calls with name, id and joined arguments, finish or stop reason, usage, every error event, and 'end: done|truncated|partial' with the raw tail of a stream cut mid-event; the text, tool arguments, reasons, usage, errors and end state are unchanged.",
+    loses="the per-chunk boundaries and timing, logprobs, system_fingerprint, role deltas, Anthropic ping events and block-stop events, event ids and comments, the exact interleaving of text and tool-call fragments, and the first-chunk fields other than id, model and created; streams with a bad JSON event before the last, CRLF framing, unknown fields or an unknown flavour are left unchanged",
+    encode=reassemble_sse,
+    probes=safe_probes(probes_891),
+    fixtures=lambda: [
+        Fixture("OpenAI text stream, 66 chunks (newline, quotes, backslash, unicode in the text), usage chunk, [DONE]", _openai_stream(_PROSE), True),
+        Fixture("OpenAI tool-call stream with two calls", _openai_stream("", tool=True), True),
+        Fixture("Anthropic stream: thinking, text, tool_use, pings, message_stop", _anthropic_stream(), True),
+        Fixture("OpenAI stream that ends in an error event, no [DONE]", _openai_stream(_PROSE, error_at=30), True),
+        Fixture("OpenAI stream cut in the middle of a data line", _openai_stream(_PROSE, cut=1500), True),
+        Fixture("non-stream chat completion JSON", jc({"id": "chatcmpl-1", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]}), False),
+        Fixture("curl -i output with CRLF framing", _CURL_I, False),
+        Fixture("another SSE protocol", "event: tick\ndata: 1\n\nevent: tick\ndata: 2\n\n", False),
+        Fixture("input that starts like the output", "[sse openai id=x model=y chunks=1]\ntext[0]: hi\nend: done\n", None),
+    ],
+    min_gain=0.5,
 )

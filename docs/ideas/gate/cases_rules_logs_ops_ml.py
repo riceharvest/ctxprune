@@ -3645,3 +3645,365 @@ case(
     ],
     min_gain=0.2,
 )
+
+
+# ===============================================================================================================
+# #1069 Regroup monorepo runner output (turbo '  pkg:task: line'): fold quiet cache-hit replays, hoist the prefix of quiet runs.
+#
+# A task whose log has a 'cache hit, ...' line, 3+ lines and no line with error/fail/warn/exception/traceback is replaced, at its
+# first line, by that cache-hit line plus ' [N lines folded]'. A run of 3+ consecutive lines of any other task without such a
+# word becomes 'pkg:task:' followed by the bodies indented by a tab. A task with an alarm word keeps every line with its
+# prefix. Unprefixed lines (header, Tasks/Cached/Time summary, ERROR run failed) are verbatim. Hoisting is skipped when the
+# text already has an unprefixed line that starts with a tab or looks like a run header.
+
+_TB_KEY = r"(@?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?):([A-Za-z0-9_.:-]+)"
+_TB_LINE = re.compile(rf"^{_TB_KEY}: (.*)$", A)
+_TB_HDR = re.compile(rf"^{_TB_KEY}:$", A)
+_TB_ALARM = re.compile(r"error|fail|warn|exception|traceback|✖|✗|×", re.I | re.A)
+_M1069 = re.compile(rf"^{_TB_KEY}: (cache hit, .*) \[(\d+) lines folded\]$", A)
+
+
+def regroup_turbo(text: str) -> str:
+    lines, nl = split_nl(text)
+    if any(_M1069.match(l) for l in lines):
+        return text
+    pm = [_TB_LINE.match(l) for l in lines]
+    no_hoist = any(m is None and (l.startswith("\t") or _TB_HDR.match(l)) for l, m in zip(lines, pm))
+    tasks: dict = defaultdict(list)
+    for i, m in enumerate(pm):
+        if m:
+            tasks[(m.group(1), m.group(2))].append(i)
+    fold, quiet = {}, set()
+    for key, idx in tasks.items():
+        bodies = [pm[i].group(3) for i in idx]
+        if any(_TB_ALARM.search(b) for b in bodies):
+            continue
+        quiet.add(key)
+        hit = next((b for b in bodies if b.startswith("cache hit, ")), None)
+        if hit is not None and len(idx) >= 3:
+            fold[key] = f"{key[0]}:{key[1]}: {hit} [{len(idx)} lines folded]"
+    out: list[str] = []
+    i, done = 0, set()
+    while i < len(lines):
+        m = pm[i]
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+        key = (m.group(1), m.group(2))
+        if key in fold:
+            if key not in done:
+                done.add(key)
+                out.append(fold[key])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and pm[j] and (pm[j].group(1), pm[j].group(2)) == key:
+            j += 1
+        if key in quiet and not no_hoist and j - i >= 3:
+            out.append(f"{key[0]}:{key[1]}:")
+            out += ["\t" + pm[k].group(3) for k in range(i, j)]
+        else:
+            out += lines[i:j]
+        i = j
+    return gate(text, join_nl(out, nl))
+
+
+def _tb_key(head: str):
+    """Probe-side 'pkg:task' validation by character class; (pkg, task) or None."""
+    pkg, colon, task = head.partition(":")
+    ok = lambda s, extra: bool(s) and all(c.isascii() and (c.isalnum() or c in extra) for c in s)  # noqa: E731
+    p = pkg[1:] if pkg.startswith("@") else pkg
+    scope, slash, name = p.partition("/")
+    if not colon or not ok(task, "_.:-") or not ok(scope, "_.-") or (slash and not ok(name, "_.-")):
+        return None
+    return pkg, task
+
+
+def _tb_alarm(body: str) -> bool:
+    low = body.lower() if body.isascii() else "".join(c.lower() if c.isascii() else c for c in body)
+    return any(k in low for k in ("error", "fail", "warn", "exception", "traceback")) or any(c in body for c in "✖✗×")
+
+
+def probes_1069(text: str) -> dict:
+    lines, _ = split_nl(text)
+    tasks: dict = defaultdict(lambda: {"n": 0, "bodies": [], "alarm": False, "folded": None})
+    seq: list = []
+    hoist = None
+    for l in lines:
+        if hoist and l.startswith("\t"):
+            t = tasks[hoist]
+            t["n"] += 1
+            t["bodies"].append(l[1:])
+            continue
+        hoist = None
+        if l.endswith(":") and _tb_key(l[:-1]):
+            hoist = _tb_key(l[:-1])
+            continue
+        if l.endswith(" lines folded]") and ": cache hit, " in l and " [" in l:
+            head, _, rest = l.partition(": cache hit, ")
+            k = _tb_key(head)
+            body, _, tail = rest.rpartition(" [")
+            n = tail[: -len(" lines folded]")]
+            if k and isdigits(n):
+                t = tasks[k]
+                t["n"] += int(n)
+                t["folded"] = "cache hit, " + body
+                continue
+        head, sep, body = l.partition(": ")
+        k = _tb_key(head) if sep else None
+        if k:
+            t = tasks[k]
+            t["n"] += 1
+            t["bodies"].append(body)
+            if _tb_alarm(body):
+                t["alarm"] = True
+                seq.append(("alarm", k, body))
+        else:
+            seq.append(("global", l))
+    facts = []
+    for k, t in sorted(tasks.items()):
+        hit = t["folded"] or next((b for b in t["bodies"] if b.startswith("cache hit, ")), None)
+        if t["folded"] is None and hit is not None and not t["alarm"] and t["n"] >= 3:
+            bodies = [hit]  # the encoder folds a quiet cache-hit replay down to its first line and a count
+        elif t["folded"] is not None:
+            bodies = [t["folded"]]
+        else:
+            bodies = t["bodies"]
+        facts.append((k, t["n"], hit is not None, t["alarm"], tuple(bodies)))
+    return {
+        "per task: line count, cache hit, any alarm word, bodies kept (a quiet cache hit keeps only its hit line)": facts,
+        "unprefixed lines and alarm lines, in order": seq,
+    }
+
+
+def _turbo_run(mode: str) -> str:
+    pk = ["@acme/config", "@acme/utils", "@acme/ui", "@acme/api", "@acme/web", "@acme/docs"]
+    out = ["• Packages in scope: " + ", ".join(pk), "• Running build in 6 packages", "• Remote caching disabled"]
+    if mode == "fail":
+        out.append("WARNING  no output files found for task @acme/config#build. Please check your `outputs` key in `turbo.json`")
+    logs = {}
+    for p in pk:
+        short = p.split("/")[1]
+        logs[p] = ["", f"> {p}@1.0.0 build /repo/packages/{short}", "> tsc -p tsconfig.build.json", "", f"built {short}: 14 files, 0 diagnostics"]
+    order = []
+    for p in pk:
+        hit = mode == "cached" or (mode == "mixed" and p in ("@acme/config", "@acme/utils", "@acme/ui"))
+        head = f"cache hit, replaying logs 6f2a9c1d{pk.index(p)}b7e" if hit else f"cache miss, executing 6f2a9c1d{pk.index(p)}b7e"
+        body = [head] + logs[p]
+        if mode == "mixed" and p == "@acme/web":
+            body.insert(3, "warn - Using `<img>` could result in slower LCP; consider `next/image`")
+        if mode == "fail" and p == "@acme/api":
+            body = [head, "", "> @acme/api@1.0.0 build /repo/apps/api", "> tsc -p tsconfig.build.json", "", "src/handlers/orders.ts(42,7): error TS2322: Type 'string' is not assignable to type 'number'.",
+                    " ELIFECYCLE  Command failed with exit code 2.", "ERROR: command finished with error: command (/repo/apps/api) pnpm run build exited (2)"]
+        order.append((p, body))
+    # interleave like streaming output: round-robin chunks of 3 lines
+    pos = {p: 0 for p, _ in order}
+    while any(pos[p] < len(b) for p, b in order):
+        for p, b in order:
+            for line in b[pos[p]:pos[p] + 3]:
+                out.append(f"{p}:build: {line}")
+            pos[p] += 3
+    if mode == "fail":
+        out += [" ERROR  run failed: command  exited (2)", " Tasks:    4 successful, 6 total", "Cached:    0 cached, 6 total", "  Time:    8.412s ", "Failed:    @acme/api#build"]
+    else:
+        hits = {"cached": 6, "mixed": 3, "cold": 0}[mode]
+        out += ["", f" Tasks:    6 successful, 6 total", f"Cached:    {hits} cached, 6 total", f"  Time:    {'1.234s >>> FULL TURBO' if mode == 'cached' else '8.412s'} "]
+    return "\n".join(out) + "\n"
+
+
+case(
+    1069,
+    claim="In turbo-style 'pkg:task: line' output, a task whose log is a quiet cache-hit replay folds to its cache-hit line plus a line count, a run of 3+ lines of a quiet task moves its prefix into one 'pkg:task:' header, and any task with an error/fail/warn/exception/traceback word keeps every line verbatim; header lines, the Tasks/Cached/Time summary, ERROR run failed and unprefixed warnings are unchanged and in order.",
+    loses="the bodies of quiet cache-hit replays (only the hit line, hash and line count remain) and the repeated 'pkg:task: ' prefix on quiet runs",
+    encode=regroup_turbo,
+    probes=probes_1069,
+    fixtures=lambda: [
+        Fixture("second run, all 6 tasks cache hits (FULL TURBO)", _turbo_run("cached"), True),
+        Fixture("mixed run: 3 cache hits, 3 executed, a warning in @acme/web", _turbo_run("mixed"), True),
+        Fixture("failure variant: WARNING first, type error in @acme/api in the middle, ERROR run failed last", _turbo_run("fail"), True),
+        Fixture("single package output without prefixes", "> tsc -b\nbuilt 14 files\n", False),
+    ],
+    min_gain=0.1,
+)
+
+
+# ===============================================================================================================
+# #979 nmap NSE blocks: vulners rows, cipher grades, certificate hashes.
+#
+# vulners rows ('|   <tab>ID<tab>score<tab>URL[<tab>*EXPLOIT*]'): the URL goes when it is derivable from the ID (cve/, exploitdb/,
+# packetstorm/), and a run of 2+ rows scored below 7.0 without *EXPLOIT* becomes '[+N entries below 7.0, highest S]'.
+# ssl-enum-ciphers: a run of 2+ consecutive 'TLS_... - A' lines becomes '[N ciphers graded A]'; every other grade, the warnings
+# and 'least strength' stay. ssl-cert: MD5/SHA-1/SHA-256 hash lines are dropped ('|_' ones become '|_[cert hashes omitted]').
+
+_VUL_ROW = re.compile(r"^(\|[_ ] +)\t([^\t]+)\t(\d+(?:\.\d+)?)(?:\t(https://vulners\.com/[^\t]*))?(\t\*EXPLOIT\*)?$", A)
+_CIPHER = re.compile(r"^(\|[_ ] +)(TLS_\S+|SSL_\S+) \((.*)\) - ([A-F])$", A)
+_HASH = re.compile(r"^\|([_ ]) ?(MD5|SHA-1|SHA-256): ", A)
+_M979V = re.compile(r"^(\|[_ ] +)\t\[\+(\d+) entries below 7\.0, highest (\d+\.\d+)\]$", A)
+_M979C = re.compile(r"^(\|[_ ] +)\[(\d+) ciphers graded A\]$", A)
+_HASH_MARK = "|_[cert hashes omitted]"
+_VUL_TYPES = (("CVE-", "cve"), ("EDB-ID:", "exploitdb"), ("PACKETSTORM:", "packetstorm"))
+
+
+def _vul_derivable(vid: str, url: str | None) -> bool:
+    return any(vid.startswith(p) and url == f"https://vulners.com/{t}/{vid}" for p, t in _VUL_TYPES)
+
+
+def prune_nse(text: str) -> str:
+    lines, nl = split_nl(text)
+    if any(_M979V.match(l) or _M979C.match(l) or l == _HASH_MARK for l in lines):
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        l = lines[i]
+        v = _VUL_ROW.match(l)
+        if v:
+            j = i
+            while j < len(lines) and _VUL_ROW.match(lines[j]):
+                j += 1
+            rows = [_VUL_ROW.match(x) for x in lines[i:j]]
+            k = 0
+            while k < len(rows):
+                if float(rows[k].group(3)) < 7.0 and not rows[k].group(5):
+                    e = k
+                    while e < len(rows) and float(rows[e].group(3)) < 7.0 and not rows[e].group(5):
+                        e += 1
+                    if e - k >= 2:
+                        out.append(f"{rows[e - 1].group(1)}\t[+{e - k} entries below 7.0, highest {max((r.group(3) for r in rows[k:e]), key=float)}]")
+                        k = e
+                        continue
+                r = rows[k]
+                drop = _vul_derivable(r.group(2), r.group(4))
+                out.append(f"{r.group(1)}\t{r.group(2)}\t{r.group(3)}" + ("" if drop else f"\t{r.group(4)}" if r.group(4) else "") + (r.group(5) or ""))
+                k += 1
+            i = j
+            continue
+        c = _CIPHER.match(l)
+        if c and c.group(4) == "A":
+            j = i
+            while j < len(lines) and (m := _CIPHER.match(lines[j])) and m.group(4) == "A":
+                j += 1
+            out.append(f"{c.group(1)}[{j - i} ciphers graded A]" if j - i >= 2 else l)
+            i = j
+            continue
+        h = _HASH.match(l)
+        if h:
+            if h.group(1) == "_":
+                out.append(_HASH_MARK)
+            i += 1
+            continue
+        out.append(l)
+        i += 1
+    return gate(text, join_nl(out, nl))
+
+
+def _vul_probe(line: str):
+    """Probe-side vulners row: (kind, id, score, url_or_None, flag) | ('low-marker', n, max) | None, by tab splitting."""
+    p = line.split("\t")
+    if len(p) < 2 or not p[0].startswith("|") or p[0][1:2] not in ("_", " ") or not p[0][2:].strip(" ") == "" or len(p[0]) < 3:
+        return None
+    if len(p) == 2 and p[1].startswith("[+") and p[1].endswith("]") and " entries below 7.0, highest " in p[1]:
+        n, _, mx = p[1][2:-1].partition(" entries below 7.0, highest ")
+        a, dot, b = mx.partition(".")
+        return ("low-marker", int(n), mx) if isdigits(n) and dot and isdigits(a) and isdigits(b) else None
+    if not 3 <= len(p) <= 5 or not p[1]:
+        return None
+    a, dot, b = p[2].partition(".")
+    if not (isdigits(a) and (not dot or isdigits(b))):
+        return None
+    rest = p[3:]
+    flag = bool(rest and rest[-1] == "*EXPLOIT*")
+    if flag:
+        rest = rest[:-1]
+    if len(rest) > 1 or (rest and not rest[0].startswith("https://vulners.com/")):
+        return None
+    url = rest[0] if rest else None
+    if url and any(p[1].startswith(pre) and url == f"https://vulners.com/{t}/{p[1]}" for pre, t in _VUL_TYPES):
+        url = None
+    return ("row", p[1], p[2], url, flag)
+
+
+def probes_979(text: str) -> dict:
+    lines, _ = split_nl(text)
+    keep_rows, low_n, low_max, other = [], 0, None, []
+    version, a_count, non_a = None, Counter(), defaultdict(list)
+    for l in lines:
+        v = _vul_probe(l)
+        if v and v[0] == "low-marker":
+            low_n += v[1]
+            low_max = max(low_max or "0", v[2], key=float)
+            continue
+        if v:
+            if float(v[2]) < 7.0 and not v[4]:
+                low_n += 1
+                low_max = max(low_max or "0", v[2], key=float)
+            else:
+                keep_rows.append(v[1:])
+            continue
+        if l.startswith("|") and l.rstrip(" ").endswith("ciphers graded A]") and "[" in l:
+            pre, _, rest = l.partition("[")
+            n = rest.partition(" ")[0]
+            if pre[1:2] in ("_", " ") and pre[2:].strip(" ") == "" and len(pre) >= 3 and isdigits(n) and rest == f"{n} ciphers graded A]":
+                a_count[version] += int(n)
+                continue
+        if l.startswith("|") and l[1:2] in (" ", "_"):
+            body = l[2:].lstrip(" ")
+            if l[2:].startswith("  TLSv") and body.endswith(": ") or body.rstrip(" ").endswith(":") and body.startswith(("TLSv", "SSLv")):
+                version = body.rstrip(" ").rstrip(":")
+            elif body.startswith(("TLS_", "SSL_")) and " - " in body and body[-1:] in "ABCDEF" and body[-4:-1] == " - " and " (" in body:
+                grade = body[-1]
+                if grade == "A":
+                    a_count[version] += 1
+                else:
+                    non_a[version].append(l)
+                continue
+        if l.startswith("|") and l[1:2] in (" ", "_") and l[2:].lstrip(" ").startswith(("MD5: ", "SHA-1: ", "SHA-256: ")) and len(l[2:]) - len(l[2:].lstrip(" ")) <= 1:
+            continue
+        if l == _HASH_MARK:
+            continue
+        other.append(l)
+    return {
+        "vulners rows scored 7.0 or more, or flagged *EXPLOIT* (id, score, url if not derivable, flag)": keep_rows,
+        "vulners rows below 7.0 without a flag: count and highest score": (low_n, low_max),
+        "ciphers graded A per TLS version": sorted(a_count.items(), key=lambda kv: str(kv[0])),
+        "ciphers graded below A (verbatim lines) per TLS version": sorted(non_a.items(), key=lambda kv: str(kv[0])),
+        "every other line: ports, services, certificate subject/issuer/validity, warnings, least strength": other,
+    }
+
+
+def _nmap_run() -> str:
+    cves = [("CVE-2023-38408", "9.8", "cve", True), ("CVE-2023-51385", "6.5", "cve", False), ("CVE-2018-15473", "5.3", "cve", False), ("EDB-ID:45233", "4.6", "exploitdb", True),
+            ("CVE-2016-10708", "7.5", "cve", False), ("CVE-2018-20685", "5.3", "cve", False), ("CVE-2019-6110", "4.0", "cve", False), ("CVE-2019-6109", "4.0", "cve", False),
+            ("CVE-2018-15919", "5.3", "cve", False), ("PACKETSTORM:173661", "9.8", "packetstorm", True), ("CVE-2020-14145", "5.9", "cve", False), ("CVE-2016-20012", "5.3", "cve", False)]
+    out = ["Starting Nmap 7.94 ( https://nmap.org ) at 2024-03-05 10:15 UTC", "Nmap scan report for web1.example.com (192.0.2.10)", "Host is up (0.00012s latency).", "Not shown: 997 closed tcp ports (reset)",
+           "PORT     STATE SERVICE  VERSION", "22/tcp   open  ssh      OpenSSH 7.4 (protocol 2.0)", "| vulners: ", "|   cpe:/a:openbsd:openssh:7.4: "]
+    for k, (vid, score, typ, expl) in enumerate(cves):
+        pre = "|_      \t" if k == len(cves) - 1 else "|       \t"
+        out.append(f"{pre}{vid}\t{score}\thttps://vulners.com/{typ}/{vid}" + ("\t*EXPLOIT*" if expl else ""))
+    out += ["443/tcp  open  ssl/http nginx 1.14.0", "| ssl-cert: Subject: commonName=web1.example.com", "| Subject Alternative Name: DNS:web1.example.com, DNS:www.example.com",
+            "| Issuer: commonName=R3/organizationName=Let's Encrypt/countryName=US", "| Public Key type: rsa", "| Public Key bits: 2048", "| Signature Algorithm: sha256WithRSAEncryption",
+            "| Not valid before: 2024-02-01T00:00:00", "| Not valid after:  2024-05-01T23:59:59", "| MD5:   2a61 7f0c 1e4d 9b3a 55c2 a0b8 6d11 93ee", "|_SHA-1: 8a2f 11b0 c4d5 7e90 3b1a f2c6 0d7e 5a49 b3c1 e8d2",
+            "| ssl-enum-ciphers: ", "|   TLSv1.0: ", "|     ciphers: ", "|       TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA (secp256r1) - A", "|       TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA (secp256r1) - A",
+            "|       TLS_RSA_WITH_3DES_EDE_CBC_SHA (rsa 2048) - C", "|     compressors: ", "|       NULL", "|     cipher preference: client", "|     warnings: ", "|       64-bit block cipher 3DES vulnerable to SWEET32 attack",
+            "|   TLSv1.2: ", "|     ciphers: "]
+    for name in ("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384"):
+        out.append(f"|       {name} ({'dh 1024' if 'DHE_RSA' in name else 'secp256r1'}) - {'B' if 'DHE_RSA' in name else 'A'}")
+    out += ["|     compressors: ", "|       NULL", "|     cipher preference: server", "|_  least strength: C", "8080/tcp open  http     Jetty 9.4.z-SNAPSHOT", "|_http-title: Dashboard",
+            "", "Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .", "Nmap done: 1 IP address (1 host up) scanned in 12.34 seconds"]
+    return "\n".join(out) + "\n"
+
+
+case(
+    979,
+    claim="In nmap NSE output the derivable vulners.com URL of a CVE/EDB/PACKETSTORM row is dropped, runs of 2+ rows scored below 7.0 without *EXPLOIT* fold to a count and the highest score, runs of 2+ A-graded ciphers fold to a count, and MD5/SHA-1 certificate hash lines are dropped; every row scored 7.0 or more or flagged *EXPLOIT*, every cipher graded B to F with its warnings, 'least strength', the certificate subject/issuer/validity and all port lines are unchanged.",
+    loses="the IDs and scores of vulners rows below 7.0 (count and maximum only), the names of A-graded ciphers (count per TLS version only), the certificate hashes, and the URL of rows whose URL follows the derivation rule",
+    encode=prune_nse,
+    probes=probes_979,
+    fixtures=lambda: [
+        Fixture("nmap -sV --script vulners,ssl-enum-ciphers,ssl-cert: 12 vulners rows, TLS 1.0 with 3DES, TLS 1.2 with DHE grade B", _nmap_run(), True),
+        Fixture("failure variant: scan interrupted after the vulners block", "\n".join(_nmap_run().split("\n")[:24]) + "\nNmap done: 1 IP address (0 hosts up) scanned in 3.10 seconds\n", True),
+        Fixture("plain nmap -sV without scripts", "PORT   STATE SERVICE VERSION\n22/tcp open  ssh     OpenSSH 7.4 (protocol 2.0)\n80/tcp open  http    nginx 1.14.0\n", False),
+    ],
+    min_gain=0.2,
+)

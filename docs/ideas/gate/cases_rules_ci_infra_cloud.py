@@ -3946,6 +3946,124 @@ OUTPUT
           Information about the stopped instances.
 """  # reconstructed from memory
 
+_AWS_RUN = """RUN-INSTANCES()                                                RUN-INSTANCES()
+
+
+
+NAME
+       run-instances -
+
+DESCRIPTION
+       Launches the specified number of instances using an AMI for which you
+       have permissions.
+
+       You can specify a number of options, or leave the default options. The
+       following rules apply:
+
+       o If you don't specify a subnet ID, we choose a default subnet from
+         your default VPC for you.
+
+       o Some instance types must be launched into a VPC.
+
+       See 'aws help' for descriptions of global parameters.
+
+SYNOPSIS
+            run-instances
+          [--block-device-mappings <value>]
+          [--image-id <value>]
+          [--instance-type <value>]
+          [--count <value>]
+          [--key-name <value>]
+          [--security-group-ids <value>]
+          [--subnet-id <value>]
+          [--tag-specifications <value>]
+          [--cli-input-json | --cli-input-yaml]
+
+OPTIONS
+       --block-device-mappings (list)
+          The block device mapping, which defines the EBS volumes and instance
+          store volumes to attach to the instance at launch.
+
+          You can't specify encryption settings for root volumes when using
+          Amazon EBS encryption by default.
+
+          (structure)
+              Describes a block device mapping, which defines the EBS volumes
+              and instance store volumes to attach to an instance at launch.
+
+              DeviceName -> (string)
+                 The device name (for example, /dev/sdh or xvdh).
+
+              VirtualName -> (string)
+                 The virtual device name (ephemeralN). Instance store volumes
+                 are numbered starting from 0.
+
+              Ebs -> (structure)
+                 Parameters used to automatically set up EBS volumes when the
+                 instance is launched.
+
+                 VolumeSize -> (integer)
+                    The size of the volume, in GiBs. You must specify either a
+                    snapshot ID or a volume size.
+
+                 VolumeType -> (string)
+                    The volume type. Valid values: standard | io1 | io2 | gp2
+                    | sc1 | st1 | gp3
+
+       Shorthand Syntax:
+
+          DeviceName=string,VirtualName=string,Ebs={DeleteOnTermination=boolean,VolumeSize=integer,VolumeType=string} ...
+
+       JSON Syntax:
+
+          [
+            {
+              "DeviceName": "string",
+              "Ebs": {"VolumeSize": integer, "VolumeType": "gp3"}
+            }
+            ...
+          ]
+
+       --image-id (string)
+          The ID of the AMI. An AMI ID is required to launch an instance and
+          must be specified here or in a launch template.
+
+       --instance-type (string)
+          The instance type. For more information, see Instance types in the
+          Amazon EC2 User Guide.
+
+          Default: m1.small
+
+       --count (string)
+          The number of instances to launch. You can specify a single number
+          or a range, for example 1:5.
+
+          Constraints: Between 1 and the maximum number you're allowed for the
+          specified instance type.
+
+       --key-name (string)
+          The name of the key pair. You can create a key pair using
+          CreateKeyPair or ImportKeyPair .
+
+          WARNING:
+              If you do not specify a key pair, you can't connect to the
+              instance unless you choose an AMI that is configured to allow
+              users another way to log in.
+
+GLOBAL OPTIONS
+       --debug (boolean)
+          Turn on debug logging.
+
+       --output (string)
+          The formatting style for command output.
+
+          o json
+
+          o text
+
+          o table
+"""  # reconstructed from memory (abridged)
+
 _AZ_HELP = """
 Command
     az vm create : Create an Azure Virtual Machine.
@@ -3995,7 +4113,8 @@ def _gen_310():
     return [
         Fixture("real: gcloud compute addresses create --help (enumeration in a third paragraph, mutually exclusive groups)", _GCLOUD_ADDRESSES, True),
         Fixture("real: gcloud compute images create --help", _GCLOUD_IMAGES, True),
-        Fixture("aws ec2 stop-instances help (man page layout, Syntax: blocks, GLOBAL OPTIONS)", _AWS_STOP, True),
+        Fixture("aws ec2 run-instances help, abridged (man page layout, a structure parameter with nested docs)", _AWS_RUN, True),
+        Fixture("aws ec2 stop-instances help: small page, saves only ~6% (not gated)", _AWS_STOP, None),
         Fixture("real: gcloud compute disks resize --help (small)", _GCLOUD_RESIZE, True),
         Fixture("negative: real gcloud compute firewall-rules delete --help has a single positional and no later paragraphs", _GCLOUD_FW_DELETE, False),
         Fixture("negative: az vm create -h lists one entry per flag, nothing to fold", _AZ_HELP, False),
@@ -4011,4 +4130,219 @@ case(
     probes=probes_310,
     fixtures=_gen_310,
     min_gain=0.12,
+)
+
+
+# ===============================================================================================================
+# #800 gcloud logging read (YAML documents) and aws logs filter-log-events (JSON): hoist what is constant across entries into one
+# header line, drop insertId, receiveTimestamp (gcloud) and eventId, ingestionTime (aws), print one line per entry with time,
+# severity and payload. Probes: parse the original (YAML or JSON) and the packed form into the same list of entries with the
+# constants merged back, and compare them whole. reconstructed from memory (no cloud project here).
+
+_G_HEAD = re.compile(r"^# gcloud logging read: (\d+) entries; same on every entry: (\{.*\}); insertId and receiveTimestamp dropped$")
+_A_HEAD = re.compile(r"^# aws logs filter-log-events: (\d+) events; same on every event: (\{.*\}); eventId and ingestionTime dropped$")
+_A_REST = re.compile(r"^# other keys: (\{.*\})$")
+_G_DROP = {"insertId", "receiveTimestamp"}
+_G_SKIP = _G_DROP | {"timestamp", "severity", "jsonPayload", "textPayload", "protoPayload"}
+
+
+def _common(ds: list) -> dict:
+    out = {}
+    for k, v in ds[0].items():
+        if all(isinstance(d, dict) and k in d for d in ds):
+            if all(d[k] == v and type(d[k]) is type(v) for d in ds):
+                out[k] = v
+            elif all(isinstance(d[k], dict) for d in ds):
+                c = _common([d[k] for d in ds])
+                if c:
+                    out[k] = c
+    return out
+
+
+def _minus(d: dict, c: dict) -> dict:
+    r = {}
+    for k, v in d.items():
+        if k in c:
+            if isinstance(v, dict) and isinstance(c[k], dict) and v != c[k]:
+                sub = _minus(v, c[k])
+                if sub:
+                    r[k] = sub
+            continue
+        r[k] = v
+    return r
+
+
+def _merge(a: dict, b: dict) -> dict:
+    r = dict(a)
+    for k, v in b.items():
+        r[k] = _merge(r[k], v) if isinstance(v, dict) and isinstance(r.get(k), dict) else v
+    return r
+
+
+def _plain_line(s) -> bool:
+    return isinstance(s, str) and s != "" and s == s.strip() and "\n" not in s and "\r" not in s and not s.startswith(("{", '"')) and all(ord(ch) >= 32 for ch in s)
+
+
+def _jline(o) -> str:
+    return json.dumps(o, ensure_ascii=False, separators=(",", ":"))
+
+
+def _pack_gcloud(docs: list) -> str | None:
+    if not docs or not all(isinstance(d, dict) for d in docs):
+        return None
+    ok = lambda v: v is None or (isinstance(v, str) and v != "" and v == v.strip() and " " not in v and v != "-")  # noqa: E731
+    if not all(ok(d.get("timestamp")) and ok(d.get("severity")) for d in docs):
+        return None
+    const = _common([{k: v for k, v in d.items() if k not in _G_SKIP} for d in docs]) if len(docs) >= 2 else {}
+    out = [f"# gcloud logging read: {len(docs)} entries; same on every entry: {_jline(const)}; insertId and receiveTimestamp dropped"]
+    for d in docs:
+        rest = _minus({k: v for k, v in d.items() if k not in _G_SKIP}, const)
+        payload = {k: d[k] for k in ("jsonPayload", "textPayload", "protoPayload") if k in d}
+        head = f"{d.get('timestamp') or '-'} {d.get('severity') or '-'}"
+        if not rest and list(payload) == ["textPayload"] and _plain_line(payload["textPayload"]):
+            out.append(f"{head} | {payload['textPayload']}")
+        else:
+            out.append(f"{head} {_jline({**rest, **payload})}")
+    return "\n".join(out)
+
+
+def _pack_aws(doc) -> str | None:
+    if not (isinstance(doc, dict) and isinstance(doc.get("events"), list) and doc["events"]):
+        return None
+    evs = doc["events"]
+    if not all(isinstance(e, dict) and set(e) <= {"logStreamName", "timestamp", "message", "ingestionTime", "eventId"} and isinstance(e.get("timestamp"), int)
+               and isinstance(e.get("message"), str) and not isinstance(e.get("timestamp"), bool) for e in evs):
+        return None
+    const = _common([{k: v for k, v in e.items() if k == "logStreamName"} for e in evs]) if len(evs) >= 2 else {}
+    out = [f"# aws logs filter-log-events: {len(evs)} events; same on every event: {_jline(const)}; eventId and ingestionTime dropped"]
+    for e in evs:
+        extra = {"logStreamName": e["logStreamName"]} if "logStreamName" in e and "logStreamName" not in const else {}
+        m = e["message"]
+        body = m if (_plain_line(m) and not extra) else _jline(m)
+        out.append(f"{e['timestamp']} " + (_jline(extra) + " " if extra else "") + body)
+    other = {k: v for k, v in doc.items() if k != "events"}
+    if other:
+        out.append(f"# other keys: {_jline(other)}")
+    return "\n".join(out)
+
+
+def pack_log_envelope(text: str) -> str:
+    s = text.lstrip()
+    try:
+        out = _pack_gcloud(yaml_docs(text)) if s.startswith("---") else _pack_aws(json.loads(text)) if s.startswith("{") else None
+    except Exception:  # noqa: BLE001
+        return text
+    if out is None:
+        return text
+    out = keep_nl(text, out)
+    return out if len(out) < len(text) else text
+
+
+def _unpack(text: str):
+    """Entries of a packed or original gcloud/aws log dump as canonical dicts, or None when the text is neither."""
+    lines = text.rstrip("\n").split("\n")
+    m = _G_HEAD.match(lines[0]) if lines else None
+    if m:
+        const = json.loads(m.group(2))
+        ents = []
+        for l in lines[1:]:
+            ts, sev, rest = l.split(" ", 2)
+            e: dict = {}
+            if ts != "-":
+                e["timestamp"] = ts
+            if sev != "-":
+                e["severity"] = sev
+            body = json.loads(rest) if not rest.startswith("| ") else {"textPayload": rest[2:]}
+            ents.append(_merge(const, {**e, **body}))
+        return ("gcloud", ents, int(m.group(1)))
+    m = _A_HEAD.match(lines[0]) if lines else None
+    if m:
+        const = json.loads(m.group(2))
+        evs, other = [], {}
+        for l in lines[1:]:
+            r = _A_REST.match(l)
+            if r:
+                other = json.loads(r.group(1))
+                continue
+            ts, rest = l.split(" ", 1)
+            extra = {}
+            if rest.startswith("{"):
+                extra, end = json.JSONDecoder().raw_decode(rest)
+                rest = rest[end + 1:]
+            msg = json.loads(rest) if rest.startswith('"') else rest
+            evs.append({**const, **extra, "timestamp": int(ts), "message": msg})
+        return ("aws", evs, other)
+    return None
+
+
+def probes_800(text: str) -> dict:
+    try:
+        got = _unpack(text)
+        if got is None:
+            s = text.lstrip()
+            if s.startswith("---"):
+                docs = yaml_docs(text)
+                got = ("gcloud", [{k: v for k, v in d.items() if k not in _G_DROP} for d in docs], len(docs))
+            elif s.startswith("{"):
+                d = json.loads(text)
+                got = ("aws", [{k: v for k, v in e.items() if k not in ("eventId", "ingestionTime")} for e in d["events"]], {k: v for k, v in d.items() if k != "events"})
+            else:
+                return {"format": "other", "text": text}
+    except Exception:  # noqa: BLE001
+        return {"parse": "failed"}
+    kind, ents, extra = got
+    if kind == "aws":
+        return {"kind": kind, "events (stream, time, message)": [(e.get("logStreamName"), e.get("timestamp"), e.get("message")) for e in ents], "other keys": extra}
+    sev = Counter(e.get("severity", "DEFAULT") for e in ents)
+    return {"kind": kind, "entry count": extra if isinstance(extra, int) else len(ents), "entries without insertId and receiveTimestamp": ents,
+            "time and severity in order": [(e.get("timestamp"), e.get("severity")) for e in ents], "severity counts": sorted(sev.items())}
+
+
+def _gcloud_entries(n: int = 8) -> str:
+    base_res = {"labels": {"cluster_name": "prod-us", "container_name": "web", "location": "us-central1", "namespace_name": "shop", "project_id": "acme-prod"}, "type": "k8s_container"}
+    docs = []
+    pods = ["web-6d8f7c9b5-x2k9p"] * 5 + ["web-6d8f7c9b5-q7m4d"] * 3
+    for k in range(n):
+        ts = f"2025-03-04T10:15:{2 + k:02d}.{(137 * k) % 1000:03d}Z"
+        res = {"labels": {**base_res["labels"], "pod_name": pods[k % len(pods)]}, "type": "k8s_container"}
+        d = {"insertId": f"{_sha(f'ins{k}', 16)}", "labels": {"k8s-pod/app": "web", "k8s-pod/pod-template-hash": "6d8f7c9b5"}, "logName": "projects/acme-prod/logs/stderr",
+             "receiveTimestamp": f"2025-03-04T10:15:{3 + k:02d}.{(911 * k) % 1000:03d}417526Z", "resource": res, "timestamp": ts}
+        if k == 0:
+            d.update({"severity": "ERROR", "jsonPayload": {"message": "upstream connect error or disconnect/reset before headers", "status": 503, "upstream": "payments:8443", "trace_id": "4bf92f3577b34da6"}})
+        elif k == n // 2:
+            d.update({"severity": "ERROR", "jsonPayload": {"message": "connection refused: payments:8443", "retry": 3, "status": 502}})
+        elif k == n - 1:
+            d.update({"severity": "CRITICAL", "textPayload": "panic: runtime error: invalid memory address or nil pointer dereference"})
+        elif k % 3 == 1:
+            d.update({"severity": "INFO", "textPayload": f"GET /healthz 200 {3 + k}ms"})
+        else:
+            d.update({"httpRequest": {"latency": f"0.0{k}s", "requestMethod": "GET", "requestUrl": "/cart", "status": 200 + (k % 2) * 4}, "jsonPayload": {"message": "request done", "user": f"u{k}"}})
+        docs.append(d)
+    return "".join("---\n" + ytext(d) for d in docs)
+
+
+def _aws_events(n: int = 6) -> str:
+    evs = []
+    for k in range(n):
+        msg = {0: '{"level":"error","msg":"upstream connect error","status":503}', n // 2: "ERROR payments timeout after 5000ms\n\tat com.acme.pay.Client.call(Client.java:88)\n\tat com.acme.web.Cart.checkout(Cart.java:41)",
+               n - 1: " trailing spaces and a \"quote\" in the message "}.get(k, f'{{"level":"info","msg":"request ok","ms":{7 + k}}}')
+        evs.append({"logStreamName": "web/web/4f1c2a9e0b7d4c8e9a0b1d2e3f4a5b6c", "timestamp": 1741083302998 + 137 * k, "message": msg, "ingestionTime": 1741083303100 + 140 * k, "eventId": _sha(f"ev{k}", 56).translate(str.maketrans("abcdef", "012345"))})
+    return json.dumps({"events": evs, "searchedLogStreams": [{"logStreamName": "web/web/4f1c2a9e0b7d4c8e9a0b1d2e3f4a5b6c", "searchedCompletely": True}]}, indent=4) + "\n"
+
+
+case(
+    800,
+    claim="Parses a gcloud logging read YAML stream or an aws logs filter-log-events JSON document, hoists what is identical across entries (logName, resource type and labels, entry labels, logStreamName) into one header, drops insertId, receiveTimestamp, eventId and ingestionTime, and prints one line per entry with time, severity (or epoch milliseconds) and the payload; every entry, with its constants merged back, equals the original minus those four fields.",
+    loses="insertId, receiveTimestamp (gcloud), eventId and ingestionTime (aws), YAML formatting and key order inside payloads, and the distinction between a missing severity and the '-' placeholder",
+    encode=pack_log_envelope,
+    probes=probes_800,
+    fixtures=[
+        Fixture("gcloud logging read, 8 entries: error first, an error in the middle, a CRITICAL panic last, one pod differs", _gcloud_entries(8), True),
+        Fixture("gcloud logging read, 3 entries", _gcloud_entries(3), True),
+        Fixture("aws logs filter-log-events: JSON error first, a stack trace in the middle, quote and spaces last", _aws_events(6), True),
+        Fixture("negative: --format=value(textPayload) is plain lines", "connection refused: payments:8443\nGET /healthz 200 4ms\n", False),
+        Fixture("negative: gcloud --format=json is a JSON array (not handled)", json.dumps([{"insertId": "a", "timestamp": "2025-03-04T10:15:02Z", "textPayload": "x"}]) + "\n", False),
+        Fixture("negative: aws --query output without events", json.dumps(["web/web/4f1c", "worker/1a2b"], indent=4) + "\n", False),
+    ],
+    min_gain=0.3,
 )

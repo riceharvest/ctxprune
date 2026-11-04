@@ -111,10 +111,6 @@ def tfjson_decode(text):
     return _MARK.sub(lambda m: '"resource":' + _tf_resource_text(json.loads('"' + m.group(1) + '"')), text[len(_TF_HDR):])
 
 
-def _tf_obj(addr):
-    return _tf_resource_text(addr)
-
-
 def _tf_line(msg, ts, payload, typ):
     """One line of `terraform apply -json`: keys of the envelope sorted as Go's encoder prints them."""
     return '{"@level":"info","@message":' + _jstr(msg) + ',"@module":"terraform.ui","@timestamp":"' + ts + '",' + payload + ',"type":"' + typ + '"}'
@@ -127,15 +123,15 @@ def _tf_stream():  # reconstructed from memory of Terraform's machine-readable U
            ("module.db.aws_db_instance.this", "app-db"), ("module.db.module.parameters.aws_db_parameter_group.this", "app-db-pg")]
     out = [_tf_line("Terraform 1.9.8", "2025-03-11T10:15:00.101010+01:00", '"terraform":"1.9.8"', "version").replace('"type":"version"}', '"type":"version","ui":"1.2"}')]
     out.append(_tf_line("data.aws_ami.ubuntu: Refreshing...", "2025-03-11T10:15:01.202020+01:00",
-                        '"hook":{"resource":' + _tf_obj("data.aws_ami.ubuntu") + ',"action":"read"}', "refresh_start"))
+                        '"hook":{"resource":' + _tf_resource_text("data.aws_ami.ubuntu") + ',"action":"read"}', "refresh_start"))
     out.append(_tf_line("data.aws_ami.ubuntu: Refresh complete [id=ami-0f1e2d3c4b5a69788]", "2025-03-11T10:15:02.303030+01:00",
-                        '"hook":{"resource":' + _tf_obj("data.aws_ami.ubuntu") + ',"action":"read","id_key":"id","id_value":"ami-0f1e2d3c4b5a69788"}', "refresh_complete"))
+                        '"hook":{"resource":' + _tf_resource_text("data.aws_ami.ubuntu") + ',"action":"read","id_key":"id","id_value":"ami-0f1e2d3c4b5a69788"}', "refresh_complete"))
     for i, (a, _) in enumerate(res):
-        out.append(_tf_line(f"{a}: Plan to create", f"2025-03-11T10:15:03.{i:02d}0000+01:00", '"change":{"resource":' + _tf_obj(a) + ',"action":"create"}', "planned_change"))
+        out.append(_tf_line(f"{a}: Plan to create", f"2025-03-11T10:15:03.{i:02d}0000+01:00", '"change":{"resource":' + _tf_resource_text(a) + ',"action":"create"}', "planned_change"))
     out.append(_tf_line("Plan: 8 to add, 0 to change, 0 to destroy.", "2025-03-11T10:15:03.900000+01:00",
                         '"changes":{"add":8,"change":0,"import":0,"remove":0,"operation":"plan"}', "change_summary"))
     for i, (a, rid) in enumerate(res):
-        h = '"hook":{"resource":' + _tf_obj(a)
+        h = '"hook":{"resource":' + _tf_resource_text(a)
         out.append(_tf_line(f"{a}: Creating...", f"2025-03-11T10:15:04.{i:02d}0000+01:00", h + ',"action":"create"}', "apply_start"))
         if i >= 5:
             out.append(_tf_line(f"{a}: Still creating... [10s elapsed]", f"2025-03-11T10:15:14.{i:02d}0000+01:00", h + ',"action":"create","elapsed_seconds":10}', "apply_progress"))

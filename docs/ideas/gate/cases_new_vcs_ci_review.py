@@ -1459,3 +1459,665 @@ case(
     min_gain=0.2,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
+
+
+# ===============================================================================================================
+# JSON toolkit, lexeme level. Trees are ("o", [(key lexeme, node)]), ("a", [node]) or ("l", lexeme); number spelling, string
+# escapes, duplicate keys and key order all survive. A document is re-emitted only when it is byte-identical to its own
+# canonical layout (2-space pretty or compact, with or without a trailing newline); anything else is returned unchanged.
+
+_JSTR = r'"(?:[^"\\]|\\.)*"'
+_TOK = re.compile(rf'[ \t\r\n]*(?:({_JSTR})|([{{}}\[\]:,])|([^\s"{{}}\[\]:,]+))')
+_LAYOUTS = [(True, "\n"), (True, ""), (False, "\n"), (False, "")]
+
+
+def jtree(text):
+    json.loads(text, parse_int=str, parse_float=str, parse_constant=str)  # strict validation, no int conversion limit
+    toks = [m.group(1) or m.group(2) or m.group(3) for m in _TOK.finditer(text)]
+    at = [0]
+
+    def value():
+        t = toks[at[0]]
+        at[0] += 1
+        if t == "{":
+            pairs = []
+            if toks[at[0]] == "}":
+                at[0] += 1
+                return ("o", pairs)
+            while True:
+                k = toks[at[0]]
+                at[0] += 2
+                pairs.append((k, value()))
+                sep = toks[at[0]]
+                at[0] += 1
+                if sep == "}":
+                    return ("o", pairs)
+        if t == "[":
+            items = []
+            if toks[at[0]] == "]":
+                at[0] += 1
+                return ("a", items)
+            while True:
+                items.append(value())
+                sep = toks[at[0]]
+                at[0] += 1
+                if sep == "]":
+                    return ("a", items)
+        return ("l", t)
+
+    return value()
+
+
+def jdump(n, pretty, ind=0):
+    if n[0] == "l":
+        return n[1]
+    if not n[1]:
+        return "[]" if n[0] == "a" else "{}"
+    if not pretty:
+        if n[0] == "a":
+            return "[" + ",".join(jdump(c, False) for c in n[1]) + "]"
+        return "{" + ",".join(k + ":" + jdump(v, False) for k, v in n[1]) + "}"
+    pad, end = "  " * (ind + 1), "  " * ind
+    if n[0] == "a":
+        return "[\n" + ",\n".join(pad + jdump(c, True, ind + 1) for c in n[1]) + "\n" + end + "]"
+    return "{\n" + ",\n".join(pad + k + ": " + jdump(v, True, ind + 1) for k, v in n[1]) + "\n" + end + "}"
+
+
+def layout_of(tree, text):
+    return next(((p, nl) for p, nl in _LAYOUTS if jdump(tree, p) + nl == text), None)
+
+
+def jstr(lex):
+    """Plain string lexeme -> Python str, else None."""
+    if not lex or lex[0] != '"':
+        return None
+    try:
+        return json.loads(lex)
+    except ValueError:
+        return None
+
+
+def jlex(s):
+    return json.dumps(s, ensure_ascii=False)
+
+
+def walk_objects(n, fn):
+    """Rebuild a tree bottom-up: fn(pairs) -> pairs (or None for 'unchanged') for every object, children first."""
+    if n[0] == "a":
+        return ("a", [walk_objects(c, fn) for c in n[1]])
+    if n[0] == "o":
+        pairs = [(k, walk_objects(v, fn)) for k, v in n[1]]
+        return ("o", fn(pairs) or pairs)
+    return n
+
+
+def walk_arrays(n, fn):
+    """Same for arrays: fn(items) -> items (or None), children first."""
+    if n[0] == "a":
+        items = [walk_arrays(c, fn) for c in n[1]]
+        return ("a", fn(items) or items)
+    if n[0] == "o":
+        return ("o", [(k, walk_arrays(v, fn)) for k, v in n[1]])
+    return n
+
+
+def json_codec(header, transform, restore):
+    """(encode, decode) for '§header\\n' + canonical JSON. transform/restore map trees to trees (restore returns None when the
+    text carries nothing to restore). encode verifies by decoding and returns the input unchanged on any doubt."""
+    hdr = f"{SIG}{header}\n"
+
+    def decode(text):
+        if text.startswith(RAW):
+            return text[len(RAW):]
+        if not text.startswith(hdr):
+            return text
+        body = text[len(hdr):]
+        try:
+            tree = jtree(body)
+            lay = layout_of(tree, body)
+            out = restore(tree)
+            return jdump(out, *lay[:1]) + lay[1] if lay and out is not None else text
+        except Exception:  # noqa: BLE001
+            return text
+
+    def encode(text):
+        if text.startswith(SIG):
+            return RAW + text
+        try:
+            tree = jtree(text)
+            lay = layout_of(tree, text)
+            if lay is None:
+                return text
+            new = transform(tree)
+            if new is None:
+                return text
+            cand = hdr + jdump(new, lay[0]) + lay[1]
+            return cand if len(cand) < len(text) and decode(cand) == text else text
+        except Exception:  # noqa: BLE001  (not JSON, too deep, ...)
+            return text
+
+    return encode, decode
+
+
+MARK = re.compile(r'"~(\d*)"')
+
+
+def marker_keys_present(tree):
+    found = []
+    walk_objects(tree, lambda pairs: found.extend(k for k, _ in pairs if MARK.fullmatch(k)) or None)
+    return bool(found)
+
+
+# ===============================================================================================================
+# #1424 GitHub REST entity objects. A simple-user object carries 13 URL fields that are fixed functions of login and id (plus
+# node_id, the base64 of 'NN:User<id>'); a repository object carries about 40 URL fields that are fixed functions of
+# full_name; a pull request or review comment carries a _links object that restates sibling fields; a zero-reaction summary is
+# all zeros. Header '§ghrest', then the document with each fully matching run of fields replaced by one marker pair.
+
+import base64
+
+_API, _WEB = "https://api.github.com", "https://github.com"
+
+
+def _msgpack_uint(n):
+    if n < 128:
+        return bytes([n])
+    for fmt, size in ((0xCC, 1), (0xCD, 2), (0xCE, 4), (0xCF, 8)):
+        if n < 1 << (8 * size):
+            return bytes([fmt]) + n.to_bytes(size, "big")
+    raise ValueError("id too large")
+
+
+def _node_id_new(prefix, i):
+    return prefix + base64.urlsafe_b64encode(b"\x92\x00" + _msgpack_uint(int(i))).decode().rstrip("=")
+
+
+def _node_id_legacy(typ, i):
+    return base64.b64encode(f"0{len(typ)}:{typ}{i}".encode()).decode()
+
+
+def _user_entries(node_id_fn):
+    u = lambda tail: (lambda p: f"{_API}/users/{p['L']}{tail}")  # noqa: E731
+    return [
+        ("node_id", node_id_fn),
+        ("avatar_url", lambda p: f"https://avatars.githubusercontent.com/u/{p['I']}?v=4"),
+        ("gravatar_id", lambda p: ""),
+        ("url", u("")),
+        ("html_url", lambda p: f"{_WEB}/{p['L']}"),
+        ("followers_url", u("/followers")),
+        ("following_url", u("/following{/other_user}")),
+        ("gists_url", u("/gists{/gist_id}")),
+        ("starred_url", u("/starred{/owner}{/repo}")),
+        ("subscriptions_url", u("/subscriptions")),
+        ("organizations_url", u("/orgs")),
+        ("repos_url", u("/repos")),
+        ("events_url", u("/events{/privacy}")),
+        ("received_events_url", u("/received_events")),
+    ]
+
+
+def _repo_entries():
+    r = lambda tail: (lambda p: f"{_API}/repos/{p['F']}{tail}")  # noqa: E731
+    return [
+        ("html_url", lambda p: f"{_WEB}/{p['F']}"), ("description", None), ("fork", None),
+        ("url", r("")), ("forks_url", r("/forks")), ("keys_url", r("/keys{/key_id}")),
+        ("collaborators_url", r("/collaborators{/collaborator}")), ("teams_url", r("/teams")), ("hooks_url", r("/hooks")),
+        ("issue_events_url", r("/issues/events{/number}")), ("events_url", r("/events")), ("assignees_url", r("/assignees{/user}")),
+        ("branches_url", r("/branches{/branch}")), ("tags_url", r("/tags")), ("blobs_url", r("/git/blobs{/sha}")),
+        ("git_tags_url", r("/git/tags{/sha}")), ("git_refs_url", r("/git/refs{/sha}")), ("trees_url", r("/git/trees{/sha}")),
+        ("statuses_url", r("/statuses/{sha}")), ("languages_url", r("/languages")), ("stargazers_url", r("/stargazers")),
+        ("contributors_url", r("/contributors")), ("subscribers_url", r("/subscribers")), ("subscription_url", r("/subscription")),
+        ("commits_url", r("/commits{/sha}")), ("git_commits_url", r("/git/commits{/sha}")), ("comments_url", r("/comments{/number}")),
+        ("issue_comment_url", r("/issues/comments{/number}")), ("contents_url", r("/contents/{+path}")),
+        ("compare_url", r("/compare/{base}...{head}")), ("merges_url", r("/merges")), ("archive_url", r("/{archive_format}{/ref}")),
+        ("downloads_url", r("/downloads")), ("issues_url", r("/issues{/number}")), ("pulls_url", r("/pulls{/number}")),
+        ("milestones_url", r("/milestones{/number}")), ("notifications_url", r("/notifications{?since,all,participating}")),
+        ("labels_url", r("/labels{/name}")), ("releases_url", r("/releases{/id}")), ("deployments_url", r("/deployments")),
+        ("created_at", None), ("updated_at", None), ("pushed_at", None),
+        ("git_url", lambda p: f"git://github.com/{p['F']}.git"), ("ssh_url", lambda p: f"git@github.com:{p['F']}.git"),
+        ("clone_url", lambda p: f"{_WEB}/{p['F']}.git"), ("svn_url", lambda p: f"{_WEB}/{p['F']}"),
+    ]
+
+
+_FAMILIES = {
+    "u": _user_entries(lambda p: _node_id_legacy("User", p["I"])),
+    "v": _user_entries(lambda p: _node_id_new("U_", p["I"])),
+    "r": _repo_entries(),
+}
+
+
+def _params(fam, lookup):
+    """Parameters of a family from the object's literal pairs (lookup(key) -> lexeme or None)."""
+    if fam in "uv":
+        login, uid = jstr(lookup("login") or ""), lookup("id") or ""
+        if login and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", login) and re.fullmatch(r"[1-9]\d*", uid):
+            return {"L": login, "I": uid}
+        return None
+    full = jstr(lookup("full_name") or "")
+    return {"F": full} if full and re.fullmatch(r"[\w.-]+/[\w.-]+", full) else None
+
+
+def lexeme(v):
+    """Python value derived by a template -> the JSON lexeme it would be spelled as (str -> string, int -> number)."""
+    return jlex(v) if isinstance(v, str) else str(v)
+
+
+def _best_run(pairs, canon, params, min_n=3):
+    """Longest run of consecutive pairs that equals consecutive canonical entries (key and derived value): (pair index, canon index, length)."""
+    best = None
+    for p in range(len(pairs)):
+        for i, (ck, fn) in enumerate(canon):
+            if fn is None or jstr(pairs[p][0]) != ck:
+                continue
+            n = 0
+            while p + n < len(pairs) and i + n < len(canon):
+                ck2, fn2 = canon[i + n]
+                if fn2 is None or jstr(pairs[p + n][0]) != ck2 or pairs[p + n][1] != ("l", lexeme(fn2(params))):
+                    break
+                n += 1
+            if n >= min_n and (best is None or n > best[2]):
+                best = (p, i, n)
+    return best
+
+
+_LINK_MAP = {"self": "url", "html": "html_url", "issue": "issue_url", "comments": "comments_url", "review_comments": "review_comments_url",
+             "review_comment": "review_comment_url", "commits": "commits_url", "statuses": "statuses_url", "pull_request": "pull_request_url"}
+_REACTION_KEYS = ["url", "total_count", "+1", "-1", "laugh", "hooray", "confused", "heart", "rocket", "eyes"]
+
+
+def _gh_transform(tree):
+    if marker_keys_present(tree):
+        return None
+
+    def per_object(pairs):
+        lit = lambda k: next((v[1] for kk, v in pairs if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+        out = pairs
+        for group in ("uv", "r"):  # a user object is tried against both node_id schemes, the longer run wins
+            for slot in ("", "2", "3"):
+                lookup = lambda k: next((v[1] for kk, v in out if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+                cands = []
+                for fam in group:
+                    params = _params(fam, lookup)
+                    run = _best_run(out, _FAMILIES[fam], params) if params else None
+                    if run:
+                        cands.append((run[2], fam, run))
+                if not cands:
+                    break
+                _, fam, (p, i, n) = max(cands, key=lambda c: c[0])
+                out = out[:p] + [(f'"~{slot}"', ("l", jlex(f"{fam}{i}-{i + n - 1}")))] + out[p + n:]
+        res = []
+        for k, v in out:
+            if jstr(k) == "_links" and v[0] == "o" and v[1]:
+                names = []
+                for lk, lv in v[1]:
+                    name = jstr(lk)
+                    sib = lit(_LINK_MAP.get(name, "")) if name in _LINK_MAP else None
+                    if not (lv[0] == "o" and len(lv[1]) == 1 and lv[1][0][0] == '"href"' and sib is not None and lv[1][0][1] == ("l", sib)):
+                        names = None
+                        break
+                    names.append(("l", lk))
+                if names:
+                    v = ("a", names)
+            elif jstr(k) == "reactions" and v[0] == "o" and [jstr(kk) for kk, _ in v[1]] == _REACTION_KEYS:
+                url = lit("url")
+                if url and v[1][0][1] == ("l", url[:-1] + '/reactions"') and all(vv == ("l", "0") for _, vv in v[1][1:]):
+                    v = ("l", "0")
+            res.append((k, v))
+        return res
+
+    return walk_objects(tree, per_object)
+
+
+def _gh_restore(tree):
+    changed = [False]
+
+    def per_object(pairs):
+        lit = lambda k: next((v[1] for kk, v in pairs if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+        res = []
+        for k, v in pairs:
+            m = MARK.fullmatch(k)
+            if m and v[0] == "l" and (spec := re.fullmatch(r"([uvr])(\d+)-(\d+)", jstr(v[1]) or "")):
+                fam, i, j = spec[1], int(spec[2]), int(spec[3])
+                params = _params(fam, lit)
+                canon = _FAMILIES[fam]
+                for ck, fn in canon[i:j + 1]:
+                    res.append((jlex(ck), ("l", lexeme(fn(params)))))
+                changed[0] = True
+            elif jstr(k) == "_links" and v[0] == "a" and all(c[0] == "l" for c in v[1]):
+                res.append((k, ("o", [(c[1], ("o", [('"href"', ("l", lit(_LINK_MAP[jstr(c[1])])))])) for c in v[1]])))
+                changed[0] = True
+            elif jstr(k) == "reactions" and v == ("l", "0"):
+                url = lit("url")
+                res.append((k, ("o", [(jlex(name), ("l", url[:-1] + '/reactions"') if name == "url" else ("l", "0"))
+                                      for name in _REACTION_KEYS])))
+                changed[0] = True
+            else:
+                res.append((k, v))
+        return res
+
+    out = walk_objects(tree, per_object)
+    return out if changed[0] else None
+
+
+gh_encode, gh_decode = json_codec(
+    "ghrest: \"~\" stands for omitted standard GitHub URL fields (derived from login+id or full_name); _links lists hrefs equal to sibling *_url; reactions 0 = all zero",
+    _gh_transform, _gh_restore)
+
+
+# --- fixtures for #1424 (reconstructed from memory of the documented example responses; URL fields written out by hand,
+# separately from the encoder's tables)
+
+def _pretty(o):
+    return json.dumps(o, indent=2, ensure_ascii=False) + "\n"
+
+
+def _compact(o):
+    return json.dumps(o, separators=(",", ":"), ensure_ascii=False)
+
+
+def _user(login, uid, node, typ="User", admin=False):
+    a = f"https://api.github.com/users/{login}"
+    return {"login": login, "id": uid, "node_id": node, "avatar_url": f"https://avatars.githubusercontent.com/u/{uid}?v=4",
+            "gravatar_id": "", "url": a, "html_url": f"https://github.com/{login}", "followers_url": a + "/followers",
+            "following_url": a + "/following{/other_user}", "gists_url": a + "/gists{/gist_id}",
+            "starred_url": a + "/starred{/owner}{/repo}", "subscriptions_url": a + "/subscriptions",
+            "organizations_url": a + "/orgs", "repos_url": a + "/repos", "events_url": a + "/events{/privacy}",
+            "received_events_url": a + "/received_events", "type": typ, "user_view_type": "public", "site_admin": admin}
+
+
+OCTOCAT = _user("octocat", 583231, "MDQ6VXNlcjU4MzIzMQ==")  # legacy node_id
+ALICE = _user("alice-dev", 4418267, "MDQ6VXNlcjQ0MTgyNjc=")
+BOB = _user("bob-reviewer", 98765432, "U_kgDOBeMKeA")  # newer account: msgpack-style node_id
+CAROL = _user("carol-ops", 143207381, "U_kgDOCIkr1Q")
+ACME = _user("acme-corp", 9919, "MDEyOk9yZ2FuaXphdGlvbjk5MTk=", typ="Organization")
+BOT = {"login": "dependabot[bot]", "id": 49699333, "node_id": "MDM6Qm90NDk2OTkzMzM=", "avatar_url": "https://avatars.githubusercontent.com/in/29110?v=4",
+       "gravatar_id": "", "url": "https://api.github.com/users/dependabot%5Bbot%5D", "html_url": "https://github.com/apps/dependabot",
+       "followers_url": "https://api.github.com/users/dependabot%5Bbot%5D/followers", "type": "Bot", "site_admin": False}
+
+
+def _repo(full, rid, owner, node):
+    b = f"https://api.github.com/repos/{full}"
+    return {"id": rid, "node_id": node, "name": full.split("/")[1], "full_name": full, "private": False, "owner": owner,
+            "html_url": f"https://github.com/{full}", "description": "Widgets for the acme platform", "fork": full != "acme-corp/widgets",
+            "url": b, "forks_url": b + "/forks", "keys_url": b + "/keys{/key_id}", "collaborators_url": b + "/collaborators{/collaborator}",
+            "teams_url": b + "/teams", "hooks_url": b + "/hooks", "issue_events_url": b + "/issues/events{/number}",
+            "events_url": b + "/events", "assignees_url": b + "/assignees{/user}", "branches_url": b + "/branches{/branch}",
+            "tags_url": b + "/tags", "blobs_url": b + "/git/blobs{/sha}", "git_tags_url": b + "/git/tags{/sha}",
+            "git_refs_url": b + "/git/refs{/sha}", "trees_url": b + "/git/trees{/sha}", "statuses_url": b + "/statuses/{sha}",
+            "languages_url": b + "/languages", "stargazers_url": b + "/stargazers", "contributors_url": b + "/contributors",
+            "subscribers_url": b + "/subscribers", "subscription_url": b + "/subscription", "commits_url": b + "/commits{/sha}",
+            "git_commits_url": b + "/git/commits{/sha}", "comments_url": b + "/comments{/number}",
+            "issue_comment_url": b + "/issues/comments{/number}", "contents_url": b + "/contents/{+path}",
+            "compare_url": b + "/compare/{base}...{head}", "merges_url": b + "/merges", "archive_url": b + "/{archive_format}{/ref}",
+            "downloads_url": b + "/downloads", "issues_url": b + "/issues{/number}", "pulls_url": b + "/pulls{/number}",
+            "milestones_url": b + "/milestones{/number}", "notifications_url": b + "/notifications{?since,all,participating}",
+            "labels_url": b + "/labels{/name}", "releases_url": b + "/releases{/id}", "deployments_url": b + "/deployments",
+            "created_at": "2024-02-11T09:12:45Z", "updated_at": "2026-03-30T16:02:11Z", "pushed_at": "2026-03-30T16:01:58Z",
+            "git_url": f"git://github.com/{full}.git", "ssh_url": f"git@github.com:{full}.git", "clone_url": f"https://github.com/{full}.git",
+            "svn_url": f"https://github.com/{full}", "homepage": None, "size": 5120, "stargazers_count": 214, "watchers_count": 214,
+            "language": "Python", "has_issues": True, "has_projects": True, "has_downloads": True, "has_wiki": False, "has_pages": False,
+            "has_discussions": False, "forks_count": 31, "mirror_url": None, "archived": False, "disabled": False,
+            "open_issues_count": 17, "license": {"key": "mit", "name": "MIT License", "spdx_id": "MIT", "url": "https://api.github.com/licenses/mit",
+                                                 "node_id": "MDc6TGljZW5zZTEz"},
+            "allow_forking": True, "is_template": False, "web_commit_signoff_required": False, "topics": [], "visibility": "public",
+            "forks": 31, "open_issues": 17, "watchers": 214, "default_branch": "main"}
+
+
+BASE_REPO = _repo("acme-corp/widgets", 650321, ACME, "R_kgDOAAnsUQ")
+FORK_REPO = _repo("alice-dev/widgets", 712004455, ALICE, "R_kgDOKiD1Zw")
+_Z = {"total_count": 0, "+1": 0, "-1": 0, "laugh": 0, "hooray": 0, "confused": 0, "heart": 0, "rocket": 0, "eyes": 0}
+
+
+def _reactions(url, **nz):
+    return {"url": url + "/reactions", **{**_Z, **nz}}
+
+
+def _pull_request(n=1347):
+    base = f"https://api.github.com/repos/acme-corp/widgets"
+    html = f"https://github.com/acme-corp/widgets/pull/{n}"
+    sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e"
+    links = {"self": {"href": f"{base}/pulls/{n}"}, "html": {"href": html}, "issue": {"href": f"{base}/issues/{n}"},
+             "comments": {"href": f"{base}/issues/{n}/comments"}, "review_comments": {"href": f"{base}/pulls/{n}/comments"},
+             "review_comment": {"href": base + "/pulls/comments{/number}"}, "commits": {"href": f"{base}/pulls/{n}/commits"},
+             "statuses": {"href": f"{base}/statuses/{sha}"}}
+    return {"url": f"{base}/pulls/{n}", "id": 1934771123, "node_id": "PR_kwDOAAnsUc5zWx2z", "html_url": html, "diff_url": html + ".diff",
+            "patch_url": html + ".patch", "issue_url": f"{base}/issues/{n}", "number": n, "state": "open", "locked": False,
+            "title": "Retry uploads with exponential backoff", "user": ALICE,
+            "body": "Fixes #1301.\n\n- add `retry()` helper\n- wrap the S3 upload step\n", "created_at": "2026-03-28T10:14:07Z",
+            "updated_at": "2026-03-30T16:01:58Z", "closed_at": None, "merged_at": None, "merge_commit_sha": "e5bd3914e2e596debea16f433f57875b5b90bcd6",
+            "assignee": BOB, "assignees": [BOB], "requested_reviewers": [BOB, CAROL], "requested_teams": [], "labels": [], "milestone": None,
+            "draft": False, "commits_url": f"{base}/pulls/{n}/commits", "review_comments_url": f"{base}/pulls/{n}/comments",
+            "review_comment_url": base + "/pulls/comments{/number}", "comments_url": f"{base}/issues/{n}/comments",
+            "statuses_url": f"{base}/statuses/{sha}",
+            "head": {"label": "alice-dev:retry-uploads", "ref": "retry-uploads", "sha": sha, "user": ALICE, "repo": FORK_REPO},
+            "base": {"label": "acme-corp:main", "ref": "main", "sha": "9a4f1c2d5e0b7a3c8d6e1f2a3b4c5d6e7f8a9b0c", "user": ACME, "repo": BASE_REPO},
+            "_links": links, "author_association": "CONTRIBUTOR", "auto_merge": None, "active_lock_reason": None, "merged": False,
+            "mergeable": True, "rebaseable": True, "mergeable_state": "clean", "merged_by": None, "comments": 2, "review_comments": 3,
+            "maintainer_can_modify": True, "commits": 2, "additions": 87, "deletions": 12, "changed_files": 4}
+
+
+def _review_comments():
+    base, n = "https://api.github.com/repos/acme-corp/widgets", 1347
+    out = []
+    for i, (who, path, line, body) in enumerate([(BOB, "src/upload.py", 41, "Should this catch `ClientError` only?"),
+                                                 (ALICE, "src/upload.py", 41, "Good point, narrowed in 3f2a1c9."),
+                                                 (CAROL, "tests/test_upload.py", 12, "Nit: use `pytest.raises`.")]):
+        cid = 1812000100 + i
+        out.append({"url": f"{base}/pulls/comments/{cid}", "pull_request_review_id": 2012345678, "id": cid,
+                    "node_id": f"PRRC_kwDOAAnsUc5{cid}", "diff_hunk": "@@ -38,6 +38,9 @@ def upload(path):\n     try:\n         put(path)\n+    except Exception:\n+        retry(path)\n",
+                    "path": path, "commit_id": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "original_commit_id": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+                    "user": who, "body": body, "created_at": f"2026-03-29T1{i}:20:00Z", "updated_at": f"2026-03-29T1{i}:20:00Z",
+                    "html_url": f"https://github.com/acme-corp/widgets/pull/{n}#discussion_r{cid}", "pull_request_url": f"{base}/pulls/{n}",
+                    "author_association": "MEMBER",
+                    "_links": {"self": {"href": f"{base}/pulls/comments/{cid}"},
+                               "html": {"href": f"https://github.com/acme-corp/widgets/pull/{n}#discussion_r{cid}"},
+                               "pull_request": {"href": f"{base}/pulls/{n}"}},
+                    "reactions": _reactions(f"{base}/pulls/comments/{cid}", **({"total_count": 1, "+1": 1} if i == 0 else {})),
+                    "start_line": None, "original_start_line": None, "start_side": None, "line": line, "original_line": line, "side": "RIGHT",
+                    "original_position": 5, "position": 5, "subject_type": "line"})
+    return out
+
+
+def _issue_comments():
+    base = "https://api.github.com/repos/acme-corp/widgets"
+    return [{"url": f"{base}/issues/comments/{1700000000 + i}", "html_url": f"https://github.com/acme-corp/widgets/issues/1301#issuecomment-{1700000000 + i}",
+             "issue_url": f"{base}/issues/1301", "id": 1700000000 + i, "node_id": f"IC_kwDOAAnsUc5{i}Abc", "user": u,
+             "created_at": f"2026-03-2{i}T08:00:00Z", "updated_at": f"2026-03-2{i}T08:00:00Z", "author_association": "NONE", "body": b,
+             "reactions": _reactions(f"{base}/issues/comments/{1700000000 + i}"), "performed_via_github_app": None}
+            for i, (u, b) in enumerate([(ALICE, "Reproduced on 2.3.1, traceback below."), (BOB, "Thanks, taking a look."), (CAROL, "+1 here"),
+                                        (BOT, "Bumps boto3 from 1.34.0 to 1.34.9.")])]
+
+
+GH_PR_DOC = _pretty(_pull_request())
+GH_REVIEW_DOC = _pretty(_review_comments())
+GH_ISSUE_DOC = _compact(_issue_comments())
+GH_MCP_MINIMAL = _pretty([{"login": "alice-dev", "id": 4418267, "avatar_url": "https://avatars.githubusercontent.com/u/4418267?v=4",
+                           "html_url": "https://github.com/alice-dev"}] * 3)
+
+case(
+    1424,
+    claim="In a GitHub REST document, a user object whose 13 URL fields (and legacy or msgpack-style node_id) are the fixed functions of login and id, a repository object whose ~40 URL templates are functions of full_name, a _links object that restates sibling url fields, and an all-zero reactions summary are each replaced by one short marker; a '§ghrest' header marks the encoding and decode restores the exact bytes.",
+    encode=gh_encode,
+    decode=gh_decode,
+    fixtures=[
+        Fixture("pulls/N payload: fork head.repo, base.repo, 9 user objects, _links", GH_PR_DOC, True),
+        Fixture("pulls/N/comments: users, _links, reactions", GH_REVIEW_DOC, True),
+        Fixture("issues/N/comments, compact layout, one bot author", GH_ISSUE_DOC, True),
+        Fixture("MCP-style minimal user objects have no templates", GH_MCP_MINIMAL, False),
+        Fixture("4-space indent is not a layout we can reproduce", json.dumps(_pull_request(), indent=4) + "\n", False),
+        Fixture("not JSON", "HTTP/2 200\ncontent-type: application/json\n", False),
+        Fixture("a user whose avatar_url is custom keeps that field",
+                _pretty([{**ALICE, "avatar_url": "https://example.com/a.png"}]), True),
+        Fixture("input that starts like the escape line", RAW + GH_REVIEW_DOC, None),
+        Fixture("input that starts like the header", "§ghrest\n" + GH_REVIEW_DOC, None),
+        Fixture("a literal marker key in the input", _pretty({**ALICE, "~": "u0-13"}), None),
+        Fixture("_links that is already an array and reactions that is already 0",
+                _pretty({"url": "https://api.github.com/x", "_links": ["self"], "reactions": 0, "user": ALICE}), None),
+        Fixture("duplicate keys and number spellings survive", '{\n  "a": 1E5,\n  "a": 2,\n  "user": ' + json.dumps(OCTOCAT, indent=2).replace("\n", "\n  ") + '\n}\n', None),
+    ],
+    min_gain=0.3,
+    idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
+)
+
+
+# ===============================================================================================================
+# #1425 GitHub REST file entries (pulls/N/files, commits/SHA, compare): blob_url, raw_url and contents_url all embed the same
+# owner/repo, head sha and URL-encoded filename; changes is additions + deletions. The first entry of an array keeps its
+# blob_url as the reference, later entries drop all three URLs; every entry drops changes.
+
+import urllib.parse
+
+_FILE_P = re.compile(r"https://github\.com/([^/]+)/([^/]+)/blob/([0-9a-f]{40})/")
+_qp = lambda name: urllib.parse.quote(name, safe="/")  # noqa: E731
+_raw = lambda p: p["P"].replace("/blob/", "/raw/", 1) + p["q"]  # noqa: E731
+
+
+def _contents(p):
+    m = _FILE_P.fullmatch(p["P"])
+    return f"https://api.github.com/repos/{m[1]}/{m[2]}/contents/{p['q']}?ref={m[3]}"
+
+
+_CHANGES = ("changes", lambda p: int(p["a"]) + int(p["d"]))
+_FILE_FAMS = {
+    "f": [_CHANGES, ("blob_url", lambda p: p["P"] + p["q"]), ("raw_url", _raw), ("contents_url", _contents)],  # prefix from an earlier entry
+    "g": [("raw_url", _raw), ("contents_url", _contents)],  # prefix from the entry's own blob_url
+    "c": [_CHANGES],
+}
+_FILE_MIN = {"f": 3, "g": 2, "c": 1}
+
+
+def _file_params(lit, prefix):
+    name = jstr(lit("filename") or "")
+    a, d = lit("additions"), lit("deletions")
+    if name is None or not (a and d and a.isdigit() and d.isdigit()):
+        return None
+    return {"q": _qp(name), "a": a, "d": d, "P": prefix}
+
+
+def _files_transform(tree):
+    if marker_keys_present(tree):
+        return None
+
+    def per_array(items):
+        ref, out = None, []
+        for it in items:
+            if it[0] != "o":
+                out.append(it)
+                continue
+            pairs = it[1]
+            lit = lambda k, pairs=pairs: next((v[1] for kk, v in pairs if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+            base = _file_params(lit, None)
+            if base is None:
+                out.append(it)
+                continue
+            own = None
+            blob = jstr(lit("blob_url") or "")
+            if blob and blob.endswith(base["q"]) and _FILE_P.fullmatch(blob[:-len(base["q"])]):
+                own = blob[:-len(base["q"])]
+            cur = pairs
+            for slot, (fam, prefix) in zip(("", "2", "3"), (("f", ref), ("g", own), ("c", None))):
+                if fam in "fg" and prefix is None:
+                    continue
+                params = {**base, "P": prefix}
+                if fam == "g" and not any(jstr(k) == "blob_url" for k, _ in cur):
+                    continue
+                run = _best_run(cur, _FILE_FAMS[fam], params, _FILE_MIN[fam])
+                if run:
+                    p, i, n = run
+                    cur = cur[:p] + [(f'"~{slot}"', ("l", jlex(f"{fam}{i}-{i + n - 1}")))] + cur[p + n:]
+            out.append(("o", cur))
+            ref = own or ref
+        return out
+
+    return walk_arrays(tree, per_array)
+
+
+def _files_restore(tree):
+    changed = [False]
+
+    def per_array(items):
+        ref, out = None, []
+        for it in items:
+            if it[0] != "o":
+                out.append(it)
+                continue
+            lit = lambda k, pairs=it[1]: next((v[1] for kk, v in pairs if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+            own_blob = jstr(lit("blob_url") or "")
+            res = []
+            for k, v in it[1]:
+                spec = re.fullmatch(r"([fgc])(\d+)-(\d+)", jstr(v[1]) or "") if MARK.fullmatch(k) and v[0] == "l" else None
+                if not spec:
+                    res.append((k, v))
+                    continue
+                fam, i, j = spec[1], int(spec[2]), int(spec[3])
+                base = _file_params(lit, None)
+                q = base["q"]
+                prefix = ref if fam == "f" else own_blob[:-len(q)] if fam == "g" and own_blob else None
+                params = {**base, "P": prefix}
+                res += [(jlex(ck), ("l", lexeme(fn(params)))) for ck, fn in _FILE_FAMS[fam][i:j + 1]]
+                changed[0] = True
+            item = ("o", res)
+            out.append(item)
+            lit2 = lambda k, pairs=res: next((v[1] for kk, v in pairs if jstr(kk) == k and v[0] == "l"), None)  # noqa: E731
+            q = _qp(jstr(lit2("filename") or "") or "\0")
+            blob = jstr(lit2("blob_url") or "")
+            if blob and blob.endswith(q) and _FILE_P.fullmatch(blob[:-len(q)]):
+                ref = blob[:-len(q)]
+        return out
+
+    out = walk_arrays(tree, per_array)
+    return out if changed[0] else None
+
+
+files_encode, files_decode = json_codec(
+    "ghfiles: \"~\" stands for omitted changes (= additions + deletions) and blob_url/raw_url/contents_url derived from filename and the first entry's blob_url",
+    _files_transform, _files_restore)
+
+
+def _file_entry(name, status, a, d, patch=None, prev=None, sha="6dcb09b5b57875f334f61aebed695e2e4193db5e", repo="acme-corp/widgets"):
+    q = name.replace(" ", "%20")
+    e = {"sha": "bbcd538c8e72b8c175046e27cc8f907076331401"[: 40 - len(name) % 7] + "0" * (len(name) % 7), "filename": name, "status": status,
+         "additions": a, "deletions": d, "changes": a + d, "blob_url": f"https://github.com/{repo}/blob/{sha}/{q}",
+         "raw_url": f"https://github.com/{repo}/raw/{sha}/{q}", "contents_url": f"https://api.github.com/repos/{repo}/contents/{q}?ref={sha}"}
+    if patch:
+        e["patch"] = patch
+    if prev:
+        e["previous_filename"] = prev
+    return e
+
+
+_PATCH = "@@ -38,6 +38,9 @@ def upload(path):\n     try:\n         put(path)\n+    except Exception:\n+        retry(path)\n     finally:\n         close()\n"
+FILES = [
+    _file_entry("src/upload.py", "modified", 3, 0, _PATCH),
+    _file_entry("src/retry.py", "added", 42, 0, "@@ -0,0 +1,42 @@\n+import time\n+\n+def retry(fn, tries=5):\n+    for i in range(tries):\n+        try:\n+            return fn()\n+        except Exception:\n+            time.sleep(2 ** i)\n"),
+    _file_entry("tests/test_upload.py", "modified", 12, 2, "@@ -1,4 +1,14 @@\n import pytest\n+from src.retry import retry\n"),
+    _file_entry("docs/read me.md", "modified", 1, 1, "@@ -1 +1 @@\n-Uploads\n+Uploads (with retries)\n"),
+    _file_entry("src/old_name.py", "renamed", 0, 0, prev="src/legacy.py"),
+    _file_entry("assets/diagram.png", "added", 0, 0),
+    _file_entry("CHANGELOG.md", "modified", 2, 0, "@@ -1,3 +1,5 @@\n # Changelog\n+\n+- retry uploads\n"),
+]
+GH_FILES_DOC = _pretty(FILES)
+
+case(
+    1425,
+    claim="In an array of GitHub file entries, the first entry keeps blob_url as the reference and every later entry drops blob_url, raw_url and contents_url (derived from the filename and the reference's owner, repo and head sha); every entry drops changes (additions plus deletions); a '§ghfiles' header marks the encoding and decode restores the exact bytes.",
+    encode=files_encode,
+    decode=files_decode,
+    fixtures=[
+        Fixture("pulls/N/files: 7 entries, a space in one name, a rename, a binary", GH_FILES_DOC, True),
+        Fixture("compact layout, no patches", _compact([_file_entry(f"pkg/mod{i}/file_{i}.py", "modified", i, i) for i in range(1, 9)]), True),
+        Fixture("entries from two commits: a new reference mid-array",
+                _pretty([_file_entry("a.py", "added", 1, 0), _file_entry("b.py", "added", 1, 0, sha="1" * 40), _file_entry("c.py", "added", 1, 0, sha="1" * 40)]), True),
+        Fixture("a url that does not follow the filename keeps its literal",
+                _pretty([_file_entry("a.py", "added", 1, 0), {**_file_entry("b.py", "added", 1, 0), "raw_url": "https://example.com/other"}, _file_entry("c.py", "added", 1, 0)]), True),
+        Fixture("a single entry has no reference to hoist", _pretty([{k: v for k, v in _file_entry("a.py", "added", 1, 0).items() if k not in ("raw_url", "contents_url", "changes")}]), False),
+        Fixture("changes that is not additions + deletions is kept",
+                _pretty([{**_file_entry("a.py", "added", 1, 0), "changes": 5}, {**_file_entry("b.py", "added", 1, 0), "changes": 7}]), True),
+        Fixture("3-space indent is not a layout we reproduce", json.dumps(FILES, indent=3) + "\n", False),
+        Fixture("input that starts like the escape line", RAW + GH_FILES_DOC, None),
+        Fixture("input that starts like the header", f"{SIG}ghfiles: x\n" + GH_FILES_DOC, None),
+        Fixture("a literal marker key in the input", _pretty([{**_file_entry("a.py", "added", 1, 0), "~": "f0-3"}]), None),
+    ],
+    min_gain=0.25,
+    idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
+)

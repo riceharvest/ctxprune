@@ -2037,6 +2037,66 @@ node    5791                root   44u     IPv4  16388       0t0    TCP localhos
 """
 
 LSOF_THREADS = [('5794', 'DelayedTa'), ('5795', 'node'), ('5796', 'node'), ('5797', 'node'), ('5798', 'node'), ('5801', 'node'), ('5802', 'node'), ('5803', 'node'), ('5804', 'node'), ('5805', 'node')]  # real TID, TASKCMD pairs from the same capture
+# real: qrcode.print_ascii(invert=True) of exp://192.168.1.23:8081; pyfiglet standard/slant/big/banner3; braille from a sine pattern
+ART_QR = """\
+█▀▀▀▀▀▀▀█▀██▀▀█▀█▀█▀▀▀▀▀▀▀█
+█ █▀▀▀█ █▄▄ ▀ ▀▄▀▀█ █▀▀▀█ █
+█ █   █ █▀▀ ▀█ ▀▄██ █   █ █
+█ ▀▀▀▀▀ █ █▀▄▀█▀█ █ ▀▀▀▀▀ █
+█▀▀▀██▀▀█ ▀ ▄▄▀▀██▀▀▀▀██▀▀█
+█▄▄ ▀ ▄▀▀█▄▄▀█▄███  █▄▀▀▄ █
+█▄█ █▀▄▀▄  █▀▀ █▀  █▄ ▀█▀██
+█▀ ▀▀██▀▀  ██ ▀▀▀█ ▀ █▀▀▄ █
+█▀▀▄ ▄ ▀ ▀██▄▄▀ █▀ ▀ ▀▀▄▄▀█
+█▀▀▀▀▀▀▀█▄ ▀▀█▄▄  █▀█ ▄██ █
+█ █▀▀▀█ █▄▀█▀▀ █▄ ▀▀▀  ▄  █
+█ █   █ █▀███ ▀▀▄  █▀▀▄█▀▀█
+█ ▀▀▀▀▀ █   ▄▄▀ ██ ▄▀ ▄▄█▀█
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+"""
+ART_FIG_STD = """\
+ ____             _                ___  _  __
+|  _ \\  ___ _ __ | | ___  _   _   / _ \\| |/ /
+| | | |/ _ \\ '_ \\| |/ _ \\| | | | | | | | ' / 
+| |_| |  __/ |_) | | (_) | |_| | | |_| | . \\ 
+|____/ \\___| .__/|_|\\___/ \\__, |  \\___/|_|\\_\\
+           |_|            |___/              
+"""
+ART_FIG_SLANT = """\
+    ____                 
+   / __ \\____  ____  ___ 
+  / / / / __ \\/ __ \\/ _ \\
+ / /_/ / /_/ / / / /  __/
+/_____/\\____/_/ /_/\\___/ 
+                         
+"""
+ART_FIG_BIG = """\
+                       
+                       
+ _ __  _ __  _ __ ___  
+| '_ \\| '_ \\| '_ ` _ \\ 
+| | | | |_) | | | | | |
+|_| |_| .__/|_| |_| |_|
+      | |              
+      |_|              
+"""
+ART_FIG_BANNER = """\
+########  ##     ## #### ##       ########  
+##     ## ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+########  ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+##     ## ##     ##  ##  ##       ##     ## 
+########   #######  #### ######## ########  
+"""
+ART_BRAILLE = """\
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠀⠀⠀⠀⠀⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋⠀⠀⠀⠀⠈⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠃⠀⠀⠀⠀⠘⠻⣿⣿⣿⣿
+⠈⠙⠻⠿⢿⡿⠿⠟⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⠻⠿⢿⠿⠿⠛⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠻⠿⢿⠿⠿⠛⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠛⠿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⢀⣠⣴⣶⣿⣿⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣴⣶⣿⣷⣶⣦⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣶⣾⣿⣷⣶⣤⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣶
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⠀⠀⠀⠀⠀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣄⠀⠀⠀⠀⢀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⡄⠀⠀⠀⠀⢠⣶⣿⣿⣿⣿
+⢿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟⠁⠀⠀⠀⠀⠀⠙⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠁⠀⠀⠀⠀⠀⠙⠻⢿⣿⣿⣿⣿⣿⣿⣿⣿⠿⠛⠁⠀⠀⠀⠀⠀⠙⠿⣿⣿⣿
+"""
 # ===============================================================================================================
 # #219 Fold threads with identical stacks in jstack, Go goroutine and gdb dumps.
 # A thread is a paragraph (blank-line separated) whose first line is a jstack, goroutine or gdb header. Its key is the
@@ -4352,4 +4412,337 @@ case(
         Fixture("output that already has a threads trailer", make_lsof(3, False).replace("\n", "\n# threads 5791 [[\"5794\",\"x\"]]\n", 1), None),
     ],
     min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #518 git ls-remote of a GitHub remote: collapse the refs/pull/N/head and /merge series to number ranges, keep HEAD, every
+# branch and the 10 newest tags with their shas, and reduce older tags to a names-only line. Needs >= 20 pull refs (resp. > 10
+# tags) to act, so `git ls-remote origin refs/pull/12/head` (a ref named in the command) is left alone.
+# 'Newest' = highest tuple of the integers in the tag name; tags without digits (latest, stable) always keep their line.
+# Real format: '<40 hex>\t<refname>' sorted by refname (so pull/10 sorts before pull/2); peeled annotated tags as 'refname^{}'.
+
+_LS = re.compile(r"^([0-9a-f]{40})\t(\S+)$")
+_PULL = re.compile(r"^refs/pull/(\d+)/(head|merge)$")
+_PULL_SUM = re.compile(r"^pull (head|merge) refs \((\d+)\): ([\d,\-]+)$")
+_OLD_TAGS = re.compile(r"^older tags, names only \((\d+)\): (\S.*)$")
+NEWEST_TAGS = 10
+
+
+def _tag_key(name: str):
+    nums = tuple(int(x) for x in re.findall(r"\d+", name))
+    return (nums, name) if nums else None
+
+
+def _ranges(nums: list[int]) -> str:
+    out, s = [], sorted(set(nums))
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and s[j + 1] == s[j] + 1:
+            j += 1
+        out.append(str(s[i]) if i == j else f"{s[i]}-{s[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def _expand(expr: str) -> list[int]:
+    out = []
+    for part in expr.split(","):
+        a, _, b = part.partition("-")
+        out += list(range(int(a), int(b or a) + 1))
+    return out
+
+
+def fold_refs(text: str) -> str:
+    trail = text.endswith("\n")
+    lines = (text[:-1] if trail else text).split("\n")
+    if any(_PULL_SUM.match(l) or _OLD_TAGS.match(l) for l in lines):
+        return text
+    m_all = [_LS.match(l) for l in lines]
+    pulls = {"head": [], "merge": []}
+    for m in m_all:
+        if m and (p := _PULL.match(m.group(2))):
+            pulls[p.group(2)].append(int(p.group(1)))
+    n_pull = len(pulls["head"]) + len(pulls["merge"])
+    tags = [m.group(2)[10:] for m in m_all if m and m.group(2).startswith("refs/tags/") and not m.group(2).endswith("^{}")]
+    versioned = sorted({t for t in tags if _tag_key(t)}, key=_tag_key, reverse=True)
+    fold_tags = len(versioned) > NEWEST_TAGS + 8
+    old = set(versioned[NEWEST_TAGS:]) if fold_tags else set()
+    if n_pull < 20 and not old:
+        return text
+    out: list[str] = []
+    pull_done = tags_done = False
+    for l, m in zip(lines, m_all):
+        if m and n_pull >= 20 and _PULL.match(m.group(2)):
+            if not pull_done:
+                pull_done = True
+                for kind in ("head", "merge"):
+                    if pulls[kind]:
+                        out.append(f"pull {kind} refs ({len(set(pulls[kind]))}): {_ranges(pulls[kind])}")
+            continue
+        if m and m.group(2).startswith("refs/tags/"):
+            name = m.group(2)[10:]
+            base = name[:-3] if name.endswith("^{}") else name
+            if base in old:
+                if not tags_done:
+                    tags_done = True
+                    out.append(f"older tags, names only ({len(old)}): " + " ".join(sorted(old, key=_tag_key)))
+                continue
+        out.append(l)
+    # duplicates in the pull series would make the count ambiguous: refuse
+    if len(set(pulls["head"])) != len(pulls["head"]) or len(set(pulls["merge"])) != len(pulls["merge"]):
+        return text
+    res = "\n".join(out) + ("\n" if trail else "")
+    return res if len(res) < len(text) else text
+
+
+def probes_518(text: str) -> dict:
+    """Reader view: HEAD, every branch with its sha, all tag names, the shas of the 10 newest tags, the PR numbers with head / merge refs, other refs verbatim."""
+    heads, other, tag_sha, tag_names, pull = [], [], {}, set(), {"head": set(), "merge": set()}
+    stray = []
+    for l in text.split("\n"):
+        if (m := _LS.match(l)):
+            sha, ref = m.groups()
+            if ref.startswith("refs/heads/") or ref == "HEAD":
+                heads.append((sha, ref))
+            elif ref.startswith("refs/tags/"):
+                name = ref[10:]
+                if name.endswith("^{}"):
+                    tag_sha[name] = sha
+                else:
+                    tag_names.add(name)
+                    tag_sha[name] = sha
+            elif (p := _PULL.match(ref)):
+                pull[p.group(2)].add(int(p.group(1)))
+            else:
+                other.append(l)
+        elif (m := _PULL_SUM.match(l)):
+            pull[m.group(1)].update(_expand(m.group(3)))
+        elif (m := _OLD_TAGS.match(l)):
+            tag_names.update(m.group(2).split(" "))
+        else:
+            stray.append(l)
+    ranked = sorted({t for t in tag_names if _tag_key(t)}, key=_tag_key, reverse=True)[:NEWEST_TAGS]
+    nums = lambda s: sorted(s)  # noqa: E731
+    return {
+        "HEAD and branches (sha, ref)": heads,
+        "all tag names": sorted(tag_names),
+        "newest tags with sha (and peeled sha)": [(t, tag_sha.get(t), tag_sha.get(t + "^{}")) for t in ranked],
+        "tags without digits (full lines)": sorted((t, tag_sha.get(t)) for t in tag_names if not _tag_key(t) and t in tag_sha),
+        "PR numbers with a head ref": nums(pull["head"]),
+        "PR numbers with a merge ref": nums(pull["merge"]),
+        "other refs": other,
+        "other lines": [l for l in stray if l],
+    }
+
+
+def _sha(s: str) -> str:
+    return hashlib.sha1(s.encode()).hexdigest()
+
+
+def make_ls_remote(n_prs: int = 1500, n_tags: int = 90, seed: int = 4) -> str:
+    rnd = random.Random(seed)
+    refs = [("HEAD", _sha("main"))]
+    for b in ["main", "develop", "release/1.x", "release/2.x", "gh-pages", "dependabot/npm_and_yarn/lodash-4.17.21", "dependabot/pip/urllib3-2.2.1", "feature/oauth-device-flow", "fix/flaky-retry-test"]:
+        refs.append((f"refs/heads/{b}", _sha(b)))
+    nums = sorted(rnd.sample(range(1, int(n_prs * 2.3)), n_prs))
+    for n in nums:
+        refs.append((f"refs/pull/{n}/head", _sha(f"h{n}")))
+        if n > nums[-1] - 120 or rnd.random() < 0.04:
+            refs.append((f"refs/pull/{n}/merge", _sha(f"m{n}")))
+    for i in range(n_tags):
+        t = f"v{i // 30}.{i // 5 % 6}.{i % 5}"
+        refs.append((f"refs/tags/{t}", _sha("t" + t)))
+        if i % 2 == 0:
+            refs.append((f"refs/tags/{t}^{{}}", _sha("c" + t)))
+    refs += [("refs/tags/latest", _sha("latest")), ("refs/tags/nightly", _sha("nightly"))]
+    refs.sort(key=lambda r: (r[0] != "HEAD", r[0]))
+    return "".join(f"{s}\t{r}\n" for r, s in refs)
+
+
+_LSR = make_ls_remote()
+case(
+    518,
+    claim="git ls-remote output: with 20+ pull refs the refs/pull/N/head and /merge series become 'pull head refs (N): ranges' lines, and with more than 18 versioned tags the older ones become one names-only line; HEAD, every branch, "
+          "the 10 newest tags with their shas (and peeled shas), tags without digits, every tag name, and the exact set of PR numbers with a head and with a merge ref are unchanged.",
+    loses="the shas of all pull refs and of tags older than the 10 newest, and the peeled shas of those tags",
+    encode=fold_refs,
+    probes=probes_518,
+    fixtures=[
+        Fixture("1,500 PRs (sparse numbers, ~120 open with merge refs), 9 branches, 92 tags", _LSR, True),
+        Fixture("small remote: 60 PRs, 12 tags", make_ls_remote(60, 12, seed=2), True),
+        Fixture("many tags, no PRs (a plain git host)", "".join(l + "\n" for l in make_ls_remote(0, 70, seed=3).split("\n") if l), True),
+        Fixture("ls-remote naming one ref (refs/pull/12/head)", f"{_sha('h12')}\trefs/pull/12/head\n", False),
+        Fixture("19 pull refs and 3 tags (under the thresholds)", "".join(f"{_sha(str(i))}\trefs/pull/{i}/head\n" for i in range(1, 20)) + "".join(f"{_sha('t' + str(i))}\trefs/tags/v1.0.{i}\n" for i in range(3)), False),
+        Fixture("not ls-remote", "Compiling core v0.4.2\n", False),
+        Fixture("output that already holds a summary line", _LSR.replace("\n", "\npull head refs (3): 1-3\n", 1), None),
+    ],
+    min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #613 Stub QR codes, figlet banners and terminal block art. A run of 4+ consecutive lines made only of block-element or
+# braille glyphs (QR codes from expo / wrangler / aws sso; ANSI colour codes are ignored), or of figlet-style ASCII glyphs,
+# is replaced by '[block art omitted: R lines x C cols (kind)]'. ASCII art is matched narrowly because it is the family that
+# could eat real text: only the characters _ | / \ ( ) ' ` , . < > (no letters, digits, + - = * :), at least 3 different
+# glyphs and 3 different lines in the run, and one of _ ( ) ' ` , . < > among them (git log --graph and tables have none of
+# those without text beside them); a '#'-only family needs 5 lines and 3 different lines. Side-by-side art with text (neofetch)
+# is NOT handled: those lines carry words, so they never match.
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_ART_BLOCK = re.compile(r"^[ \xa0\u2580-\u259f\u2800-\u28ff]*$")  # python-qrcode prints NO-BREAK SPACE between blocks
+_ART_ASCII = re.compile(r"^[ \xa0_|/\\()'`,.<>]*$")
+_ART_HASH = re.compile(r"^[ \xa0#]*$")
+_STUB_ART = re.compile(r"^\[block art omitted: (\d+) lines x (\d+) cols \((block|braille|ascii)\)\]$")
+
+
+def _art_family(line: str) -> str | None:
+    t = _ANSI.sub("", line).rstrip()
+    body = t.replace(" ", "").replace("\xa0", "")
+    if not body:
+        return None
+    if _ART_BLOCK.match(t):
+        return "block" if len(body) >= 4 else None
+    if len(body) >= 4 and _ART_ASCII.match(t):
+        return "ascii"
+    if len(body) >= 4 and _ART_HASH.match(t):
+        return "hash"
+    return None
+
+
+def _run_ok(fam: str, run: list[str]) -> bool:
+    texts = [_ANSI.sub("", l).rstrip() for l in run]
+    if fam == "block":
+        return len(run) >= 4
+    if fam == "hash":
+        return len(run) >= 5 and len(set(texts)) >= 3
+    glyphs = {c for t in texts for c in t if c not in " \xa0"}
+    return len(run) >= 4 and len(glyphs) >= 3 and len(set(texts)) >= 3 and bool(glyphs & set("_()'`,.<>"))
+
+
+def _runs(lines: list[str]) -> list[tuple[int, int, str]]:
+    """[(start, end exclusive, kind)] of art runs."""
+    out, i = [], 0
+    fams = [_art_family(l) for l in lines]
+    while i < len(lines):
+        f = fams[i]
+        if f is None:
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and fams[j] == f:
+            j += 1
+        if _run_ok(f, lines[i:j]):
+            kind = "ascii" if f in ("ascii", "hash") else ("braille" if not any("\u2580" <= c <= "\u259f" for l in lines[i:j] for c in l) else "block")
+            out.append((i, j, kind))
+        i = j
+    return out
+
+
+def stub_art(text: str) -> str:
+    lines = text.split("\n")
+    if any(_STUB_ART.match(l) for l in lines):
+        return text
+    runs = _runs(lines)
+    if not runs:
+        return text
+    out, pos = [], 0
+    for s, e, kind in runs:
+        out += lines[pos:s]
+        cols = max(len(_ANSI.sub("", l).rstrip()) for l in lines[s:e])
+        out.append(f"[block art omitted: {e - s} lines x {cols} cols ({kind})]")
+        pos = e
+    out += lines[pos:]
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def probes_613(text: str) -> dict:
+    """Sequence view: every text line verbatim in place, and each art block as (kind, rows, cols); runs found by counting glyph classes per line."""
+    lines = text.split("\n")
+    seq: list = []
+    run: list[str] = []
+    run_fam = None
+
+    def flush():
+        nonlocal run, run_fam
+        if run:
+            ok = _run_ok(run_fam, run)
+            if ok:
+                kinds = {"block" if "\u2580" <= c <= "\u259f" else "braille" for l in run for c in l if "\u2580" <= c <= "\u259f" or "\u2800" <= c <= "\u28ff"}
+                kind = "ascii" if run_fam in ("ascii", "hash") else ("block" if "block" in kinds else "braille")
+                seq.append(("art", kind, len(run), max(len(_ANSI.sub("", l).rstrip()) for l in run)))
+            else:
+                seq.extend(("line", l) for l in run)
+        run, run_fam = [], None
+
+    for l in lines:
+        if (m := _STUB_ART.match(l)):
+            flush()
+            seq.append(("art", m.group(3), int(m.group(1)), int(m.group(2))))
+            continue
+        # classify by counting characters instead of regexes
+        t = _ANSI.sub("", l).rstrip()
+        body = [c for c in t if c not in " \xa0"]
+        if not body:
+            fam = None
+        elif all("\u2580" <= c <= "\u259f" or "\u2800" <= c <= "\u28ff" for c in body):
+            fam = "block" if len(body) >= 4 and all(c in " \xa0" or "\u2580" <= c <= "\u259f" or "\u2800" <= c <= "\u28ff" for c in t) else None
+        elif len(body) >= 4 and all(c in "_|/\\()'`,.<>" for c in body):
+            fam = "ascii"
+        elif len(body) >= 4 and all(c == "#" for c in body):
+            fam = "hash"
+        else:
+            fam = None
+        if fam is not None and (run_fam is None or fam == run_fam):
+            run.append(l)
+            run_fam = fam
+        else:
+            flush()
+            if fam is not None:
+                run, run_fam = [l], fam
+            else:
+                seq.append(("line", l))
+    flush()
+    return {"sequence of text lines and art blocks (kind, rows, cols)": seq}
+
+
+_EXPO = "Starting Metro Bundler\n" + ART_QR + "\n› Metro waiting on exp://192.168.1.23:8081\n› Scan the QR code above with Expo Go (Android) or the Camera app (iOS)\n\n› Press s │ switch to development build\n› Press a │ open Android\n"
+_ANSI_QR = "\n".join(("\x1b[47m\x1b[30m" + l + "\x1b[0m") if l else l for l in ART_QR.split("\n"))
+_DEPLOY = ("$ ./deploy.sh production\nbuilding image acme/web:2.3.1 ... done\n" + ART_FIG_STD + "pushing to registry ... done\nrolling out 3 replicas\n" + ART_FIG_SLANT +
+           "health checks passed (3/3)\n" + ART_FIG_BIG + "all done\n")
+_NEG_GRAPH = "* bf1922c docs/ideas: gate cases checkpoint\n* 56e9126 docs/ideas: rename lossless/ to gate/\n*   7070068 Merge main (squash of #4)\n|\\  \n| * 0b85430 docs/ideas: runnable fidelity gate\n* | 26bf41b docs/ideas: runnable fidelity gate\n|/  \n* 3e0adc3 checkpoint\n"
+_NEG_GRAPH_PURE = "| |\\  \\\n| | | |\n| |/ /\n| | |\n|/| |\n| | |\n| |\\ \\\n"
+_NEG_TABLE = "+--------+-------+\n| name   | count |\n+--------+-------+\n| alpha  |     3 |\n| beta   |    12 |\n+--------+-------+\n"
+_NEG_BOX = "┌────────┬───────┐\n│ name   │ count │\n├────────┼───────┤\n│ alpha  │     3 │\n│ beta   │    12 │\n└────────┴───────┘\n"
+_NEG_TREE = ".\n├── docs\n│   ├── ideas\n│   │   ├── dropped.md\n│   │   └── shortlist.md\n│   └── README.md\n├── src\n│   └── main.py\n└── README.md\n"
+_NEG_MISC = ("Progress ████████░░░░░░░░ 52%\nspark ▁▂▃▅▇█▇▅▃▂\n################\n# build banner #\n################\n----------------\n"
+             "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n>>> print(1)\n1\n>>>\n>>>\n")
+_NEG_PROSE = "The quick brown fox jumps over the lazy dog. (See the appendix, section 3.)\nIt's a well-known pangram, used to test typefaces.\nOne, two, three... and so on.\nThis is only prose, even with / and \\ and _ in it.\n"
+_NEG_SHORT_QR = "\n".join(ART_QR.split("\n")[:3]) + "\n"
+case(
+    613,
+    claim="A run of 4+ consecutive lines of only block-element/braille glyphs (QR codes, ANSI colour ignored) or figlet-style ASCII glyphs becomes one '[block art omitted: R lines x C cols (kind)]' line; every other line, in place, is byte-identical, "
+          "and prose, markdown and box-drawing tables, tree output, git log --graph, progress bars, diffs and code banners never match.",
+    loses="the art itself (a QR code's payload, the glyph shapes) and the text a figlet banner spelled, and any art drawn side by side with words (neofetch logos), which is not stubbed at all",
+    encode=stub_art,
+    probes=probes_613,
+    fixtures=[
+        Fixture("expo start: QR code (14 lines x 27 cols) between text lines", _EXPO, True),
+        Fixture("the same QR with ANSI colour codes on every row", _EXPO.replace(ART_QR, _ANSI_QR), True),
+        Fixture("deploy log with figlet standard, slant and big banners (art at start, middle, end)", _DEPLOY, True),
+        Fixture("art first and art last", ART_FIG_STD + "ok\n" + ART_QR, True),
+        Fixture("braille image (6 lines x 60 cols)", "preview:\n" + ART_BRAILLE + "done\n", True),
+        Fixture("banner3 figlet made of '#'", "building\n" + ART_FIG_BANNER + "finished\n", True),
+        Fixture("prose with / \\ _ ( ) in it", _NEG_PROSE, False),
+        Fixture("markdown table and ASCII table", "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n" + _NEG_TABLE, False),
+        Fixture("box-drawing table", _NEG_BOX, False),
+        Fixture("tree output", _NEG_TREE, False),
+        Fixture("git log --graph", _NEG_GRAPH, False),
+        Fixture("pure graph columns of a busy merge history (no text beside them)", _NEG_GRAPH_PURE, False),
+        Fixture("progress bar, sparkline, banner comment, hr, diff, REPL prompts", _NEG_MISC, False),
+        Fixture("QR-like block art of only 3 lines", _NEG_SHORT_QR, False),
+        Fixture("text that already looks like a stub", "[block art omitted: 3 lines x 5 cols (ascii)]\n" + ART_QR, None),
+    ],
+    min_gain=0.3,
 )

@@ -57,6 +57,410 @@ def cat(*parts: str) -> str:
 
 
 # ===============================================================================================================
+# #1151 Warnings inside a shared header print once per translation unit that includes it; only the 'In file included
+# from' chain differs. Keep one copy per distinct (context line, warning, echoed code) and say how many TUs hit it.
+# RULE: probe = every distinct header warning site with the number of translation units that reported it (a Counter
+# over the header lines, adding the encoder's '[ctxprune: ... more translation units]' counts), plus every other
+# diagnostic and make command, verbatim. Real capture: 30 TUs share noisy.h, 2 of them also have a warning of their own.
+
+MAKE_30_TUS = (
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod1.cpp -o mod1.o\n'
+    'In file included from mod1.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod10.cpp -o mod10.o\n'
+    'In file included from mod10.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n'
+    'In file included from mod11.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod12.cpp -o mod12.o\n'
+    'In file included from mod12.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod13.cpp -o mod13.o\n'
+    'In file included from mod13.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod14.cpp -o mod14.o\n'
+    'In file included from mod14.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod15.cpp -o mod15.o\n'
+    'In file included from mod15.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod16.cpp -o mod16.o\n'
+    'In file included from mod16.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod17.cpp -o mod17.o\n'
+    'In file included from mod17.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod18.cpp -o mod18.o\n'
+    'In file included from mod18.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod19.cpp -o mod19.o\n'
+    'In file included from mod19.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    "noisy.h: In function 'const char* name_of(int)':\n"
+    'noisy.h:15:1: warning: control reaches end of non-void function [-Wreturn-type]\n'
+    '   15 | }\n'
+    '      | ^\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod2.cpp -o mod2.o\n'
+    'In file included from mod2.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod20.cpp -o mod20.o\n'
+    'In file included from mod20.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod21.cpp -o mod21.o\n'
+    'In file included from mod21.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod22.cpp -o mod22.o\n'
+    'In file included from mod22.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod23.cpp -o mod23.o\n'
+    'In file included from mod23.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod24.cpp -o mod24.o\n'
+    'In file included from mod24.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod25.cpp -o mod25.o\n'
+    'In file included from mod25.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod26.cpp -o mod26.o\n'
+    'In file included from mod26.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod27.cpp -o mod27.o\n'
+    'In file included from mod27.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod28.cpp -o mod28.o\n'
+    'In file included from mod28.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod29.cpp -o mod29.o\n'
+    'In file included from mod29.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod3.cpp -o mod3.o\n'
+    'In file included from mod3.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod30.cpp -o mod30.o\n'
+    'In file included from mod30.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod4.cpp -o mod4.o\n'
+    'In file included from mod4.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod5.cpp -o mod5.o\n'
+    'In file included from mod5.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod6.cpp -o mod6.o\n'
+    'In file included from mod6.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod7.cpp -o mod7.o\n'
+    'In file included from mod7.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    "mod7.cpp: In function 'int g7(int)':\n"
+    "mod7.cpp:2:21: warning: unused variable 'own' [-Wunused-variable]\n"
+    '    2 | int g7(int x) { int own = 1; return scale(x); }\n'
+    '      |                     ^~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod8.cpp -o mod8.o\n'
+    'In file included from mod8.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+    'g++ -Wall -Wextra -O2 -std=c++17 -c mod9.cpp -o mod9.o\n'
+    'In file included from mod9.cpp:1:\n'
+    "noisy.h: In function 'int scale(int)':\n"
+    "noisy.h:5:9: warning: unused variable 'unused_factor' [-Wunused-variable]\n"
+    '    5 |     int unused_factor = 3;\n'
+    '      |         ^~~~~~~~~~~~~\n'
+    "noisy.h:6:9: warning: unused variable 'shift' [-Wunused-variable]\n"
+    '    6 |     int shift;\n'
+    '      |         ^~~~~\n'
+)
+
+_W_HDR = re.compile(r"^(\S[^:]*?):(\d+):(?:(\d+):)? (warning|error|fatal error|note|remark): (.*)$")
+_W_CHAIN = re.compile(r"^In file included from |^\s+from \S.*:\d+[,:]$")
+_W_CTX = re.compile(r"^\S[^:]*: In .*:$")
+_W_HDR_EXT = (".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".tcc", ".inc")
+_W_NOTE = re.compile(r"^\[ctxprune: this warning also occurred in (\d+) more translation units?\]$")
+_W_GUTTER = re.compile(r"^\d+ \|")
+
+
+def _w_foldable(m) -> bool:
+    return m is not None and m.group(4) == "warning" and m.group(1).endswith(_W_HDR_EXT)
+
+
+def _w_body(l: str) -> bool:
+    return l[:1].isspace() and not _W_CHAIN.match(l) or bool(_W_GUTTER.match(l)) or bool(_W_NOTE.match(l))
+
+
+def dedupe_header_warnings(text: str) -> str:
+    lines = text.split("\n")
+    n = len(lines)
+    items, i, ctx = [], 0, None  # item: [kind, start, end, key, count]
+    while i < n:
+        l = lines[i]
+        if _W_CHAIN.match(l):
+            items.append(["chain", i, i + 1, None, 0])
+            ctx = None
+            i += 1
+        elif _W_CTX.match(l):
+            items.append(["ctx", i, i + 1, None, 0])
+            ctx = l
+            i += 1
+        elif (m := _W_HDR.match(l)) and m.group(4) in ("warning", "error", "fatal error"):
+            j = i + 1
+            while j < n and (_w_body(lines[j]) or ((mm := _W_HDR.match(lines[j])) and mm.group(4) in ("note", "remark"))):
+                j += 1
+            extra = sum(int(_W_NOTE.match(x).group(1)) for x in lines[i:j] if _W_NOTE.match(x))
+            body = tuple(x for x in lines[i:j] if not _W_NOTE.match(x))
+            items.append(["unit", i, j, (ctx, body) if _w_foldable(m) else None, 1 + extra])
+            i = j
+        else:
+            items.append(["text", i, i + 1, None, 0])
+            ctx = None
+            i += 1
+    first, total = {}, Counter()
+    for k, it in enumerate(items):
+        if it[0] == "unit" and it[3] is not None:
+            total[it[3]] += it[4]
+            first.setdefault(it[3], k)
+    dropped = [it[0] == "unit" and it[3] is not None and first[it[3]] != k for k, it in enumerate(items)]
+    if not any(dropped):
+        return text
+    # a prefix line (chain / ctx) goes when every unit it introduces went
+    keep = [not d for d in dropped]
+    for k, it in enumerate(items):
+        if it[0] in ("chain", "ctx"):
+            j, units = k + 1, []
+            while j < len(items) and items[j][0] in ("unit", "ctx"):
+                if items[j][0] == "ctx" and it[0] == "ctx":
+                    break
+                if items[j][0] == "unit":
+                    units.append(j)
+                j += 1
+            keep[k] = not (units and all(dropped[u] for u in units))
+    out = []
+    for k, it in enumerate(items):
+        if not keep[k]:
+            continue
+        seg = [x for x in lines[it[1]:it[2]] if not (it[0] == "unit" and _W_NOTE.match(x))]
+        out += seg
+        if it[0] == "unit" and it[3] is not None and total[it[3]] > 1 and first[it[3]] == k:
+            out.append(f"[ctxprune: this warning also occurred in {total[it[3]] - 1} more translation unit{'s' if total[it[3]] > 2 else ''}]")
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_1151(text: str) -> dict:
+    sites, others, texts = Counter(), [], []
+    last = None
+    for l in text.split("\n"):
+        if (m := _W_NOTE.match(l)):
+            if last is not None:
+                sites[last] += int(m.group(1))
+            continue
+        if _W_CHAIN.match(l) or _W_CTX.match(l) or _w_body(l):
+            continue
+        if (m := _W_HDR.match(l)):
+            if _w_foldable(m):
+                sites[l] += 1
+                last = l
+            elif m.group(4) in ("warning", "error", "fatal error"):
+                others.append(l)
+                last = None
+            continue
+        texts.append(l)
+        last = None
+    return {"header warning site -> number of translation units": sorted(sites.items()), "errors and own-file warnings, verbatim": others,
+            "other output lines (make commands, summaries)": texts}
+
+
+case(
+    1151,
+    claim="A warning in a header (.h/.hpp/...) that repeats with the same context line and echoed code in several translation units is printed once, followed by '[ctxprune: this warning also occurred in N more translation units]'; the include-chain and context lines of fully duplicated blocks go with them. Every distinct header warning site with its translation-unit count, every error and every warning in a non-header file, and every make command line are unchanged.",
+    loses="which translation units reported a header warning (only how many) and the include chains of the dropped repeats",
+    encode=dedupe_header_warnings,
+    probes=probes_1151,
+    fixtures=lambda: [
+        Fixture("make -k over 30 .cpp files sharing noisy.h; two have an extra warning (real, gcc 13)", MAKE_30_TUS, True),
+        Fixture("two TUs only", "".join(MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod12.cpp -o mod12.o\n")[0:1]).split("g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n")[0] + "g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n" + MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n")[1].split("g++ -Wall -Wextra -O2 -std=c++17 -c mod12.cpp -o mod12.o\n")[0], True),
+        Fixture("one TU: nothing repeats", MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod10.cpp -o mod10.o\n")[0], False),
+        Fixture("header ERROR repeated in three TUs is not folded", "g++ -c a.cpp\nIn file included from a.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\ng++ -c b.cpp\nIn file included from b.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\ng++ -c c.cpp\nIn file included from c.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\n", False),
+        Fixture("identical warnings in a .cpp (not a header) repeat on purpose", "a.cpp:2:5: warning: unused variable 'x' [-Wunused-variable]\n    2 |     int x;\n      |         ^\na.cpp:2:5: warning: unused variable 'x' [-Wunused-variable]\n    2 |     int x;\n      |         ^\n", False),
+        Fixture("text that looks like the annotation", "[ctxprune: this warning also occurred in 4 more translation units]\nIn file included from a.cpp:1:\nx.h:1:1: warning: w [-Wall]\n", None),
+    ],
+    min_gain=0.4,
+)
+
+
+
+# ===============================================================================================================
 # #118 Strip echoed source lines and caret/squiggle markers from diagnostics (ruff full, tsc --pretty, gcc, clang,
 # Python 3.11+ tracebacks, difflib '?' lines). RULE: file:line:col and the message of every diagnostic must survive.
 
@@ -2699,17 +3103,18 @@ def _st_split(line: str):
 
 
 def _st_join(lines: list[str]) -> list[str]:
-    """Replace each <unfinished ...> line + its <... resumed> line by one joined line at the resumed position."""
+    """Replace each <unfinished ...> line + its <... resumed> line by one joined line at the resumed position. A pid has
+    at most one call in flight, so its next line is either the resumption or proves the earlier call never resumed."""
     pending: dict = {}
     out: list = list(lines)
     for i, l in enumerate(lines):
         pre, pid, body = _st_split(l)
-        if (m := _ST_RES.match(body)) and (pid, m.group(1)) in pending:
-            j, pre0, head = pending.pop((pid, m.group(1)))
-            out[i] = pre0 + head + m.group(2)
-            out[j] = None
+        p = pending.pop(pid, None)
+        if p is not None and (m := _ST_RES.match(body)) and m.group(1) == p[3]:
+            out[i] = p[1] + p[2] + m.group(2)
+            out[p[0]] = None
         elif body.endswith(_ST_UNF) and (m := _ST_CALL.match(body)):
-            pending[(pid, m.group(1))] = (i, pre, body[: -len(_ST_UNF)])
+            pending[pid] = (i, pre, body[: -len(_ST_UNF)], m.group(1))
     return [l for l in out if l is not None]
 
 
@@ -2780,12 +3185,18 @@ def probes_508(text: str) -> dict:
             continue
         m = re.match(r"^(?:\[pid +(\d+)\] |(\d+) +)?(.*)$", raw, re.S)
         pid, body = m.group(1) or m.group(2), m.group(3)
-        if (r := re.match(r"^<\.\.\. (\w+) resumed>(.*)$", body, re.S)) and (pid, r.group(1)) in pending:
-            events.append((pid, pending.pop((pid, r.group(1))) + r.group(2)))
-        elif body.endswith(" <unfinished ...>") and (c := re.match(r"^(\w+)\(", body)):
-            pending[(pid, c.group(1))] = body[: -len(" <unfinished ...>")]
+        held = pending.pop(pid, None)
+        if held and (r := re.match(r"^<\.\.\. (\w+) resumed>(.*)$", body, re.S)) and r.group(1) == held[0]:
+            events.append((pid, held[1] + r.group(2)))
+            continue
+        if held:
+            events.append((pid, held[1] + " <unfinished ...>"))
+        if body.endswith(" <unfinished ...>") and (c := re.match(r"^(\w+)\(", body)):
+            pending[pid] = (c.group(1), body[: -len(" <unfinished ...>")])
         else:
             events.append((pid, body))
+    for pid, held in pending.items():
+        events.append((pid, held[1] + " <unfinished ...>"))
     failures, net, opens, writes, procs, marks = [], [], [], [], [], []
     for pid, ev in events:
         c = re.match(r"^(\w+)\(", ev)
@@ -2824,6 +3235,554 @@ case(
         Fixture("unfinished call that never resumes (killed) and a stray resumed line", '[pid 5] read(3,  <unfinished ...>\n[pid 6] <... futex resumed>) = 0\n+++ killed by SIGKILL +++\n', None),
     ],
     min_gain=0.3,
+)
+
+
+
+# ===============================================================================================================
+# #604 tsc --traceResolution and --listFiles: fold each successfully resolved block to one line, keep unresolved
+# blocks whole, collapse lib.*.d.ts and node_modules/@types entries of --listFiles to counts. RULE: every
+# (specifier, importing file) -> result, every unresolved block verbatim, every user file and the lib/@types counts.
+# Real finding kept in the fixtures: in a project with @types/node, 291 of 421 blocks (70% of 391k chars in the
+# full capture) are 'not resolved' blocks for ambient 'node:*' modules, which this rule keeps whole by design.
+
+TSC_TRACE_LISTFILES = (
+    "======== Resolving module './b' from '/work/app/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/app/src/b', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/app/src/b.ts' exists - use it as a name resolution result.\n"
+    "======== Module name './b' was successfully resolved to '/work/app/src/b.ts'. ========\n"
+    "======== Resolving module './util/fmt' from '/work/app/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/app/src/util/fmt', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/app/src/util/fmt.ts' exists - use it as a name resolution result.\n"
+    "======== Module name './util/fmt' was successfully resolved to '/work/app/src/util/fmt.ts'. ========\n"
+    "======== Resolving module './does-not-exist' from '/work/app/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/app/src/does-not-exist', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/app/src/does-not-exist.ts' does not exist.\n"
+    "File '/work/app/src/does-not-exist.tsx' does not exist.\n"
+    "File '/work/app/src/does-not-exist.d.ts' does not exist.\n"
+    "File '/work/app/src/does-not-exist.js' does not exist.\n"
+    "File '/work/app/src/does-not-exist.jsx' does not exist.\n"
+    "Directory '/work/app/src/does-not-exist' does not exist, skipping all lookups in it.\n"
+    "======== Module name './does-not-exist' was not resolved. ========\n"
+    "======== Resolving module 'left-pad' from '/work/app/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/app/src/package.json' does not exist.\n"
+    "Found 'package.json' at '/work/app/package.json'.\n"
+    "Loading module 'left-pad' from 'node_modules' folder, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    'Searching all ancestor node_modules directories for preferred extensions: TypeScript, Declaration.\n'
+    "Directory '/work/app/src/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/app/node_modules/left-pad.ts' does not exist.\n"
+    "File '/work/app/node_modules/left-pad.tsx' does not exist.\n"
+    "File '/work/app/node_modules/left-pad.d.ts' does not exist.\n"
+    "File '/work/app/node_modules/@types/left-pad.d.ts' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    'Searching all ancestor node_modules directories for fallback extensions: JavaScript, JSON.\n'
+    "Directory '/work/app/src/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/app/node_modules/left-pad.js' does not exist.\n"
+    "File '/work/app/node_modules/left-pad.jsx' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    "======== Module name 'left-pad' was not resolved. ========\n"
+    "======== Resolving module '../b' from '/work/app/src/util/fmt.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/app/src/b', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/app/src/b.ts' exists - use it as a name resolution result.\n"
+    "======== Module name '../b' was successfully resolved to '/work/app/src/b.ts'. ========\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist.\n"
+    "Found 'package.json' at '/usr/lib/node_modules/typescript/package.json'.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/lib/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/usr/lib/node_modules/typescript/package.json' exists according to earlier cached lookups.\n"
+    "src/a.ts(3,26): error TS2307: Cannot find module './does-not-exist' or its corresponding type declarations.\n"
+    "src/a.ts(4,17): error TS2307: Cannot find module 'left-pad' or its corresponding type declarations.\n"
+    '/usr/lib/node_modules/typescript/lib/lib.es5.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2016.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.dom.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.dom.iterable.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.dom.asynciterable.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.webworker.importscripts.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.scripthost.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.core.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.collection.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.generator.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.iterable.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.promise.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.proxy.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.reflect.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.symbol.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2015.symbol.wellknown.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2016.array.include.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2016.intl.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.arraybuffer.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.date.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.object.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.sharedmemory.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.string.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.intl.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2017.typedarrays.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.asyncgenerator.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.asynciterable.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.intl.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.promise.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2018.regexp.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.array.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.object.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.string.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.symbol.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2019.intl.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.bigint.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.date.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.promise.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.sharedmemory.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.string.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.symbol.wellknown.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.intl.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.number.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.decorators.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.decorators.legacy.d.ts\n'
+    '/usr/lib/node_modules/typescript/lib/lib.es2020.full.d.ts\n'
+    '/work/app/src/b.ts\n'
+    '/work/app/src/util/fmt.ts\n'
+    '/work/app/src/a.ts\n'
+)
+TSC_TRACE_NODE_HEAD = (
+    "======== Resolving module './b' from '/work/proj/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/src/b', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/src/b.ts' exists - use it as a name resolution result.\n"
+    "======== Module name './b' was successfully resolved to '/work/proj/src/b.ts'. ========\n"
+    "======== Resolving module './util/fmt' from '/work/proj/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/src/util/fmt', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/src/util/fmt.ts' exists - use it as a name resolution result.\n"
+    "======== Module name './util/fmt' was successfully resolved to '/work/proj/src/util/fmt.ts'. ========\n"
+    "======== Resolving module './does-not-exist' from '/work/proj/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/src/does-not-exist', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/src/does-not-exist.ts' does not exist.\n"
+    "File '/work/proj/src/does-not-exist.tsx' does not exist.\n"
+    "File '/work/proj/src/does-not-exist.d.ts' does not exist.\n"
+    "File '/work/proj/src/does-not-exist.js' does not exist.\n"
+    "File '/work/proj/src/does-not-exist.jsx' does not exist.\n"
+    "Directory '/work/proj/src/does-not-exist' does not exist, skipping all lookups in it.\n"
+    "======== Module name './does-not-exist' was not resolved. ========\n"
+    "======== Resolving module 'left-pad' from '/work/proj/src/a.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/src/package.json' does not exist.\n"
+    "Found 'package.json' at '/work/proj/package.json'.\n"
+    "Loading module 'left-pad' from 'node_modules' folder, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    'Searching all ancestor node_modules directories for preferred extensions: TypeScript, Declaration.\n'
+    "Directory '/work/proj/src/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/proj/node_modules/left-pad.ts' does not exist.\n"
+    "File '/work/proj/node_modules/left-pad.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/left-pad.d.ts' does not exist.\n"
+    "File '/work/proj/node_modules/@types/left-pad.d.ts' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    'Searching all ancestor node_modules directories for fallback extensions: JavaScript, JSON.\n'
+    "Directory '/work/proj/src/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/proj/node_modules/left-pad.js' does not exist.\n"
+    "File '/work/proj/node_modules/left-pad.jsx' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    "======== Module name 'left-pad' was not resolved. ========\n"
+    "======== Resolving module '../b' from '/work/proj/src/util/fmt.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/src/b', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/src/b.ts' exists - use it as a name resolution result.\n"
+    "======== Module name '../b' was successfully resolved to '/work/proj/src/b.ts'. ========\n"
+    "======== Resolving type reference directive 'node', containing file '/work/proj/__inferred type names__.ts', root directory '/work/proj/node_modules/@types,/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules/@types,/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules/@types,/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules/@types,/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules/@types,/tmp/claude-0/-home-user-ctxprune/node_modules/@types,/tmp/claude-0/node_modules/@types,/tmp/node_modules/@types,/node_modules/@types'. ========\n"
+    "Resolving with primary search path '/work/proj/node_modules/@types, /tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules/@types, /tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules/@types, /tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules/@types, /tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules/@types, /tmp/claude-0/-home-user-ctxprune/node_modules/@types, /tmp/claude-0/node_modules/@types, /tmp/node_modules/@types, /node_modules/@types'.\n"
+    "Found 'package.json' at '/work/proj/node_modules/@types/node/package.json'.\n"
+    "'package.json' has a 'typesVersions' field with version-specific path mappings.\n"
+    "'package.json' does not have a 'typesVersions' entry that matches version '6.0'.\n"
+    "'package.json' does not have a 'typings' field.\n"
+    "'package.json' has 'types' field 'index.d.ts' that references '/work/proj/node_modules/@types/node/index.d.ts'.\n"
+    "File '/work/proj/node_modules/@types/node/index.d.ts' exists - use it as a name resolution result.\n"
+    "'package.json' has a 'peerDependencies' field.\n"
+    "Resolving real path for '/work/proj/node_modules/@types/node', result '/work/proj/node_modules/@types/node'.\n"
+    "Resolving real path for '/work/proj/node_modules/@types/node/index.d.ts', result '/work/proj/node_modules/@types/node/index.d.ts'.\n"
+    "======== Type reference directive 'node' was successfully resolved to '/work/proj/node_modules/@types/node/index.d.ts' with Package ID '@types/node/index.d.ts@26.6.6', primary: true. ========\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'node:events' from '/work/proj/node_modules/@types/node/web-globals/abortcontroller.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Skipping module 'node:events' that looks like an absolute URI, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "======== Module name 'node:events' was not resolved. ========\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'node:buffer' from '/work/proj/node_modules/@types/node/web-globals/blob.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Skipping module 'node:buffer' that looks like an absolute URI, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "======== Module name 'node:buffer' was not resolved. ========\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'node:console' from '/work/proj/node_modules/@types/node/web-globals/console.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Skipping module 'node:console' that looks like an absolute URI, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "======== Module name 'node:console' was not resolved. ========\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'crypto' from '/work/proj/node_modules/@types/node/web-globals/crypto.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Loading module 'crypto' from 'node_modules' folder, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    'Searching all ancestor node_modules directories for preferred extensions: TypeScript, Declaration.\n'
+    "Directory '/work/proj/node_modules/@types/node/web-globals/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/proj/node_modules/crypto.ts' does not exist.\n"
+    "File '/work/proj/node_modules/crypto.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/crypto.d.ts' does not exist.\n"
+    "File '/work/proj/node_modules/@types/crypto.d.ts' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    'Searching all ancestor node_modules directories for fallback extensions: JavaScript, JSON.\n'
+    "Directory '/work/proj/node_modules/@types/node/web-globals/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node_modules' does not exist, skipping all lookups in it.\n"
+    "File '/work/proj/node_modules/crypto.js' does not exist.\n"
+    "File '/work/proj/node_modules/crypto.jsx' does not exist.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/compilers_build_native/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/-home-user-ctxprune/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/claude-0/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/tmp/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/node_modules' does not exist, skipping all lookups in it.\n"
+    "======== Module name 'crypto' was not resolved. ========\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'node:util' from '/work/proj/node_modules/@types/node/web-globals/encoding.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Skipping module 'node:util' that looks like an absolute URI, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "======== Module name 'node:util' was not resolved. ========\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module 'undici-types' from '/work/proj/node_modules/@types/node/web-globals/fetch.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "File '/work/proj/node_modules/@types/node/web-globals/package.json' does not exist according to earlier cached lookups.\n"
+    "File '/work/proj/node_modules/@types/node/package.json' exists according to earlier cached lookups.\n"
+    "Loading module 'undici-types' from 'node_modules' folder, target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    'Searching all ancestor node_modules directories for preferred extensions: TypeScript, Declaration.\n'
+    "Directory '/work/proj/node_modules/@types/node/web-globals/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node/node_modules' does not exist, skipping all lookups in it.\n"
+    "Directory '/work/proj/node_modules/@types/node_modules' does not exist, skipping all lookups in it.\n"
+    "Found 'package.json' at '/work/proj/node_modules/undici-types/package.json'.\n"
+    "File '/work/proj/node_modules/undici-types.ts' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types.d.ts' does not exist.\n"
+    "'package.json' does not have a 'typesVersions' field.\n"
+    "'package.json' does not have a 'typings' field.\n"
+    "'package.json' has 'types' field 'index.d.ts' that references '/work/proj/node_modules/undici-types/index.d.ts'.\n"
+    "File '/work/proj/node_modules/undici-types/index.d.ts' exists - use it as a name resolution result.\n"
+    "'package.json' does not have a 'peerDependencies' field.\n"
+    "Resolving real path for '/work/proj/node_modules/undici-types/index.d.ts', result '/work/proj/node_modules/undici-types/index.d.ts'.\n"
+    "======== Module name 'undici-types' was successfully resolved to '/work/proj/node_modules/undici-types/index.d.ts' with Package ID 'undici-types/index.d.ts@8.9.0'. ========\n"
+    "File '/work/proj/node_modules/undici-types/package.json' exists according to earlier cached lookups.\n"
+    "======== Resolving module './dispatcher' from '/work/proj/node_modules/undici-types/index.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/node_modules/undici-types/dispatcher', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/node_modules/undici-types/dispatcher.ts' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/dispatcher.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/dispatcher.d.ts' exists - use it as a name resolution result.\n"
+    "File '/work/proj/node_modules/undici-types/package.json' exists according to earlier cached lookups.\n"
+    "======== Module name './dispatcher' was successfully resolved to '/work/proj/node_modules/undici-types/dispatcher.d.ts' with Package ID 'undici-types/dispatcher.d.ts@8.9.0'. ========\n"
+    "======== Resolving module './global-dispatcher' from '/work/proj/node_modules/undici-types/index.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/node_modules/undici-types/global-dispatcher', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/node_modules/undici-types/global-dispatcher.ts' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/global-dispatcher.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/global-dispatcher.d.ts' exists - use it as a name resolution result.\n"
+    "File '/work/proj/node_modules/undici-types/package.json' exists according to earlier cached lookups.\n"
+    "======== Module name './global-dispatcher' was successfully resolved to '/work/proj/node_modules/undici-types/global-dispatcher.d.ts' with Package ID 'undici-types/global-dispatcher.d.ts@8.9.0'. ========\n"
+    "======== Resolving module './global-origin' from '/work/proj/node_modules/undici-types/index.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/node_modules/undici-types/global-origin', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/node_modules/undici-types/global-origin.ts' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/global-origin.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/global-origin.d.ts' exists - use it as a name resolution result.\n"
+    "File '/work/proj/node_modules/undici-types/package.json' exists according to earlier cached lookups.\n"
+    "======== Module name './global-origin' was successfully resolved to '/work/proj/node_modules/undici-types/global-origin.d.ts' with Package ID 'undici-types/global-origin.d.ts@8.9.0'. ========\n"
+    "======== Resolving module './pool' from '/work/proj/node_modules/undici-types/index.d.ts'. ========\n"
+    "Explicitly specified module resolution kind: 'Bundler'.\n"
+    "Resolving in CJS mode with conditions 'import', 'types'.\n"
+    "Loading module as file / folder, candidate module location '/work/proj/node_modules/undici-types/pool', target file types: TypeScript, JavaScript, Declaration, JSON.\n"
+    "File '/work/proj/node_modules/undici-types/pool.ts' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/pool.tsx' does not exist.\n"
+    "File '/work/proj/node_modules/undici-types/pool.d.ts' exists - use it as a name resolution result.\n"
+)
+
+_T_START = re.compile(r"^======== Resolving (module|type reference directive) '(.*)'(?:, containing file| from) '(.*?)'(?:, root directory '.*')?\. ========$")
+_T_OK_MOD = re.compile(r"^======== Module name '(.*)' was successfully resolved to '(.*?)'(?: with Package ID '(.*)')?\. ========$")
+_T_OK_REF = re.compile(r"^======== Type reference directive '(.*)' was successfully resolved to '(.*?)'(?: with Package ID '(.*?)')?, primary: (true|false)\. ========$")
+_T_BAD = re.compile(r"^======== (?:Module name|Type reference directive) '(.*)' was not resolved\. ========$")
+_T_FOLDED = re.compile(r"^\[ctxprune ok\] (module|type reference) '(.*)' from '(.*?)' -> '(.*?)'(?: package '(.*?)')?(?: primary (true|false))?$")
+_T_LIBFILE = re.compile(r"^/.*/typescript/lib/lib\.[A-Za-z0-9.]*\.d\.ts$")
+_T_TYPES = re.compile(r"^/.*/node_modules/@types/.*\.d\.ts$")
+_T_STUB = re.compile(r"^\[ctxprune: (\d+) (TypeScript lib|@types) files omitted\]$")
+
+
+def fold_resolution(text: str) -> str:
+    lines = text.split("\n")
+    out, i, n = [], 0, len(lines)
+    stub_at: dict = {}
+    counts: Counter = Counter()
+    while i < n:
+        l = lines[i]
+        if (m := _T_START.match(l)):
+            j = i + 1
+            while j < n and not (_T_OK_MOD.match(lines[j]) or _T_OK_REF.match(lines[j]) or _T_BAD.match(lines[j]) or _T_START.match(lines[j])):
+                j += 1
+            if j < n and (ok := _T_OK_MOD.match(lines[j]) or _T_OK_REF.match(lines[j])):
+                kind = "module" if m.group(1) == "module" else "type reference"
+                tail = f" package '{ok.group(3)}'" if ok.group(3) else ""
+                tail += f" primary {ok.group(4)}" if ok.re is _T_OK_REF else ""
+                out.append(f"[ctxprune ok] {kind} '{m.group(2)}' from '{m.group(3)}' -> '{ok.group(2)}'{tail}")
+                i = j + 1
+            else:  # unresolved, abandoned or cut off: keep every line of it, and count nothing inside it
+                end = j + 1 if j < n and _T_BAD.match(lines[j]) else j
+                out += lines[i:end]
+                i = end
+            continue
+        cls = "TypeScript lib" if _T_LIBFILE.match(l) else "@types" if _T_TYPES.match(l) else None
+        if cls:
+            counts[cls] += 1
+            if cls not in stub_at:
+                stub_at[cls] = len(out)
+                out.append(None)
+            i += 1
+            continue
+        out.append(l)
+        i += 1
+    for cls, at in stub_at.items():
+        out[at] = f"[ctxprune: {counts[cls]} {cls} files omitted]"
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_604(text: str) -> dict:
+    resolutions, bad_blocks, user_files, n_lib, n_types = [], [], [], 0, 0
+    cur = None
+    for l in text.split("\n"):
+        if (m := _T_STUB.match(l)):
+            if m.group(2) == "@types":
+                n_types += int(m.group(1))
+            else:
+                n_lib += int(m.group(1))
+            continue
+        if (m := _T_FOLDED.match(l)):
+            resolutions.append((m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), m.group(6)))
+            continue
+        if (m := _T_START.match(l)):
+            cur = ([l], m)
+            continue
+        if cur is not None:
+            cur[0].append(l)
+            if (ok := _T_OK_MOD.match(l)) or (ok := _T_OK_REF.match(l)):
+                st = cur[1]
+                is_mod = st.group(1) == "module"
+                resolutions.append(("module" if is_mod else "type reference", st.group(2), st.group(3), ok.group(2), ok.group(3), None if is_mod else ok.group(4)))
+                cur = None
+            elif _T_BAD.match(l):
+                bad_blocks.append("\n".join(cur[0]))
+                cur = None
+            continue
+        if _T_LIBFILE.match(l):
+            n_lib += 1
+        elif _T_TYPES.match(l):
+            n_types += 1
+        elif re.match(r"^/\S+\.(?:d\.)?tsx?$", l):
+            user_files.append(l)
+    return {"resolutions (kind, specifier, from, result, package id, primary)": resolutions, "unresolved blocks, verbatim": bad_blocks,
+            "listFiles: user files": user_files, "listFiles: lib and @types counts": (n_lib, n_types)}
+
+
+case(
+    604,
+    claim="Each '======== Resolving ... ========' block that ends 'successfully resolved' becomes one '[ctxprune ok] module X from Y -> Z' line, 'not resolved' blocks stay whole, and --listFiles entries under typescript/lib and node_modules/@types become two count lines; every resolution result, every unresolved block, every user file and the lib/@types counts are unchanged.",
+    loses="the candidate paths, extensions and 'directory does not exist' lines tried inside each successful resolution, and the individual lib/@types file names",
+    encode=fold_resolution,
+    probes=probes_604,
+    fixtures=lambda: [
+        Fixture("tsc --traceResolution --listFiles: 2 broken imports, 3 resolved, 56 listed files (real)", TSC_TRACE_LISTFILES, True),
+        Fixture("with @types/node: first 215 lines of a 3,883-line real trace, ambient node:* blocks stay (real, cut)", TSC_TRACE_NODE_HEAD, True),
+        Fixture("plain tsc output with one error", "src/a.ts(3,26): error TS2307: Cannot find module './does-not-exist' or its corresponding type declarations.\n", False),
+        Fixture("only unresolved blocks", "======== Resolving module 'left-pad' from '/work/proj/src/a.ts'. ========\nExplicitly specified module resolution kind: 'Bundler'.\n======== Module name 'left-pad' was not resolved. ========\n", False),
+    ],
+    min_gain=0.2,
 )
 
 

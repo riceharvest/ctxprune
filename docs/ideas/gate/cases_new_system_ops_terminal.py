@@ -9,10 +9,10 @@
   #1460 ss: fold the IPv4/IPv6 twin listener rows                    (equivalent)
   #1461 ipconfig /all: drop the alignment dot leaders                (equivalent)
   #1462 strace -y: ditto repeated fd and AT_FDCWD path annotations   (roundtrip, with a header line)
-  #1463 ldd: drop the soname that equals the path basename           (roundtrip)
+  #1463 conntrack: replace the reply tuple that mirrors the original with '<mirror>'   (roundtrip)
 
 Fixtures marked "real" were captured in this container (Ubuntu 24.04, kernel 6.18, procps, util-linux, strace 6.x,
-pip's vendored rich); the rest are "reconstructed from memory" or synthesised from a stated model and say so. Every
+pip's vendored rich, strace -y); the rest are "reconstructed from memory" or synthesised from a stated model and say so. Every
 in-band marker has an escape for text that already looks like it (see each case), which is why most of the roundtrip
 cases are not idempotent: re-encoding an encoded text escapes the markers it contains, so it grows by design.
 """
@@ -467,74 +467,6 @@ STRACE_FILE = _txt(
     '15243 fstat(3</usr/local/lib/python3.13/encodings/__pycache__/utf_8.cpython-313.pyc>, {st_mode=S_IFREG|0644, st_size=2290, ...}) = 0',
 )
 
-# real: ldd /usr/bin/gdb
-LDD_GDB = _txt(
-    '\tlinux-vdso.so.1 (0x00007f2c41ff8000)',
-    '\tlibreadline.so.8 => /lib/x86_64-linux-gnu/libreadline.so.8 (0x00007f2c41f90000)',
-    '\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f2c41f74000)',
-    '\tlibzstd.so.1 => /lib/x86_64-linux-gnu/libzstd.so.1 (0x00007f2c41eba000)',
-    '\tlibncursesw.so.6 => /lib/x86_64-linux-gnu/libncursesw.so.6 (0x00007f2c41e7e000)',
-    '\tlibtinfo.so.6 => /lib/x86_64-linux-gnu/libtinfo.so.6 (0x00007f2c41e4a000)',
-    '\tlibpython3.12.so.1.0 => /lib/x86_64-linux-gnu/libpython3.12.so.1.0 (0x00007f2c41400000)',
-    '\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007f2c41e1a000)',
-    '\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007f2c41de8000)',
-    '\tlibbabeltrace.so.1 => /lib/x86_64-linux-gnu/libbabeltrace.so.1 (0x00007f2c41dd9000)',
-    '\tlibbabeltrace-ctf.so.1 => /lib/x86_64-linux-gnu/libbabeltrace-ctf.so.1 (0x00007f2c41d8e000)',
-    '\tlibipt.so.2 => /lib/x86_64-linux-gnu/libipt.so.2 (0x00007f2c41d73000)',
-    '\tlibmpfr.so.6 => /lib/x86_64-linux-gnu/libmpfr.so.6 (0x00007f2c41cb7000)',
-    '\tlibgmp.so.10 => /lib/x86_64-linux-gnu/libgmp.so.10 (0x00007f2c4137c000)',
-    '\tlibsource-highlight.so.4 => /lib/x86_64-linux-gnu/libsource-highlight.so.4 (0x00007f2c412c5000)',
-    '\tlibxxhash.so.0 => /lib/x86_64-linux-gnu/libxxhash.so.0 (0x00007f2c412b2000)',
-    '\tlibdebuginfod.so.1 => /lib/x86_64-linux-gnu/libdebuginfod.so.1 (0x00007f2c41cad000)',
-    '\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007f2c41000000)',
-    '\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f2c40f17000)',
-    '\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f2c41284000)',
-    '\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f2c40c00000)',
-    '\t/lib64/ld-linux-x86-64.so.2 (0x00007f2c41ffa000)',
-    '\tlibglib-2.0.so.0 => /lib/x86_64-linux-gnu/libglib-2.0.so.0 (0x00007f2c40ab7000)',
-    '\tlibelf.so.1 => /lib/x86_64-linux-gnu/libelf.so.1 (0x00007f2c40ef8000)',
-    '\tlibuuid.so.1 => /lib/x86_64-linux-gnu/libuuid.so.1 (0x00007f2c40eee000)',
-    '\tlibcurl-gnutls.so.4 => /lib/x86_64-linux-gnu/libcurl-gnutls.so.4 (0x00007f2c40e33000)',
-    '\tlibpcre2-8.so.0 => /lib/x86_64-linux-gnu/libpcre2-8.so.0 (0x00007f2c40a1d000)',
-    '\tlibnghttp2.so.14 => /lib/x86_64-linux-gnu/libnghttp2.so.14 (0x00007f2c409f2000)',
-    '\tlibidn2.so.0 => /lib/x86_64-linux-gnu/libidn2.so.0 (0x00007f2c409d0000)',
-    '\tlibrtmp.so.1 => /lib/x86_64-linux-gnu/librtmp.so.1 (0x00007f2c40e15000)',
-    '\tlibssh.so.4 => /lib/x86_64-linux-gnu/libssh.so.4 (0x00007f2c4095e000)',
-    '\tlibpsl.so.5 => /lib/x86_64-linux-gnu/libpsl.so.5 (0x00007f2c4094a000)',
-    '\tlibnettle.so.8 => /lib/x86_64-linux-gnu/libnettle.so.8 (0x00007f2c408f5000)',
-    '\tlibgnutls.so.30 => /lib/x86_64-linux-gnu/libgnutls.so.30 (0x00007f2c406fa000)',
-    '\tlibgssapi_krb5.so.2 => /lib/x86_64-linux-gnu/libgssapi_krb5.so.2 (0x00007f2c406a6000)',
-    '\tlibldap.so.2 => /lib/x86_64-linux-gnu/libldap.so.2 (0x00007f2c40648000)',
-    '\tliblber.so.2 => /lib/x86_64-linux-gnu/liblber.so.2 (0x00007f2c40638000)',
-    '\tlibbrotlidec.so.1 => /lib/x86_64-linux-gnu/libbrotlidec.so.1 (0x00007f2c4062a000)',
-    '\tlibunistring.so.5 => /lib/x86_64-linux-gnu/libunistring.so.5 (0x00007f2c4047d000)',
-    '\tlibhogweed.so.6 => /lib/x86_64-linux-gnu/libhogweed.so.6 (0x00007f2c40435000)',
-    '\tlibcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007f2c3fe00000)',
-    '\tlibp11-kit.so.0 => /lib/x86_64-linux-gnu/libp11-kit.so.0 (0x00007f2c3fc5c000)',
-    '\tlibtasn1.so.6 => /lib/x86_64-linux-gnu/libtasn1.so.6 (0x00007f2c4041f000)',
-    '\tlibkrb5.so.3 => /lib/x86_64-linux-gnu/libkrb5.so.3 (0x00007f2c40356000)',
-    '\tlibk5crypto.so.3 => /lib/x86_64-linux-gnu/libk5crypto.so.3 (0x00007f2c4032a000)',
-    '\tlibcom_err.so.2 => /lib/x86_64-linux-gnu/libcom_err.so.2 (0x00007f2c40324000)',
-    '\tlibkrb5support.so.0 => /lib/x86_64-linux-gnu/libkrb5support.so.0 (0x00007f2c40317000)',
-    '\tlibsasl2.so.2 => /lib/x86_64-linux-gnu/libsasl2.so.2 (0x00007f2c3fc42000)',
-    '\tlibbrotlicommon.so.1 => /lib/x86_64-linux-gnu/libbrotlicommon.so.1 (0x00007f2c3fc1f000)',
-    '\tlibffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007f2c3fc13000)',
-    '\tlibkeyutils.so.1 => /lib/x86_64-linux-gnu/libkeyutils.so.1 (0x00007f2c3fc0c000)',
-    '\tlibresolv.so.2 => /lib/x86_64-linux-gnu/libresolv.so.2 (0x00007f2c3fbfa000)',
-)
-
-# real: ldd /opt/node22/bin/node
-LDD_NODE = _txt(
-    '\tlinux-vdso.so.1 (0x00007fc939745000)',
-    '\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007fc93972d000)',
-    '\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007fc939400000)',
-    '\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fc939317000)',
-    '\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fc9396ff000)',
-    '\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007fc9396fa000)',
-    '\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fc939000000)',
-    '\t/lib64/ld-linux-x86-64.so.2 (0x00007fc939747000)',
-)
-
 # real: pip's vendored rich 3-task Progress, Console(force_terminal=True, width=72) captured to a string
 RICH_RAW = _txt(
     '\x1b[?25l\r\x1b[2K⠋ layer a3f1c2d9e8b7                        0%\r\x1b[2K⠋ layer a3f1c2d9e8b7                        0%',
@@ -606,6 +538,11 @@ CURSOR_ADVERSARIAL = [
     ("double-width characters", "\x1b[2K✅ 完了 done\n\x1b[1A\x1b[2K✅ 完了 again\n"),
     ("absurd cursor-forward count", "ab\x1b[999999999Ccd\x1b[1Aef\n"),
     ("stray C0 byte", "one\n\x1b[1A\x1b[2Ktwo\x0e\n"),
+    ("exercise: erase below after cursor-up", "keep\nold1\nold2\n\x1b[2A\x1b[Jnew\n"),
+    ("exercise: erase to start of line, cursor left", "abcdefgh\x1b[3D\x1b[1KXY\nsecond\x1b[4D\x1b[0Kend\n"),
+    ("exercise: forward, column, next/previous line, backspace", "a-b\x1b[4Cx\x1b[1Gy\n\x1b[1Ez\x1b[1Fw\x08v\x1b[3Cq\x1b[2Bk\n\x1b[5Gm\x1b[2Fn"),
+    ("exercise: erase whole line and overwrite a longer line with a shorter one", "long line here\rshort\n\x1b[1A\x1b[2Kfresh\n\x1b[?2004h\x1b(B\x1b=ok\x1b[?2004l\n"),
+    ("grep --color output with a tab in the line", "\x1b[35m\x1b[Kmain.c\x1b[m\x1b[K\x1b[36m\x1b[K:\x1b[m\x1b[K\tint x;\n"),
 ]
 
 
@@ -798,8 +735,9 @@ STATUS_BIG = STATUS_PY.replace("Cpus_allowed:\tf\n", "Cpus_allowed:\tffffffff,ff
 # docker compose up, docker pull, pip, rich Live, ora and npm redraw a block in place with CSI A (cursor up), CSI K
 # (erase line) and CR. Stripping the escapes (#9) or collapsing CR frames (#10) leaves every frame, one after the
 # other. A terminal shows only the last one. The prototype replays the text on a character grid and prints what the
-# screen would show. It is a bail-out design: anything it cannot model exactly (absolute cursor addressing, alternate
-# screen, double-width characters, an unknown or truncated escape, other control bytes) returns the text untouched.
+# screen would show. It is a bail-out design: anything it cannot model exactly (tabs, absolute cursor addressing,
+# alternate screen, double-width characters, an unknown or truncated escape, other control bytes) returns the text
+# untouched. A line feed is taken as CR+LF (the tty driver's ONLCR), which is what a pty capture contains.
 
 _CUR_TRIGGER = re.compile(r"\x1b\[[0-9;]*[ABCDEFGJK]")
 _CUR_TOKEN = re.compile(
@@ -809,7 +747,7 @@ _CUR_TOKEN = re.compile(
     r"|\x1b[()][0-9A-Za-z]"                         # charset designation
     r"|\x1b[=>]"                                    # keypad mode
     r"|(?P<t>[^\x00-\x1f\x7f-\x9f]+)"               # printable run
-    r"|(?P<c>[\n\r\b\t\a])"                         # the control characters a terminal acts on
+    r"|(?P<c>[\n\r\b\a])"                            # the control characters a terminal acts on (a tab is not modelled)
 )
 _HARMLESS_PRIVATE = {"25", "7", "2004", "12"}       # cursor visibility, autowrap, bracketed paste, cursor blink
 
@@ -847,8 +785,6 @@ def replay_cursor(text: str) -> str:
                 c = 0
             elif ch == "\b":
                 c = max(0, c - 1)
-            elif ch == "\t":
-                c = (c // 8 + 1) * 8
         elif m.group("pf") is not None:
             if any(p not in _HARMLESS_PRIVATE for p in m.group("pp").split(";")):
                 return text
@@ -968,8 +904,6 @@ def _grid_render(text: str):
             c, i = 0, i + 1
         elif ch == "\b":
             c, i = max(0, c - 1), i + 1
-        elif ch == "\t":
-            c, i = (c // 8 + 1) * 8, i + 1
         elif ch == "\a":
             i += 1
         elif ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F:
@@ -996,8 +930,8 @@ def _replay_ok(a: str, b: str) -> bool:
 
 case(
     1454,
-    claim="When the text uses relative cursor motion or erase codes (CSI A B C D E F G J K), it is replayed on a character grid (CR, LF, BS, TAB handled, SGR and OSC ignored) and only the final screen text is kept; absolute cursor addressing, the alternate screen, double-width characters and any unknown or truncated escape leave the text untouched.",
-    loses="frames and cell contents a terminal overwrites or erases, trailing spaces, tab characters (expanded to spaces), the \\r\\n versus \\n distinction, SGR colours and other invisible escapes",
+    claim="When the text uses relative cursor motion or erase codes (CSI A B C D E F G J K), it is replayed on a character grid (CR, LF, BS handled, SGR and OSC ignored) and only the final screen text is kept; tabs, absolute cursor addressing, the alternate screen, double-width characters and any unknown or truncated escape leave the text untouched.",
+    loses="frames and cell contents a terminal overwrites or erases, trailing spaces, the \\r\\n versus \\n versus bare \\r distinction (every line feed also returns the carriage), SGR colours and other invisible escapes",
     encode=replay_cursor,
     equivalent=_replay_ok,
     fixtures=[
@@ -1013,7 +947,7 @@ case(
 # ===============================================================================================================
 # #1455 /proc/PID/maps: ditto the dev + inode + path tail of a mapping that repeats the line above
 #
-# libc.so.6 is mapped five times in a row, each line carrying "fe:00 209637" and the 40-character path padded to a
+# libc.so.6 is mapped five times in a row, each line carrying "fe:00 209637" and the 35-character path padded to a
 # fixed column. A tail identical to the previous line's becomes a single quote mark. A line that already has only
 # quote marks after the offset gets one extra quote (decode removes one), so any text round-trips.
 
@@ -1078,7 +1012,7 @@ case(
 # ===============================================================================================================
 # #1456 /proc/PID/status: alias the hex Mems_allowed / Cpus_allowed masks to the *_list line below them
 #
-# Mems_allowed prints one 8-digit hex group per 32 possible nodes (32 groups, 288 characters, on distro kernels);
+# Mems_allowed prints one 8-digit hex group per 32 possible nodes (32 groups, 287 characters, on distro kernels);
 # Mems_allowed_list on the next line says the same thing in two characters. The mask is a pure function of the list
 # and the bit width, so it is replaced by "@<bits>" and regenerated on decode. The encoder re-renders the mask from the
 # list and only aliases when that reproduces the original text exactly.
@@ -1159,6 +1093,7 @@ case(
         Fixture("edited copy: 128 CPUs and 2 memory nodes", STATUS_BIG, True),
         Fixture("mask that does not match its list", STATUS_PY.replace("Mems_allowed_list:\t0", "Mems_allowed_list:\t1"), False),
         Fixture("short masks (4 CPUs) are not worth aliasing", "Cpus_allowed:\tf\nCpus_allowed_list:\t0-3\n", False),
+        Fixture("84 CPUs: the first group has 5 digits", "Threads:\t1\nCpus_allowed:\tfffff,ffffffff,ffffffff\nCpus_allowed_list:\t0-83\nvoluntary_ctxt_switches:\t0\n", True),
         Fixture("not a status file", "Name: x\nVmRSS: 12 kB\n", False),
         Fixture("values that already start with @", STATUS_PY.replace("Cpus_allowed:\tf", "Cpus_allowed:\t@4").replace("Mems_allowed_list:\t0", "Mems_allowed_list:\t0\nCpus_allowed:\t@@7"), None),
         Fixture("alias-looking line without a list", "Mems_allowed:\t@1024\nMems_allowed_list:\t0\nCpus_allowed:\t@4\n", None),
@@ -1210,23 +1145,30 @@ case(
         Fixture("only IPv4-bound ports", DOCKER_PS_V4_ONLY, False),
         Fixture("Docker before 26 spelled the IPv6 twin ':::'", DOCKER_PS_OLD_V6, False),
         Fixture("table without ports", "CONTAINER ID   IMAGE   STATUS\nabc123def456   nginx   Up 2 hours\n", False),
+        Fixture("v4 and v6 bindings that do not pair up", "0.0.0.0:80->80/tcp, [::]:81->81/tcp, 0.0.0.0:82->82/udp, [::]:82->82/tcp\n", False),
         Fixture("text with '*:80->80/tcp' items already in it", DOCKER_PS + "x *:80->80/tcp **:81->81/tcp 0.0.0.0:8->8/tcp, [::]:8->8/tcp*:9->9/tcp\n", None),
         Fixture("star glued in front of a pair", "*0.0.0.0:80->80/tcp, [::]:80->80/tcp\n0.0.0.0:80->80/tcp, [::]:80->80/tcp*\n", None),
     ],
-    min_gain=0.1,
+    min_gain=0.08,
     idempotent=False,  # '*:' items written by the first pass are escaped by the second
 )
 
 # ===============================================================================================================
-# #1458 ip addr: drop the "valid_lft forever preferred_lft forever" lines and mark the derivable broadcast
+# #1458 ip addr: drop the "valid_lft forever preferred_lft forever" lines and mark the derivable broadcast addresses
 #
-# Each address line is followed by a lifetime line, and for most that is the literal "forever". A broadcast that equals
-# the subnet's own (prefix <= 30) is written 'brd *'. The encoding is applied only when every address in the text has
-# its lifetime line, so a missing line unambiguously means 'forever'; a text that already contains 'brd *' is left alone.
+# Each address line is followed by a lifetime line, and for most that is the literal "forever". An IPv4 broadcast that
+# equals the subnet's own (prefix <= 30) and an Ethernet 'brd ff:ff:ff:ff:ff:ff' are written 'brd *'. The encoding is
+# applied only when every address in the text has its lifetime line, so a missing line unambiguously means 'forever';
+# a text that already contains 'brd *' is left alone, and a forever line directly followed by another lifetime line is kept.
 
 _IP_ADDR = re.compile(r"^\s+inet6? ")
 _IP_FOREVER = "       valid_lft forever preferred_lft forever"
 _IP_BRD = re.compile(r"^(\s+inet )(\d+\.\d+\.\d+\.\d+)/(\d{1,2})((?: metric \d+)?) brd (\d+\.\d+\.\d+\.\d+)(?= |$)")
+_IP_ETH = re.compile(r"^(\s+link/ether (?:[0-9a-f]{2}:){5}[0-9a-f]{2}) brd ff:ff:ff:ff:ff:ff(?= |$)")
+
+
+def _is_lft(line: str) -> bool:
+    return line.lstrip().startswith("valid_lft ")
 
 
 def _subnet_broadcast(addr: str, plen: int):
@@ -1241,9 +1183,9 @@ def ip_addr_compact(text: str) -> str:
     addr = [i for i, l in enumerate(lines) if _IP_ADDR.match(l)]
     if not addr or any("brd *" in l for l in lines):
         return text
-    if not all(i + 1 < len(lines) and lines[i + 1].lstrip().startswith("valid_lft ") for i in addr):
+    if not all(i + 1 < len(lines) and _is_lft(lines[i + 1]) for i in addr):
         return text
-    drop = {i + 1 for i in addr if lines[i + 1] == _IP_FOREVER}
+    drop = {i + 1 for i in addr if lines[i + 1] == _IP_FOREVER and not (i + 2 < len(lines) and _is_lft(lines[i + 2]))}
     out = []
     for i, l in enumerate(lines):
         if i in drop:
@@ -1251,26 +1193,32 @@ def ip_addr_compact(text: str) -> str:
         m = _IP_BRD.match(l)
         if m and int(m.group(3)) <= 30 and _subnet_broadcast(m.group(2), int(m.group(3))) == m.group(5):
             l = f"{m.group(1)}{m.group(2)}/{m.group(3)}{m.group(4)} brd *" + l[m.end():]
+        elif (e := _IP_ETH.match(l)):
+            l = f"{e.group(1)} brd *" + l[e.end():]
         out.append(l)
     res = "\n".join(out)
     return res if len(res) < len(text) else text
 
 
 def _ip_facts(text: str):
-    """Independent oracle view: per line, with 'brd *' resolved by integer arithmetic and each address line paired with
-    its lifetime line (a missing line reads as forever, which is what the encoder's output relies on)."""
+    """Independent oracle view: per line, with 'brd *' resolved (integer arithmetic for IPv4, all-ones for Ethernet)
+    and each address line paired with its lifetime line (a missing line reads as forever, which is what the encoder's
+    output relies on)."""
     lines, facts, i = text.split("\n"), [], 0
     while i < len(lines):
         l = lines[i]
         m = re.match(r"^(\s+inet )(\d+)\.(\d+)\.(\d+)\.(\d+)/(\d+)(.*) brd \*(.*)$", l)
+        e = re.match(r"^(\s+link/ether (?:[0-9a-f]{2}:){5}[0-9a-f]{2}) brd \*(.*)$", l)
         if m and int(m.group(6)) <= 30:
             a = (int(m.group(2)) << 24) | (int(m.group(3)) << 16) | (int(m.group(4)) << 8) | int(m.group(5))
             b = a | ((1 << (32 - int(m.group(6)))) - 1)
             l = f"{m.group(1)}{m.group(2)}.{m.group(3)}.{m.group(4)}.{m.group(5)}/{m.group(6)}{m.group(7)} brd " \
                 f"{b >> 24}.{(b >> 16) & 255}.{(b >> 8) & 255}.{b & 255}{m.group(8)}"
+        elif e:
+            l = f"{e.group(1)} brd ff:ff:ff:ff:ff:ff{e.group(2)}"
         if _IP_ADDR.match(l):
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            if nxt.lstrip().startswith("valid_lft "):
+            if _is_lft(nxt):
                 facts.append((l, nxt.strip()))
                 i += 2
                 continue
@@ -1283,7 +1231,7 @@ def _ip_facts(text: str):
 
 case(
     1458,
-    claim="In ip addr output where every address has a lifetime line, 'valid_lft forever preferred_lft forever' lines are dropped (absent means forever) and a brd equal to the subnet broadcast (prefix <= 30) is written 'brd *'; every other line is kept verbatim.",
+    claim="In ip addr output where every address has a lifetime line, 'valid_lft forever preferred_lft forever' lines are dropped (absent means forever), a brd equal to the IPv4 subnet broadcast (prefix <= 30) or to ff:ff:ff:ff:ff:ff on a link/ether line is written 'brd *', and every other line is kept verbatim.",
     loses="the spelling of the default lifetime line and of a computable broadcast address",
     encode=ip_addr_compact,
     equivalent=lambda a, b: a == b or _ip_facts(a) == _ip_facts(b),
@@ -1294,6 +1242,7 @@ case(
         Fixture("an address without its lifetime line is left alone", IP_ADDR.replace("       valid_lft forever preferred_lft forever\n", "", 1), False),
         Fixture("text that already uses 'brd *'", IP_ADDR.replace("brd 172.17.255.255", "brd *"), None),
         Fixture("non-standard broadcast is kept", IP_ADDR.replace("brd 172.17.255.255", "brd 172.17.0.255"), True),
+        Fixture("a doubled lifetime line", IP_ADDR.replace("    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n       valid_lft forever preferred_lft forever\n", "    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\n       valid_lft forever preferred_lft forever\n       valid_lft forever preferred_lft forever\n"), True),
     ],
     min_gain=0.1,
 )
@@ -1391,7 +1340,7 @@ case(
         Fixture("real: python3.13, 34 threads and one child", PSTREE_AP, True),
         Fixture("two runs, pids out of order", "java,100 -jar a.jar\n  |-{java},101\n  |-{java},102\n  |-{java},103\n  |-{java},107\n  |-{java},105\n  |-{java},106\n  |-{GC},110\n  |-{GC},111\n  `-{GC},112\n", True),
         Fixture("no thread leaves", "systemd,1\n  |-sshd,789 -D\n  |   `-sshd,1500 user@pts/0\n  `-cron,702 -f\n", False),
-        Fixture("two leaves are not worth merging", "a,1\n  |-{a},2\n  `-{a},3\n", False),
+        Fixture("a lone thread leaf is not worth merging", "a,1\n  |-b,5\n  `-{a},3\n", False),
         Fixture("pstree -p style (first child on the parent's line)", "java(100)-+-{java}(101)\n     |-{java}(102)\n     `-{java}(103)\n", False),
         Fixture("lines that already look merged", PSTREE_AP + "  |-{python3} x3: 1-3\n  |-\\{python3} x3: 1-3\n  `-{python3} x2: 5,9\n", None),
         Fixture("leading-zero pids are not merged", "a,1\n  |-{a},001\n  |-{a},002\n  `-{a},003\n", False),
@@ -1512,13 +1461,16 @@ case(
 # of the localized string, not data. The line becomes "   Host Name: DESKTOP". Values, indentation, adapter headers and
 # continuation lines are untouched.
 
-_IPC_LINE = re.compile(r"^(   )(\S(?:.*?\S)?)[ .]*\.[ .]*: (.*)$")
+_IPC_KEY = re.compile(r"   (\S(?:.*?\S)?)[ .]*\.[ .]*")
 
 
 def ipconfig_dots(text: str) -> str:
-    res = "\n".join(
-        (f"{m.group(1)}{m.group(2)}: {m.group(3)}" if (m := _IPC_LINE.match(l)) else l) for l in text.split("\n")
-    )
+    out = []
+    for line in text.split("\n"):
+        i = line.find(": ")
+        m = _IPC_KEY.fullmatch(line[:i]) if i > 3 else None  # the key and its leader end at the first ': '
+        out.append(f"   {m.group(1)}: {line[i + 2:]}" if m else line)
+    res = "\n".join(out)
     return res if len(res) < len(text) else text
 
 
@@ -1634,56 +1586,82 @@ case(
 )
 
 # ===============================================================================================================
-# #1463 ldd: drop the soname that equals the basename of the resolved path
+# #1463 conntrack -L and /proc/net/nf_conntrack: replace the reply tuple that mirrors the original
 #
-# "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x7f...)": in nearly every row the name before the arrow is the last
-# component of the path after it. The row becomes "=> /lib/x86_64-linux-gnu/libc.so.6 (0x7f...)"; the arrow stays as the
-# marker. Rows where the soname differs, 'not found' rows and the vdso/loader rows are untouched.
+# Each flow row carries two tuples, "src=10.0.0.5 dst=10.0.0.9 sport=51234 dport=443" and the reply
+# "src=10.0.0.9 dst=10.0.0.5 sport=443 dport=51234". Without NAT the reply is the original with source and destination
+# swapped, so it is replaced by '<mirror>' (a flag such as [UNREPLIED] between the tuples stays). Rows with NAT
+# (reply differs), ICMP rows and everything else are untouched. '<mirror>' already in a row gets one extra '<'.
 
-_LDD_ROW = re.compile(r"^\t(\S+) => (\S+) (\(0x[0-9a-f]+\))$")
-_LDD_ELIDED = re.compile(r"^\t(=+)> (\S+) (\(0x[0-9a-f]+\))$")
+_CT_PROTO = re.compile(r"^(?:ipv[46]\s+\d+\s+)?(?:tcp|udp|udplite|sctp|dccp)\s")
+_CT_TUPLE = re.compile(r"src=(\S+) dst=(\S+) sport=(\d+) dport=(\d+)")
+_CT_REPLY = re.compile(r"((?: \[[A-Z_]+\])*) src=(\S+) dst=(\S+) sport=(\d+) dport=(\d+)")
+_CT_MARK = re.compile(r"<+mirror>")
 
 
-def ldd_elide_soname(text: str) -> str:
+def conntrack_mirror(text: str) -> str:
     out, escaped = [], False
     for line in text.split("\n"):
-        m = _LDD_ROW.match(line)
-        if m and m.group(2).rsplit("/", 1)[-1] == m.group(1) and not m.group(1).startswith("="):
-            out.append(f"\t=> {m.group(2)} {m.group(3)}")
-            continue
-        e = _LDD_ELIDED.match(line)
-        if e:
-            line, escaped = f"\t={e.group(1)}> {e.group(2)} {e.group(3)}", True
+        if _CT_MARK.search(line):
+            line, escaped = _CT_MARK.sub(lambda m: "<" + m.group(0), line), True
+        m1 = _CT_TUPLE.search(line) if _CT_PROTO.match(line) else None
+        if m1:
+            s1, d1, sp1, dp1 = m1.groups()
+            m2 = _CT_REPLY.match(line, m1.end())
+            if m2 and m2.groups()[1:] == (d1, s1, dp1, sp1):
+                line = line[:m1.end()] + m2.group(1) + " <mirror>" + line[m2.end():]
         out.append(line)
     res = "\n".join(out)
     return res if escaped or len(res) < len(text) else text
 
 
-def ldd_restore_soname(text: str) -> str:
+def conntrack_unmirror(text: str) -> str:
     out = []
     for line in text.split("\n"):
-        e = _LDD_ELIDED.match(line)
-        if not e:
-            out.append(line)
-        elif len(e.group(1)) == 1:
-            out.append(f"\t{e.group(2).rsplit('/', 1)[-1]} => {e.group(2)} {e.group(3)}")
-        else:
-            out.append(f"\t{e.group(1)[1:]}> {e.group(2)} {e.group(3)}")
+        def expand(_m, line=line):
+            m1 = _CT_TUPLE.search(line)
+            if not m1:
+                raise ValueError("<mirror> with no tuple before it")
+            s1, d1, sp1, dp1 = m1.groups()
+            return f"src={d1} dst={s1} sport={dp1} dport={sp1}"
+
+        line = re.sub(r"(?<!<)<mirror>", expand, line)
+        out.append(re.sub(r"<(<+mirror>)", r"\1", line))
     return "\n".join(out)
 
 
+CONNTRACK = _txt(  # reconstructed from memory (conntrack-tools 1.4.x); the DNAT and ICMP rows keep their reply tuple
+    "tcp      6 431996 ESTABLISHED src=10.0.0.5 dst=10.0.0.9 sport=51234 dport=443 src=10.0.0.9 dst=10.0.0.5 sport=443 dport=51234 [ASSURED] mark=0 use=1",
+    "tcp      6 117 TIME_WAIT src=10.0.0.5 dst=140.82.112.3 sport=40822 dport=443 src=140.82.112.3 dst=10.0.0.5 sport=443 dport=40822 [ASSURED] mark=0 use=1",
+    "tcp      6 59 SYN_SENT src=10.0.0.5 dst=10.20.30.40 sport=51770 dport=5432 [UNREPLIED] src=10.20.30.40 dst=10.0.0.5 sport=5432 dport=51770 mark=0 use=1",
+    "udp      17 27 src=10.0.0.5 dst=10.0.0.2 sport=40022 dport=53 src=10.0.0.2 dst=10.0.0.5 sport=53 dport=40022 mark=0 use=1",
+    "udp      17 29 src=10.0.0.5 dst=10.0.0.2 sport=51901 dport=53 src=10.0.0.2 dst=10.0.0.5 sport=53 dport=51901 mark=0 use=1",
+    "tcp      6 86399 ESTABLISHED src=203.0.113.50 dst=10.0.0.5 sport=60122 dport=22 src=10.0.0.5 dst=203.0.113.50 sport=22 dport=60122 [ASSURED] mark=0 use=1",
+    "tcp      6 299 ESTABLISHED src=172.17.0.2 dst=10.0.0.9 sport=48822 dport=8080 src=10.0.0.9 dst=10.0.0.5 sport=8080 dport=48822 [ASSURED] mark=0 use=1",
+    "tcp      6 431990 ESTABLISHED src=198.51.100.7 dst=10.0.0.5 sport=33310 dport=80 src=172.17.0.3 dst=198.51.100.7 sport=80 dport=33310 [ASSURED] mark=0 use=1",
+    "icmp     1 29 src=10.0.0.5 dst=1.1.1.1 type=8 code=0 id=4121 src=1.1.1.1 dst=10.0.0.5 type=0 code=0 id=4121 mark=0 use=1",
+    "udp      17 119 src=10.0.0.5 dst=224.0.0.251 sport=5353 dport=5353 [UNREPLIED] src=224.0.0.251 dst=10.0.0.5 sport=5353 dport=5353 mark=0 use=1",
+    "tcp      6 431999 ESTABLISHED src=10.0.0.5 dst=10.0.0.9 sport=51236 dport=443 src=10.0.0.9 dst=10.0.0.5 sport=443 dport=51236 [ASSURED] mark=0 use=1",
+    "tcp      6 3 CLOSE src=10.0.0.5 dst=34.117.59.81 sport=44012 dport=443 src=34.117.59.81 dst=10.0.0.5 sport=443 dport=44012 [ASSURED] mark=0 use=1",
+)
+CONNTRACK_PROCFS = CONNTRACK.replace("tcp      6", "ipv4     2 tcp      6").replace("udp      17", "ipv4     2 udp      17")
+CONNTRACK_NAT_ONLY = _txt(
+    "tcp      6 431990 ESTABLISHED src=198.51.100.7 dst=10.0.0.5 sport=33310 dport=80 src=172.17.0.3 dst=198.51.100.7 sport=80 dport=33310 [ASSURED] mark=0 use=1",
+    "icmp     1 29 src=10.0.0.5 dst=1.1.1.1 type=8 code=0 id=4121 src=1.1.1.1 dst=10.0.0.5 type=0 code=0 id=4121 mark=0 use=1",
+)
+
 case(
     1463,
-    claim="In ldd output, 'NAME => /dir/NAME (0xADDR)' loses the name before the arrow, leaving '=> /dir/NAME (0xADDR)'; rows whose soname differs from the path basename, 'not found' rows and the vdso and loader rows are unchanged; decode restores the text byte for byte, and rows that already start with the marker are escaped.",
-    encode=ldd_elide_soname,
-    decode=ldd_restore_soname,
+    claim="In conntrack -L and /proc/net/nf_conntrack rows of tcp, udp, sctp and dccp flows, a reply tuple that is the original tuple with source and destination swapped is replaced by '<mirror>' (flags such as [UNREPLIED] between the tuples stay); NAT rows, ICMP rows and other lines are unchanged; decode restores the text byte for byte, and rows that already contain '<mirror>' are escaped.",
+    encode=conntrack_mirror,
+    decode=conntrack_unmirror,
     fixtures=[
-        Fixture("real: ldd /usr/bin/gdb (52 libraries)", LDD_GDB, True),
-        Fixture("real: ldd /opt/node22/bin/node", LDD_NODE, True),
-        Fixture("soname differs from the file name, and not found", "\tlibfoo.so.1 => /opt/lib/libfoo.so.1.2.3 (0x00007f0000001000)\n\tlibbar.so.2 => not found\n\tlinux-vdso.so.1 (0x00007ffd1c9fe000)\n", False),
-        Fixture("statically linked", "\tnot a dynamic executable\n", False),
-        Fixture("rows that already start with the marker", LDD_NODE + "\t=> /lib/x.so (0x00007f0000001000)\n\t==> /lib/x.so (0x00007f0000001000)\n", None),
+        Fixture("reconstructed: conntrack -L, 12 flows (DNAT, ICMP and UNREPLIED rows included)", CONNTRACK, True),
+        Fixture("reconstructed: /proc/net/nf_conntrack prefix", CONNTRACK_PROCFS, True),
+        Fixture("only NAT and ICMP rows", CONNTRACK_NAT_ONLY, False),
+        Fixture("not conntrack", "src=1.1.1.1 dst=2.2.2.2 sport=1 dport=2 src=2.2.2.2 dst=1.1.1.1 sport=2 dport=1\n", False),
+        Fixture("rows that already contain the marker", CONNTRACK + "tcp 6 5 src=<mirror> dst=b sport=1 dport=2 src=b dst=<mirror> sport=2 dport=1 <mirror> <<mirror>\n", None),
     ],
     min_gain=0.1,
-    idempotent=False,  # elided rows start with the marker, which a second pass escapes
+    idempotent=False,  # '<mirror>' written by the first pass is escaped by the second
 )
