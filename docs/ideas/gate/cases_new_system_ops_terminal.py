@@ -3,7 +3,7 @@
   #1454 replay cursor-up / erase-line redraws to the final screen   (equivalent: a character-grid replay)
   #1455 /proc/PID/maps: ditto the dev+inode+path tail                (roundtrip)
   #1456 /proc/PID/status: alias the hex Mems_allowed/Cpus_allowed masks to their *_list twins   (roundtrip)
-  #1457 docker ps: merge the 0.0.0.0 + [::] twin port bindings       (roundtrip)
+  #1457 ps -eLf: keep a process's command line once, thread rows as LWP/C/TIME   (equivalent)
   #1458 ip addr: drop "valid_lft forever" lines, mark the derivable brd   (equivalent)
   #1459 pstree -ap: merge sibling thread leaves into one pid-range line   (roundtrip)
   #1460 ss: fold the IPv4/IPv6 twin listener rows                    (equivalent)
@@ -490,6 +490,70 @@ RICH_RAW = _txt(
     '\x1b[?25hdone',
 )
 
+# real: ps -eLf, header + PID 1 (9 threads) + kernel threads + a python3.13 process with 35 threads and a long argv + its child
+PS_ELF = _txt(
+    'UID        PID  PPID   LWP  C NLWP STIME TTY          TIME CMD',
+    'root         1     0     1  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    69  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    70  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    71  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    72  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    73  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    74  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    78  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         1     0    81  0    9 17:16 ?        00:00:00 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         2     0     2  0    1 17:16 ?        00:00:00 [kthreadd]',
+    'root         3     2     3  0    1 17:16 ?        00:00:00 [pool_workqueue_release]',
+    'root         4     2     4  0    1 17:16 ?        00:00:00 [kworker/R-rcu_gp]',
+    'root         5     2     5  0    1 17:16 ?        00:00:00 [kworker/R-sync_wq]',
+    'root     31238 31237 31238  1   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31240  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31241  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31242  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31243  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31244  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31245  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31246  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31247  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31248  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31249  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31250  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31251  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31252  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31253  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31254  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31255  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31256  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31257  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31258  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31259  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31260  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31261  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31262  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31263  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31264  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31265  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31266  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31267  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31268  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31269  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31270  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31271  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31272  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31238 31237 31273  0   35 18:08 ?        00:00:00 python3 thr.py -Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -Dspring.profiles.active=prod -Dfile.encoding=UTF-8 -cp /opt/shop/lib/shop-api-3.4.1.jar:/opt/shop/lib/spring-boot-3.3.2.jar:/opt/shop/lib/spring-web-6.1.11.jar:/opt/shop/lib/jackson-databind-2.17.2.jar:/opt/shop/lib/netty-handler-4.1.112.Final.jar com.example.shop.ShopApplication --server.port=8080',
+    'root     31274 31238 31274  0    1 18:08 ?        00:00:00 sleep 8',
+)
+
+# real: ps -ef | head -6
+PS_EF_SMALL = _txt(
+    'UID        PID  PPID  C STIME TTY          TIME CMD',
+    'root         1     0  0 17:16 ?        00:00:01 /process_api --firecracker-init --addr 0.0.0.0:2024 --max-ws-buffer-size 32768 --block-local-connections --control-vsock-port 5001 --listen-vsock-port 2024 --log-vsock-port 5002',
+    'root         2     0  0 17:16 ?        00:00:00 [kthreadd]',
+    'root         3     2  0 17:16 ?        00:00:00 [pool_workqueue_release]',
+    'root         4     2  0 17:16 ?        00:00:00 [kworker/R-rcu_gp]',
+    'root         5     2  0 17:16 ?        00:00:00 [kworker/R-sync_wq]',
+)
+
 # ---------------------------------------------------------------------------------------------------------------
 # reconstructed or synthesised fixtures (the tools are not installed here, or no real multi-line redraw was at hand)
 
@@ -545,42 +609,6 @@ CURSOR_ADVERSARIAL = [
     ("grep --color output with a tab in the line", "\x1b[35m\x1b[Kmain.c\x1b[m\x1b[K\x1b[36m\x1b[K:\x1b[m\x1b[K\tint x;\n"),
 ]
 
-
-def _dtable(rows, widths):
-    return "\n".join("".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip() for r in rows) + "\n"
-
-
-_DP_HEAD = ("CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "PORTS", "NAMES")
-_DP_ROWS = [  # reconstructed from memory: Docker 26+ prints IPv6 twins as [::]
-    ("7c3e9d1f2a4b", "nginx:1.27-alpine", '"/docker-entrypoint.…"', "3 hours ago", "Up 3 hours",
-     "0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp", "edge-proxy"),
-    ("b81f6a0c55d2", "postgres:16", '"docker-entrypoint.s…"', "3 hours ago", "Up 3 hours (healthy)",
-     "0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp", "db"),
-    ("0e9d2c7a14f8", "redis:7", '"docker-entrypoint.s…"', "3 hours ago", "Up 3 hours", "127.0.0.1:6379->6379/tcp", "cache"),
-    ("5a77c1b3e096", "myapp-api", '"gunicorn -b 0.0.0.0:…"', "2 hours ago", "Up 2 hours",
-     "0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp", "api"),
-    ("d2f4a8e61c03", "myapp-worker", '"celery -A app worker"', "2 hours ago", "Up 2 hours", "", "worker"),
-    ("93b0e5d7a2c1", "minio/minio:latest", '"/usr/bin/docker-ent…"', "5 days ago", "Up 5 days",
-     "0.0.0.0:9000-9001->9000-9001/tcp, [::]:9000-9001->9000-9001/tcp", "storage"),
-    ("41c8d09ab7e5", "grafana/grafana:11.1.0", '"/run.sh"', "5 days ago", "Up 5 days",
-     "0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp", "grafana"),
-    ("e7a15f3c9d28", "prom/prometheus:v2.53.0", '"/bin/prometheus --c…"', "5 days ago", "Up 5 days",
-     "0.0.0.0:9090->9090/tcp, [::]:9090->9090/tcp", "prometheus"),
-    ("6f2b8c4d0e91", "mailhog/mailhog", '"MailHog"', "6 days ago", "Exited (0) 2 days ago", "", "mailhog"),
-    ("1d95e3a7b0c6", "traefik:v3.1", '"/entrypoint.sh trae…"', "6 days ago", "Up 5 days",
-     "0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp, 80/tcp", "traefik"),
-]
-DOCKER_PS = _dtable([_DP_HEAD] + _DP_ROWS, [15, 27, 26, 17, 24, 80, 1])
-DOCKER_PS_V4_ONLY = _dtable([_DP_HEAD] + [r for r in _DP_ROWS if "[::]" not in r[5]], [15, 27, 26, 17, 24, 40, 1])
-DOCKER_PS_OLD_V6 = DOCKER_PS.replace("[::]:", ":::")  # Docker before 26 printed ':::8080' (not folded: a different spelling)
-DOCKER_COMPOSE_PS = _dtable([
-    ("NAME", "IMAGE", "COMMAND", "SERVICE", "CREATED", "STATUS", "PORTS"),
-    ("shop-web-1", "shop-web", '"npm run start"', "web", "4 minutes ago", "Up 4 minutes",
-     "0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp"),
-    ("shop-db-1", "postgres:16", '"docker-entrypoint.s…"', "db", "4 minutes ago", "Up 4 minutes (healthy)", "5432/tcp"),
-    ("shop-mq-1", "rabbitmq:3-management", '"docker-entrypoint.s…"', "mq", "4 minutes ago", "Up 4 minutes",
-     "4369/tcp, 5671-5672/tcp, 15671-15672/tcp, 0.0.0.0:15672->15672/tcp, [::]:15672->15672/tcp"),
-], [18, 24, 24, 10, 16, 26, 1])
 
 SS_LTNP = _txt(  # reconstructed from memory (iproute2 6.x); the fd differs between the IPv4 and IPv6 sockets of one daemon
     "State   Recv-Q  Send-Q   Local Address:Port    Peer Address:Port  Process",
@@ -1103,54 +1131,72 @@ case(
 )
 
 # ===============================================================================================================
-# #1457 docker ps, docker compose ps: merge the 0.0.0.0 + [::] twin port bindings
+# #1457 ps -eLf: print a process's command line once and its thread rows as LWP, C and TIME
 #
-# Docker publishes every port on IPv4 and IPv6, so PORTS reads "0.0.0.0:8080->80/tcp, [::]:8080->80/tcp". The pair
-# becomes "*:8080->80/tcp" (all interfaces, both families). Ranges and protocols are kept; a binding without its twin
-# (127.0.0.1:6379, the legacy ':::' spelling) is left alone. A '*:' item already in the text gets one extra star.
+# ps -eLf lists one row per thread, and every row repeats UID, PID, PPID, NLWP, STIME, TTY and the whole command
+# line; a JVM with 100 threads and a 400-character classpath prints that 100 times. Consecutive rows that differ only in
+# LWP, C and TIME become '+LWP=n C=n TIME=t' under the first row. The row layout is not kept (equivalent, not roundtrip).
 
-_SPEC = r"\d+(?:-\d+)?->\d+(?:-\d+)?/(?:tcp|udp|sctp)"
-_DP_PAIR = re.compile(rf"(?<![\w.:*\[\]/>-])0\.0\.0\.0:({_SPEC}), \[::\]:\1(?![\w-])")
-_DP_STAR = re.compile(rf"(\*+):({_SPEC})(?![\w-])")
-
-
-def docker_ports_merge(text: str) -> str:
-    escaped = [False]
-
-    def esc(m):
-        escaped[0] = True
-        return "*" + m.group(0)
-
-    body = _DP_STAR.sub(esc, text)
-    res = _DP_PAIR.sub(lambda m: f"*:{m.group(1)}", body)
-    return res if escaped[0] or len(res) < len(text) else text
+_PS_ROW = re.compile(r"^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+) (.*)$")
+_PS_CONT = re.compile(r"^\+LWP=(\d+) C=(\d+) TIME=(\S+)$")
 
 
-def docker_ports_split(text: str) -> str:
-    def un(m):
-        stars = m.group(1)
-        return f"0.0.0.0:{m.group(2)}, [::]:{m.group(2)}" if len(stars) == 1 else m.group(0)[1:]
+def ps_thread_rows(text: str) -> str:
+    lines = text.split("\n")
+    if any(_PS_CONT.match(l) for l in lines):
+        return text
+    rows = [_PS_ROW.match(l) for l in lines]
+    out, i = [], 0
+    while i < len(lines):
+        m = rows[i]
+        j = i + 1
+        if m:
+            key = lambda r: (r.group(1), r.group(2), r.group(3), r.group(6), r.group(7), r.group(8), r.group(10))  # noqa: E731
+            while j < len(lines) and rows[j] and key(rows[j]) == key(m):
+                j += 1
+        cont = [f"+LWP={rows[k].group(4)} C={rows[k].group(5)} TIME={rows[k].group(9)}" for k in range(i + 1, j)]
+        if cont and sum(len(c) for c in cont) < sum(len(lines[k]) for k in range(i + 1, j)):
+            out.append(lines[i])
+            out.extend(cont)
+        else:
+            out.extend(lines[i:j])
+        i = j
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
 
-    return _DP_STAR.sub(un, text)
+
+def _ps_rows(text: str):
+    """Independent oracle view: whitespace-split fields per row, continuation lines expanded from the row above."""
+    rows, prev = [], None
+    for line in text.split("\n"):
+        f = line.split(None, 9)
+        c = _PS_CONT.match(line)
+        if len(f) == 10 and all(x.isdigit() for x in f[1:6]) and not c:
+            prev = f
+            rows.append(tuple(f))
+        elif c and prev:
+            rows.append((prev[0], prev[1], prev[2], c.group(1), c.group(2), prev[5], prev[6], prev[7], c.group(3), prev[9]))
+        else:
+            rows.append((line,))
+    return rows
 
 
 case(
     1457,
-    claim="In docker ps and docker compose ps, a 0.0.0.0:H->C/proto binding directly followed by its [::]:H->C/proto twin becomes '*:H->C/proto'; ranges, other bind addresses, unpublished ports and the legacy ':::' spelling are untouched; decode restores the text byte for byte.",
-    encode=docker_ports_merge,
-    decode=docker_ports_split,
+    claim="In ps -eLf output, consecutive thread rows that share UID, PID, PPID, NLWP, STIME, TTY and command line keep only the first row in full; the others become '+LWP=n C=n TIME=t' lines; every field of every row is recoverable, and a text that already contains such a line is left alone.",
+    loses="column alignment padding of the collapsed thread rows",
+    encode=ps_thread_rows,
+    equivalent=lambda a, b: a == b or _ps_rows(a) == _ps_rows(b),
     fixtures=[
-        Fixture("reconstructed: docker ps with 10 containers", DOCKER_PS, True),
-        Fixture("reconstructed: docker compose ps", DOCKER_COMPOSE_PS, True),
-        Fixture("only IPv4-bound ports", DOCKER_PS_V4_ONLY, False),
-        Fixture("Docker before 26 spelled the IPv6 twin ':::'", DOCKER_PS_OLD_V6, False),
-        Fixture("table without ports", "CONTAINER ID   IMAGE   STATUS\nabc123def456   nginx   Up 2 hours\n", False),
-        Fixture("v4 and v6 bindings that do not pair up", "0.0.0.0:80->80/tcp, [::]:81->81/tcp, 0.0.0.0:82->82/udp, [::]:82->82/tcp\n", False),
-        Fixture("text with '*:80->80/tcp' items already in it", DOCKER_PS + "x *:80->80/tcp **:81->81/tcp 0.0.0.0:8->8/tcp, [::]:8->8/tcp*:9->9/tcp\n", None),
-        Fixture("star glued in front of a pair", "*0.0.0.0:80->80/tcp, [::]:80->80/tcp\n0.0.0.0:80->80/tcp, [::]:80->80/tcp*\n", None),
+        Fixture("real: ps -eLf, PID 1 with 9 threads and a 35-thread process with a long argv", PS_ELF, True),
+        Fixture("real: ps -ef has no LWP column", PS_EF_SMALL, False),
+        Fixture("single-threaded processes only", "\n".join(PS_ELF.split("\n")[:1] + PS_ELF.split("\n")[10:14]) + "\n", False),
+        Fixture("two threads with different command lines (prctl names) and a days-form TIME", "UID PID PPID LWP C NLWP STIME TTY TIME CMD\nroot 7 1 7 0 2 Nov04 ? 1-02:03:04 /usr/bin/app --serve --port 8080 --workers 4\nroot 7 1 8 3 2 Nov04 ? 1-02:03:04 /usr/bin/app --serve --port 8080 --workers 4\nroot 7 1 9 0 2 Nov04 ? 00:00:00 app-worker\n", True),
+        Fixture("pre-fork workers: same command, different PIDs, one thread each", "UID PID PPID LWP C NLWP STIME TTY TIME CMD\nroot 7 1 7 0 1 Nov04 ? 00:00:09 gunicorn: worker [shop]\nroot 8 1 8 0 1 Nov04 ? 00:00:09 gunicorn: worker [shop]\nroot 9 1 9 0 1 Nov04 ? 00:00:09 gunicorn: worker [shop]\n", False),
+        Fixture("lines that already look like continuation lines", PS_ELF + "+LWP=5 C=0 TIME=00:00:00\n", None),
+        Fixture("CRLF output", PS_ELF.replace("\n", "\r\n"), True),
     ],
-    min_gain=0.08,
-    idempotent=False,  # '*:' items written by the first pass are escaped by the second
+    min_gain=0.2,
 )
 
 # ===============================================================================================================

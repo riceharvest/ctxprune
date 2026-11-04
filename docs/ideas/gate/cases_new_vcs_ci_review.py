@@ -654,6 +654,45 @@ DIFF_R_FULL = (
     'Only in new/src/lib: vendor\n'
 )
 
+# ruff check --output-format=github over 5 files, ruff 0.16.9 (runner root path substituted for the scratch dir)
+RUFF_GHA = (
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/models.py,line=1,col=8,endLine=1,endColumn=10::src/app/models.py:1:8: F401 `os` imported but unused%0A  help: Remove unused import: `os`\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/models.py,line=2,col=8,endLine=2,endColumn=11::src/app/models.py:2:8: F401 `sys` imported but unused%0A  help: Remove unused import: `sys`\n'
+    '::error title=ruff (UP035),file=/home/runner/work/widgets/widgets/src/app/models.py,line=4,col=1,endLine=4,endColumn=30::src/app/models.py:4:1: UP035 `typing.List` is deprecated, use `list` instead\n'
+    '::error title=ruff (UP035),file=/home/runner/work/widgets/widgets/src/app/models.py,line=4,col=1,endLine=4,endColumn=30::src/app/models.py:4:1: UP035 `typing.Dict` is deprecated, use `dict` instead\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/models.py,line=4,col=20,endLine=4,endColumn=24::src/app/models.py:4:20: F401 `typing.List` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/models.py,line=4,col=26,endLine=4,endColumn=30::src/app/models.py:4:26: F401 `typing.Dict` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (SIM115),file=/home/runner/work/widgets/widgets/src/app/models.py,line=7,col=22,endLine=7,endColumn=26::src/app/models.py:7:22: SIM115 Use a context manager for opening files\n'
+    '::error title=ruff (F841),file=/home/runner/work/widgets/widgets/src/app/models.py,line=8,col=5,endLine=8,endColumn=11::src/app/models.py:8:5: F841 Local variable `unused` is assigned to but never used%0A  help: Remove assignment to unused variable `unused`\n'
+    '::error title=ruff (E741),file=/home/runner/work/widgets/widgets/src/app/models.py,line=16,col=9,endLine=16,endColumn=10::src/app/models.py:16:9: E741 Ambiguous variable name: `l`\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/services/billing.py,line=2,col=8,endLine=2,endColumn=15::src/app/services/billing.py:2:8: F401 `decimal` imported but unused%0A  help: Remove unused import: `decimal`\n'
+    '::error title=ruff (F403),file=/home/runner/work/widgets/widgets/src/app/services/billing.py,line=3,col=1,endLine=3,endColumn=25::src/app/services/billing.py:3:1: F403 `from app.models import *` used; unable to detect undefined names\n'
+    '::error title=ruff (E711),file=/home/runner/work/widgets/widgets/src/app/services/billing.py,line=13,col=20,endLine=13,endColumn=24::src/app/services/billing.py:13:20: E711 Comparison to `None` should be `cond is None`%0A  help: Replace with `cond is None`\n'
+    '::error title=ruff (UP031),file=/home/runner/work/widgets/widgets/src/app/services/billing.py,line=18,col=12,endLine=18,endColumn=20::src/app/services/billing.py:18:12: UP031 Use format specifiers instead of percent format%0A  help: Replace with format specifiers\n'
+    '::error title=ruff (E401),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=1,col=1,endLine=1,endColumn=17::src/app/services/export.py:1:1: E401 Multiple imports on one line%0A  help: Split imports\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=2,col=8,endLine=2,endColumn=15::src/app/services/export.py:2:8: F401 `pathlib` imported but unused%0A  help: Remove unused import: `pathlib`\n'
+    '::error title=ruff (SIM115),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=5,col=9,endLine=5,endColumn=13::src/app/services/export.py:5:9: SIM115 Use a context manager for opening files\n'
+    '::error title=ruff (E711),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=8,col=17,endLine=8,endColumn=21::src/app/services/export.py:8:17: E711 Comparison to `None` should be `cond is not None`%0A  help: Replace with `cond is not None`\n'
+    '::error title=ruff (E741),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=13,col=5,endLine=13,endColumn=6::src/app/services/export.py:13:5: E741 Ambiguous variable name: `l`\n'
+    '::error title=ruff (F841),file=/home/runner/work/widgets/widgets/src/app/services/export.py,line=13,col=5,endLine=13,endColumn=6::src/app/services/export.py:13:5: F841 Local variable `l` is assigned to but never used%0A  help: Remove assignment to unused variable `l`\n'
+    '::error title=ruff (E401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=1,col=1,endLine=1,endColumn=15::src/app/utils.py:1:1: E401 Multiple imports on one line%0A  help: Split imports\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=1,col=8,endLine=1,endColumn=10::src/app/utils.py:1:8: F401 `os` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=1,col=12,endLine=1,endColumn=15::src/app/utils.py:1:12: F401 `sys` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=2,col=8,endLine=2,endColumn=19::src/app/utils.py:2:8: F401 `collections` imported but unused%0A  help: Remove unused import: `collections`\n'
+    '::error title=ruff (UP035),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=3,col=1,endLine=3,endColumn=34::src/app/utils.py:3:1: UP035 `typing.List` is deprecated, use `list` instead\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=3,col=20,endLine=3,endColumn=28::src/app/utils.py:3:20: F401 `typing.Optional` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=3,col=30,endLine=3,endColumn=34::src/app/utils.py:3:30: F401 `typing.List` imported but unused%0A  help: Remove unused import\n'
+    '::error title=ruff (E711),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=6,col=13,endLine=6,endColumn=17::src/app/utils.py:6:13: E711 Comparison to `None` should be `cond is None`%0A  help: Replace with `cond is None`\n'
+    '::error title=ruff (SIM105),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=8,endLine=11::src/app/utils.py:8:5: SIM105 Use `contextlib.suppress(BaseException)` instead of `try`-`except`-`pass`%0A  help: Replace `try`-`except`-`pass` with `with contextlib.suppress(BaseException): ...`\n'
+    '::error title=ruff (F841),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=9,col=9,endLine=9,endColumn=10::src/app/utils.py:9:9: F841 Local variable `x` is assigned to but never used%0A  help: Remove assignment to unused variable `x`\n'
+    '::error title=ruff (E722),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=10,col=5,endLine=10,endColumn=11::src/app/utils.py:10:5: E722 Do not use bare `except`\n'
+    '::error title=ruff (E741),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=12,col=5,endLine=12,endColumn=6::src/app/utils.py:12:5: E741 Ambiguous variable name: `l`\n'
+    '::error title=ruff (F841),file=/home/runner/work/widgets/widgets/src/app/utils.py,line=16,col=5,endLine=16,endColumn=15::src/app/utils.py:16:5: F841 Local variable `unused_var` is assigned to but never used%0A  help: Remove assignment to unused variable `unused_var`\n'
+    '::error title=ruff (F403),file=/home/runner/work/widgets/widgets/src/app/views.py,line=1,col=1,endLine=1,endColumn=25::src/app/views.py:1:1: F403 `from app.models import *` used; unable to detect undefined names\n'
+    '::error title=ruff (F401),file=/home/runner/work/widgets/widgets/src/app/views.py,line=2,col=8,endLine=2,endColumn=10::src/app/views.py:2:8: F401 `re` imported but unused%0A  help: Remove unused import: `re`\n'
+    '::error title=ruff (E711),file=/home/runner/work/widgets/widgets/src/app/views.py,line=8,col=15,endLine=8,endColumn=19::src/app/views.py:8:15: E711 Comparison to `None` should be `cond is None`%0A  help: Replace with `cond is None`\n'
+)
+
 # git merge --no-edit feature/search (ort strategy)
 MERGE_OUT = (
     "Merge made by the 'ort' strategy.\n"
@@ -2119,5 +2158,357 @@ case(
         Fixture("a literal marker key in the input", _pretty([{**_file_entry("a.py", "added", 1, 0), "~": "f0-3"}]), None),
     ],
     min_gain=0.25,
+    idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
+)
+
+
+# ===============================================================================================================
+# #1426 GitLab API v4 commit objects restate their own fields: short_id is a prefix of id, title is the first line of message (or
+# message is title), created_at and committer_* repeat committed_date and author_*, committed_date repeats authored_date, web_url
+# is the first entry's prefix plus the id. Each twin value becomes a '=source' string; a '§gitlab' header marks the encoding.
+# (Merge request objects and MR change entries have twins too, but saved 2-6% of tokens on the fixtures: not worth a rule.)
+
+_GL_MARK = re.compile(r'"=(?:id\[:\d+\]|authored_date|committed_date|author_name|author_email|title|title\+LF|message\[0\]|trailers|web_url\[0\])"')
+
+
+def _lits(pairs):
+    """key -> lexeme of the literal (string, number, bool, null) pairs of one object."""
+    return {jstr(k) or k: v[1] for k, v in pairs if v[0] == "l"}
+
+
+def _gl_markers(pairs, first_web):
+    """Encoder: key -> marker string for every field of this commit object that is a twin of another field."""
+    L = _lits(pairs)
+    S = lambda k: jstr(L.get(k) or "")  # noqa: E731
+    marks, ident = {}, S("id")
+    short = S("short_id")
+    if ident and short and 7 <= len(short) < len(ident) and ident.startswith(short):
+        marks["short_id"] = f"=id[:{len(short)}]"
+    if L.get("authored_date") and L.get("committed_date") == L["authored_date"]:
+        marks["committed_date"] = "=authored_date"
+    if L.get("created_at") and L.get("created_at") in (L.get("authored_date"), L.get("committed_date")):
+        marks["created_at"] = "=authored_date" if L["created_at"] == L.get("authored_date") else "=committed_date"
+    for who, src in (("committer_name", "author_name"), ("committer_email", "author_email")):
+        if L.get(src) and L.get(who) == L[src]:
+            marks[who] = f"={src}"
+    title, message = S("title"), S("message")
+    if title and message is not None:
+        if message == title:
+            marks["message"] = "=title"
+        elif message == title + "\n":
+            marks["message"] = "=title+LF"
+        elif "\n" in message and message.split("\n", 1)[0] == title:
+            marks["title"] = "=message[0]"
+    web = S("web_url")
+    if ident and web and first_web and web == first_web + ident:
+        marks["web_url"] = "=web_url[0]"
+    if ("trailers", ("o", [])) in [(jstr(k), v) for k, v in pairs] and ("extended_trailers", ("o", [])) in [(jstr(k), v) for k, v in pairs]:
+        marks["extended_trailers"] = "=trailers"
+    return marks
+
+
+def _gl_resolve(pairs, first_web):
+    """Decoder: replace every marker value by the twin it names, in dependency order."""
+    pairs = list(pairs)
+    todo = [(n, jstr(k)) for n, (k, v) in enumerate(pairs) if v[0] == "l" and _GL_MARK.fullmatch(v[1])]
+    while todo:
+        L = {k: v for k, v in _lits(pairs).items() if not _GL_MARK.fullmatch(v)}
+        S = lambda k: jstr(L.get(k) or "")  # noqa: E731
+        progress, rest = False, []
+        for n, key in todo:
+            mk = jstr(pairs[n][1][1])
+            node = None
+            if key == "short_id" and S("id") and (m := re.fullmatch(r"=id\[:(\d+)\]", mk)):
+                node = ("l", jlex(S("id")[:int(m[1])]))
+            elif key in ("committed_date", "created_at") and mk in ("=authored_date", "=committed_date") and L.get(mk[1:]):
+                node = ("l", L[mk[1:]])
+            elif key in ("committer_name", "committer_email") and mk in ("=author_name", "=author_email") and L.get(mk[1:]):
+                node = ("l", L[mk[1:]])
+            elif key == "message" and S("title") is not None and mk in ("=title", "=title+LF"):
+                node = ("l", jlex(S("title") + ("\n" if mk == "=title+LF" else "")))
+            elif key == "title" and mk == "=message[0]" and S("message") is not None:
+                node = ("l", jlex(S("message").split("\n", 1)[0]))
+            elif key == "web_url" and mk == "=web_url[0]" and S("id") and first_web:
+                node = ("l", jlex(first_web + S("id")))
+            elif key == "extended_trailers" and mk == "=trailers":
+                node = ("o", [])
+            if node is None:
+                rest.append((n, key))
+            else:
+                pairs[n] = (pairs[n][0], node)
+                progress = True
+        if not progress:
+            raise ValueError("unresolvable marker")
+        todo = rest
+    return pairs
+
+
+def _gl_walk(n, fn, first_web=None):
+    """Rebuild a tree children first; fn(pairs, prefix of the enclosing array) -> pairs for every object. Array items share a
+    prefix found on the first item whose web_url is a prefix plus its id (read after fn ran, so the decoder sees literals)."""
+    if n[0] == "a":
+        prefix, items = None, []
+        for it in n[1]:
+            new = _gl_walk(it, fn, prefix)
+            items.append(new)
+            if prefix is None and new[0] == "o":
+                L = _lits(new[1])
+                web, ident = jstr(L.get("web_url") or ""), jstr(L.get("id") or "")
+                if web and ident and web.endswith(ident) and not _GL_MARK.fullmatch(L["web_url"]):
+                    prefix = web[:-len(ident)]
+        return ("a", items)
+    if n[0] == "o":
+        return ("o", fn([(k, _gl_walk(v, fn)) for k, v in n[1]], first_web))
+    return n
+
+
+def _gl_unsafe(n):
+    """True for a literal that looks like a marker, or an object with duplicate keys."""
+    if n[0] == "l":
+        return bool(_GL_MARK.fullmatch(n[1]))
+    if n[0] == "a":
+        return any(_gl_unsafe(c) for c in n[1])
+    keys = [k for k, _ in n[1]]
+    return len(set(keys)) != len(keys) or any(_gl_unsafe(v) for _, v in n[1])
+
+
+def _gl_transform(tree):
+    if _gl_unsafe(tree):
+        return None
+
+    def per_object(pairs, first_web):
+        marks = _gl_markers(pairs, first_web)
+        return [(k, ("l", jlex(marks[jstr(k)])) if jstr(k) in marks else v) for k, v in pairs]
+
+    return _gl_walk(tree, per_object)
+
+
+def _gl_restore(tree):
+    changed = [False]
+
+    def per_object(pairs, first_web):
+        if any(v[0] == "l" and _GL_MARK.fullmatch(v[1]) for _, v in pairs):
+            changed[0] = True
+            return _gl_resolve(pairs, first_web)
+        return pairs
+
+    out = _gl_walk(tree, per_object)
+    return out if changed[0] else None
+
+
+gitlab_encode, gitlab_decode = json_codec("gitlab", _gl_transform, _gl_restore)
+
+
+def _gl_commit(i, author, email, title, body="", committer=None, prefix="https://gitlab.com/acme/widgets/-/commit/"):
+    sha = f"{(0x9fceb02d0ae598e95dc970b74767f19372d61af8 + i * 0x1234567) % (1 << 160):040x}"
+    date = f"2026-03-{10 + i:02d}T{9 + i:02d}:15:00.000+01:00"
+    cdate = date if committer is None else f"2026-03-{10 + i:02d}T{9 + i:02d}:55:00.000+00:00"
+    msg = title + "\n" + (("\n" + body) if body else "")
+    return {"id": sha, "short_id": sha[:8], "created_at": cdate, "parent_ids": [f"{(int(sha, 16) + 7) % (1 << 160):040x}"], "title": title,
+            "message": msg, "author_name": author, "author_email": email, "authored_date": date,
+            "committer_name": committer or author, "committer_email": ("noreply@gitlab.com" if committer else email),
+            "committed_date": cdate, "trailers": {}, "extended_trailers": {}, "web_url": prefix + sha}
+
+
+GL_COMMITS = [_gl_commit(0, "Ada Example", "ada@example.com", "Fix flaky cache test"),
+              _gl_commit(1, "Ada Example", "ada@example.com", "Retry uploads with backoff", "Wraps the S3 call in retry().\n\nCloses #12"),
+              _gl_commit(2, "Ben Reviewer", "ben@example.org", "Bump boto3 to 1.34.9"),
+              _gl_commit(3, "Ada Example", "ada@example.com", "Add CI cache key", committer="GitLab"),
+              _gl_commit(4, "Chen Maintainer", "chen@example.net", "Merge branch 'retry-uploads' into 'main'")]
+GL_COMMITS_DOC = _compact(GL_COMMITS)
+
+
+def _gl_mr(k=0):
+    sha = f"{(0xed899a2f4b50b4370feeea94676502b42383c746 + k * 0x7654321) % (1 << 160):040x}"
+    return {"id": 84201733 + k, "iid": 312 + k, "project_id": 4172, "title": f"Retry uploads with backoff ({k})", "description": "Closes #12", "state": "opened",
+            "created_at": "2026-03-10T09:15:00.000Z", "updated_at": "2026-03-12T10:02:11.482Z", "merged_by": None, "merge_user": None,
+            "merged_at": None, "closed_by": None, "closed_at": None, "target_branch": "main", "source_branch": "retry-uploads",
+            "user_notes_count": 3, "upvotes": 0, "downvotes": 0,
+            "author": {"id": 5521, "username": "ada", "name": "Ada Example", "state": "active", "locked": False,
+                       "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/5521/avatar.png", "web_url": "https://gitlab.com/ada"},
+            "assignees": [], "assignee": None, "reviewers": [], "source_project_id": 4172, "target_project_id": 4172, "labels": [],
+            "draft": False, "work_in_progress": False, "milestone": None, "merge_when_pipeline_succeeds": False,
+            "merge_status": "can_be_merged", "detailed_merge_status": "mergeable", "sha": sha, "merge_commit_sha": None,
+            "squash_commit_sha": None, "discussion_locked": None, "should_remove_source_branch": None, "force_remove_source_branch": False,
+            "reference": f"!{312 + k}", "references": {"short": f"!{312 + k}", "relative": f"!{312 + k}", "full": f"acme/widgets!{312 + k}"},
+            "web_url": f"https://gitlab.com/acme/widgets/-/merge_requests/{312 + k}",
+            "time_stats": {"time_estimate": 0, "total_time_spent": 0, "human_time_estimate": None, "human_total_time_spent": None},
+            "squash": False, "squash_on_merge": False, "task_completion_status": {"count": 0, "completed_count": 0},
+            "has_conflicts": False, "blocking_discussions_resolved": True, "approvals_before_merge": None,
+            "diff_refs": {"base_sha": "9a4f1c2d5e0b7a3c8d6e1f2a3b4c5d6e7f8a9b0c", "head_sha": sha, "start_sha": "9a4f1c2d5e0b7a3c8d6e1f2a3b4c5d6e7f8a9b0c"}}
+
+
+GL_MR_LIST_DOC = _compact([_gl_mr(k) for k in range(8)])
+GL_CHANGES_DOC = _compact({"changes": [
+    {"old_path": f"src/pkg/mod_{i}.py", "new_path": f"src/pkg/mod_{i}.py", "a_mode": "100644", "b_mode": "100644", "diff": "@@ -1 +1 @@\n-a\n+b\n",
+     "new_file": False, "renamed_file": False, "deleted_file": False} for i in range(10)] + [
+    {"old_path": "src/retry.py", "new_path": "src/retry.py", "a_mode": "0", "b_mode": "100644", "diff": "@@ -0,0 +1 @@\n+x\n",
+     "new_file": True, "renamed_file": False, "deleted_file": False},
+    {"old_path": "docs/old.md", "new_path": "docs/new.md", "a_mode": "100644", "b_mode": "100644", "diff": "", "new_file": False,
+     "renamed_file": True, "deleted_file": False}]})
+
+case(
+    1426,
+    claim="In GitLab v4 commit objects, a field that repeats another field of the same object (short_id as a prefix of id, committed_date and created_at as the author or committed date, committer_* as author_*, title as message's first line or message as title, web_url as the first entry's prefix plus id) is replaced by a '=source' marker; a '§gitlab' header marks the encoding and decode restores the exact bytes.",
+    encode=gitlab_encode,
+    decode=gitlab_decode,
+    fixtures=[
+        Fixture("repository/commits: 5 commits, compact layout (as the API returns it)", GL_COMMITS_DOC, True),
+        Fixture("the same list pretty-printed", _pretty(GL_COMMITS), True),
+        Fixture("20 commits, one committer differs on every fifth", _compact([_gl_commit(i % 20, "Ada Example", "ada@example.com", f"Change {i}",
+                                                                              committer="GitLab" if i % 5 == 4 else None) for i in range(20)]), True),
+        Fixture("merge request objects have no commit twins", GL_MR_LIST_DOC, False),
+        Fixture("merge request change entries have none either", GL_CHANGES_DOC, False),
+        Fixture("a lone commit whose twins differ keeps every literal",
+                _compact([{**GL_COMMITS[0], "short_id": "zzzzzzzz", "committer_name": "Other", "created_at": "2025-01-01T00:00:00.000Z", "committer_email": "o@x.org",
+                           "committed_date": "2025-01-02T00:00:00.000Z", "message": "other", "web_url": "https://x.org/c/1"}]), False),
+        Fixture("GitHub-shaped JSON has none of these fields", GH_MCP_MINIMAL, False),
+        Fixture("not JSON", "glab: 401 Unauthorized\n", False),
+        Fixture("input that starts like the escape line", RAW + GL_COMMITS_DOC, None),
+        Fixture("input that starts like the header", "§gitlab\n" + GL_COMMITS_DOC, None),
+        Fixture("a literal marker value in the input", _compact([{**GL_COMMITS[0], "note": "=author_name"}]), None),
+        Fixture("duplicate keys are not touched", '{"id":"abcdef0123456789abcdef0123456789abcdef01","short_id":"abcdef01","short_id":"abcdef01"}', None),
+        Fixture("a lone commit whose title is only the first line of a longer message", _compact([GL_COMMITS[1]]), None),
+    ],
+    min_gain=0.05,  # characters; the hex ids are cheap in characters and costly in tokens, which fall about 40% more
+    idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
+)
+
+
+# ===============================================================================================================
+# #1433 GitHub Actions workflow-command annotations from linters that print absolute paths (ruff --output-format=github, ESLint
+# formatters): '::error title=..,file=/abs/root/src/a.py,line=1,col=8,...::src/a.py:1:8: F401 ...' repeats the checkout root on every
+# line and restates path, line and column in the message. Header '§gha ROOT'; file=@rel hoists the root, file=@@rel also drops the
+# message prefix 'rel:line:col: '.
+
+_GHA_LINE = re.compile(r"::(error|warning|notice) ([^:\n]*)::(.*)")
+
+
+def _gha_parse(line):
+    m = _GHA_LINE.fullmatch(line)
+    if not m:
+        return None
+    props = [p.partition("=") for p in m[2].split(",")]
+    if any(sep == "" for _, sep, _ in props):
+        return None
+    return m[1], props, m[3]
+
+
+def _gha_get(props, key):
+    vals = [v for k, _, v in props if k == key]
+    return vals[0] if len(vals) == 1 else None
+
+
+def _gha_join(level, props, msg):
+    return f"::{level} " + ",".join(f"{k}={v}" for k, _, v in props) + f"::{msg}"
+
+
+def _gha_root(lines):
+    for l in lines:
+        p = _gha_parse(l)
+        if p:
+            f, ln, col = _gha_get(p[1], "file"), _gha_get(p[1], "line"), _gha_get(p[1], "col")
+            if f and ln and col:
+                m = re.match(r"(.+?):" + re.escape(ln) + ":" + re.escape(col) + ": ", p[2])
+                if m and f.startswith("/") and f.endswith("/" + m[1]) and len(f) > len(m[1]) + 1:
+                    return f[:-len(m[1]) - 1]
+    files = [_gha_get(p[1], "file") for l in lines if (p := _gha_parse(l))]
+    files = [f for f in files if f and f.startswith("/")]
+    if len(files) >= 2:
+        parts = [f.split("/")[:-1] for f in files]
+        common = []
+        for cols in zip(*parts):
+            if len(set(cols)) != 1:
+                break
+            common.append(cols[0])
+        root = "/".join(common)
+        if root.count("/") >= 2:
+            return root
+    return None
+
+
+def _gha_build(text):
+    lines, nl = nl_split(text)
+    if any("file=@" in l for l in lines):
+        return None
+    root = _gha_root(lines)
+    if not root or "\n" in root:
+        return None
+    out = []
+    for l in lines:
+        p = _gha_parse(l)
+        f = _gha_get(p[1], "file") if p else None
+        if not (p and f and f.startswith(root + "/") and len(f) > len(root) + 1):
+            out.append(l)
+            continue
+        level, props, msg = p
+        rel = f[len(root) + 1:]
+        ln, col = _gha_get(props, "line"), _gha_get(props, "col")
+        pre = f"{rel}:{ln}:{col}: " if ln and col else None
+        if pre and msg.startswith(pre):
+            val, msg = "@@" + rel, msg[len(pre):]
+        else:
+            val = "@" + rel
+        out.append(_gha_join(level, [(k, s, val if k == "file" else v) for k, s, v in props], msg))
+    return f"{SIG}gha {root}\n" + "\n".join(out) + ("\n" if nl else "")
+
+
+def gha_decode(text):
+    if text.startswith(RAW):
+        return text[len(RAW):]
+    if not text.startswith(f"{SIG}gha "):
+        return text
+    head, _, rest = text.partition("\n")
+    root = head[len(f"{SIG}gha "):]
+    lines, nl = nl_split(rest)
+    out = []
+    for l in lines:
+        p = _gha_parse(l)
+        f = _gha_get(p[1], "file") if p else None
+        if not (p and f and f.startswith("@")):
+            out.append(l)
+            continue
+        level, props, msg = p
+        full = f.startswith("@@")
+        rel = f[2:] if full else f[1:]
+        if full:
+            msg = f"{rel}:{_gha_get(props, 'line')}:{_gha_get(props, 'col')}: " + msg
+        out.append(_gha_join(level, [(k, s, f"{root}/{rel}" if k == "file" else v) for k, s, v in props], msg))
+    return "\n".join(out) + ("\n" if nl else "")
+
+
+def gha_encode(text):
+    return sigil_guard(text, _gha_build, gha_decode)
+
+
+RUFF_LOG = ("Run ruff check --output-format=github .\n" + RUFF_GHA + "Found 35 errors.\n##[error]Process completed with exit code 1.\n")
+_ESLINT_LIKE = "".join(  # reconstructed from memory: an ESLint GitHub formatter prints no path:line:col prefix in the message
+    f"::error file=/home/runner/work/app/app/src/components/Widget{i}.tsx,line={10 + i},col={3 + i},title=@typescript-eslint/no-unused-vars::"
+    f"'x{i}' is assigned a value but never used.\n" for i in range(6))
+
+case(
+    1433,
+    claim="In GitHub Actions workflow-command annotation lines that carry an absolute file path (ruff --output-format=github, ESLint formatters), the checkout root is named once in a '§gha ROOT' header; file=ROOT/rel becomes file=@rel, and when the message starts with 'rel:line:col: ' that restated prefix is dropped too (file=@@rel); decode restores the exact bytes, and lines that do not fit stay verbatim.",
+    encode=gha_encode,
+    decode=gha_decode,
+    fixtures=[
+        Fixture("real: ruff 0.16.9 annotations, 35 findings in 5 files", RUFF_GHA, True),
+        Fixture("the same inside a CI log with other lines", RUFF_LOG, True),
+        Fixture("no message prefix: only the root is hoisted (reconstructed from memory)", _ESLINT_LIKE, True),
+        Fixture("relative file paths (golangci-lint style) have no root to hoist",
+                "".join(f"::error file=cmd/server/main.go,line={i},col=2::unused variable (unused)\n" for i in range(1, 6)), False),
+        Fixture("real: ruff concise output is not an annotation", "src/app/models.py:1:8: F401 `os` imported but unused\n" * 5, False),
+        Fixture("a single annotation: the message prefix still names the root", RUFF_GHA.split("\n")[0] + "\n", None),
+        Fixture("a file in a sibling directory that shares the root's text stays literal",
+                RUFF_GHA + "::error title=ruff (F401),file=/home/runner/work/widgets/widgets-fork/src/a.py,line=1,col=1,endLine=1,endColumn=2::src/a.py:1:1: F401 x\n", True),
+        Fixture("a path that starts with @ (scoped npm dir) is never rewritten",
+                "::error file=/home/runner/w/a/@types/node/index.d.ts,line=1,col=1::x\n::error file=/home/runner/w/a/src/b.ts,line=2,col=2::y\n", False),
+        Fixture("input that starts like the escape line", RAW + RUFF_GHA, None),
+        Fixture("input that starts like the header", f"{SIG}gha /x/y\n::error file=@a,line=1,col=1::m\n", None),
+        Fixture("a bare sigil", SIG + RUFF_GHA, None),
+        Fixture("a message that contains '::' and a CRLF-terminated log",
+                "::warning file=/r/w/a/x.py,line=1,col=1::x.py:1:1: a::b\r\n::warning file=/r/w/a/y.py,line=2,col=2::y.py:2:2: c\r\n", None),
+    ],
+    min_gain=0.15,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )

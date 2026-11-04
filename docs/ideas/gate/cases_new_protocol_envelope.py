@@ -133,6 +133,17 @@ def _json_layout(text: str):
     return None
 
 
+def _walk_dicts(node, fn):
+    """Call fn(d) on every dict in a parsed JSON tree, outermost first."""
+    if isinstance(node, dict):
+        fn(node)
+        for v in node.values():
+            _walk_dicts(v, fn)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_dicts(v, fn)
+
+
 def _guard(core, decode, *prefixes):
     """Wrap `core(text) -> str`: fail open, escape text that starts like an encoding, self-gate on size, self-verify."""
     esc = prefixes[-1]  # the raw escape is the last prefix
@@ -305,7 +316,7 @@ _DATA_ONLY = _anthropic_stream(["Hi", "!"], tool=False) + 'data: {"type":"ping"}
 _MCP_SSE = "".join(f"event: message\nid: {i}\ndata: " + _compact({"jsonrpc": "2.0", "id": i, "result": {"content": [{"type": "text", "text": f"row {i}"}]}}) + "\n\n" for i in range(1, 6))
 
 
-def _resp_stream(words, text_escapes=False):  # reconstructed from the documented Responses API streaming events
+def _resp_stream(words, ensure_ascii=True):  # reconstructed from the documented Responses API streaming events
     rid, mid = "resp_68b0f2a4c1d88193a9e2d7b6c0f4e5a1", "msg_68b0f2a5e0b88193b7a1c3d4e5f60718"
     tool = {"type": "function", "name": "run_shell", "description": "Run a shell command in the project directory and return its standard output and exit code.", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The command line to run with /bin/sh -c"}, "timeout_s": {"type": "integer", "description": "Seconds before the command is killed"}}, "required": ["command", "timeout_s"], "additionalProperties": False}, "strict": True}
     base = {"id": rid, "object": "response", "created_at": 1756295844, "status": "in_progress", "background": False, "error": None, "incomplete_details": None, "instructions": "You are a careful shell assistant. Prefer one command over prose, never run destructive commands without asking, and keep answers under three sentences.", "max_output_tokens": None, "max_tool_calls": None, "model": "gpt-4.1-2025-04-14", "output": [], "parallel_tool_calls": True, "previous_response_id": None, "prompt_cache_key": None, "reasoning": {"effort": None, "summary": None}, "safety_identifier": None, "service_tier": "auto", "store": True, "temperature": 1.0, "text": {"format": {"type": "text"}, "verbosity": "medium"}, "tool_choice": "auto", "tools": [tool], "top_logprobs": 0, "top_p": 1.0, "truncation": "disabled", "usage": None, "user": None, "metadata": {}}
@@ -319,7 +330,7 @@ def _resp_stream(words, text_escapes=False):  # reconstructed from the documente
     def add(t, **kw):
         obj = {"type": t, "sequence_number": seq[0], **kw}
         seq[0] += 1
-        ev.append(f"event: {t}\ndata: {json.dumps(obj, separators=(',', ':'), ensure_ascii=not text_escapes)}")
+        ev.append(f"event: {t}\ndata: {json.dumps(obj, separators=(',', ':'), ensure_ascii=ensure_ascii)}")
 
     add("response.created", response=base)
     add("response.in_progress", response=base)
@@ -436,11 +447,7 @@ def _snap_encode_with(text, ascii_mode):
 def _snap_core(text: str) -> str:
     if "\r" in text or "§" in text:
         return text
-    for ascii_mode in (False, True):
-        out = _snap_encode_with(text, ascii_mode)
-        if len(out) < len(text) and snap_restore(out) == text:
-            return out
-    return text
+    return min((_snap_encode_with(text, a) for a in (False, True)), key=len)
 
 
 def snap_restore(text: str) -> str:
@@ -480,7 +487,9 @@ def snap_restore(text: str) -> str:
 
 snap_backref = _guard(_snap_core, snap_restore, _SNAP_HDR_U, _SNAP_HDR_A, _SNAP_RAW)
 
-_RESP_UNI = _resp_stream(["Der ", "Regen ", "fällt ", "in ", "Köln ", "– ", "bring ", "einen ", "Schirm ", "mit ", "und ", "ein ", "paar ", "dünne ", "Handschuhe ", "für ", "den ", "Abend ", "…"], text_escapes=True)
+_UNI_WORDS = ["Der ", "Regen ", "fällt ", "in ", "Köln ", "– ", "bring ", "einen ", "Schirm ", "mit ", "und ", "ein ", "paar ", "dünne ", "Handschuhe ", "für ", "den ", "Abend ", "…"]
+_RESP_UNI = _resp_stream(_UNI_WORDS)  # json.dumps default: non-ASCII arrives as \uXXXX escapes
+_RESP_UTF8 = _resp_stream(_UNI_WORDS, ensure_ascii=False)  # raw UTF-8
 _RESP_SHORT = _resp_stream(["OK", "."])
 
 case(
@@ -492,6 +501,7 @@ case(
         Fixture("Responses stream, 35-word answer, one function tool", _RESP, True),
         Fixture("two-word answer: the snapshots still dominate", _RESP_SHORT, True),
         Fixture("non-ASCII answer with \\u escapes in the text", _RESP_UNI, True),
+        Fixture("non-ASCII answer as raw UTF-8", _RESP_UTF8, True),
         Fixture("Anthropic stream has no such events", _ANTHROPIC, False),
         Fixture("Responses stream cut before any done event", _RESP[: _RESP.index("event: response.output_text.done")], True),
         Fixture("input that already contains the marker sigil", _RESP.replace("Paris", "Paris §Δ"), False),
@@ -840,7 +850,7 @@ def _agent_requests(turns: int, ts0: int = 0, sys_prompt=None) -> str:
             {"role": "user", "content": "tests/test_core.py::test_prune fails with a KeyError, please fix it."}]
     lines = []
     for t in range(turns):
-        lines.append(_compact({"ts": f"2025-08-27T10:{t:02d}:{(7 * t) % 60:02d}Z", "model": "gpt-4.1-2025-04-14", "temperature": 0, "tools": tools, "messages": msgs}))
+        lines.append(_compact({"ts": f"2025-08-27T10:{t:02d}:{(7 * t) % 60:02d}Z", "model": "gpt-4.1-2025-04-14", "temperature": 0, "metadata": {"session": "sess_8f3a2c19e7b44d0a", "step": f"{t:02d}"}, "tools": tools, "messages": msgs}))
         cid = "call_" + _h(f"c{t}", 24)
         if t % 2 == 0:
             call = {"id": cid, "type": "function", "function": {"name": "read_file", "arguments": _compact({"path": f"ctxprune/module{t}.py", "offset": 1})}}
@@ -1384,28 +1394,20 @@ _ZERO_BLOOM = re.compile(r"0x0{64,}")
 _ZERO_TOKEN = re.compile(r"0x\[zeros:(\d+)\]")
 
 
-def _eth_walk(node, fn):
-    if isinstance(node, dict):
-        fn(node)
-        for v in node.values():
-            _eth_walk(v, fn)
-    elif isinstance(node, list):
-        for v in node:
-            _eth_walk(v, fn)
-
-
 def _eth_core(text: str) -> str:
     lay = _json_layout(text)
     if lay is None:
         return text
     obj, kw, tail = lay
     n = [0]
+    clash = []
 
     def fn(d):
         logs = d.get("logs")
         if isinstance(logs, list):
             for log in logs:
                 if isinstance(log, dict):
+                    clash.extend(k for k in _ETH_KEYS if log.get(k) == "=" and isinstance(d.get(k), str))
                     for k in _ETH_KEYS:
                         if isinstance(d.get(k), str) and d[k] != "=" and log.get(k) == d[k]:
                             log[k] = "="
@@ -1415,7 +1417,9 @@ def _eth_core(text: str) -> str:
             d["logsBloom"] = "0x[zeros:%d]" % (len(b) - 2)
             n[0] += 1
 
-    _eth_walk(obj, fn)
+    _walk_dicts(obj, fn)
+    if clash or '"0x[zeros:' in text:  # the input already uses a marker: decode would expand it
+        return text
     return _ETH_HDR + json.dumps(obj, **kw) + tail if n[0] else text
 
 
@@ -1441,7 +1445,7 @@ def eth_restore(text: str) -> str:
         if isinstance(b, str) and _ZERO_TOKEN.fullmatch(b):
             d["logsBloom"] = "0x" + "0" * int(_ZERO_TOKEN.fullmatch(b).group(1))
 
-    _eth_walk(obj, fn)
+    _walk_dicts(obj, fn)
     return json.dumps(obj, **kw) + tail
 
 
@@ -1477,7 +1481,8 @@ case(
         Fixture("three receipts, indent 2, as eth_getBlockReceipts-style output", _ETH_BATCH, True),
         Fixture("eth_getLogs result: no receipt to inherit from", _ETH_GETLOGS, False),
         Fixture("not JSON", "status 1 (success)\nblock 19400001\n", False),
-        Fixture("a log that really holds the string = where the receipt has a hash", re.sub(r'"blockHash":"0x[0-9a-f]{64}"', '"blockHash":"="', _ETH_SWAP, count=2)[::1], None),
+        Fixture("a log that really holds the string = where the receipt has a hash", re.sub(r'(?<=\},)"blockHash":"0x[0-9a-f]{64}"', '"blockHash":"="', _ETH_SWAP, count=1), None),
+        Fixture("a logsBloom that really holds the zeros token", _ETH_TRANSFER.replace("0x" + "0" * 512, "0x[zeros:512]"), None),
         Fixture("input that starts like the header", _ETH_HDR + "{}", None),
         Fixture("input that starts like the raw escape", _ETH_RAW + "{}", None),
     ],
@@ -1491,16 +1496,6 @@ case(
 
 _LP_HDR = '§logprobs: "bytes":"utf8" = the UTF-8 bytes of the token string\n'
 _LP_RAW = "§raw\n"
-
-
-def _lp_walk(node, fn):
-    if isinstance(node, dict):
-        fn(node)
-        for v in node.values():
-            _lp_walk(v, fn)
-    elif isinstance(node, list):
-        for v in node:
-            _lp_walk(v, fn)
 
 
 def _lp_core(text: str) -> str:
@@ -1521,7 +1516,11 @@ def _lp_core(text: str) -> str:
                 d["bytes"] = "utf8"
                 n[0] += 1
 
-    _lp_walk(obj, fn)
+    seen = []
+    _walk_dicts(obj, lambda d: seen.append(1) if d.get("bytes") == "utf8" else None)
+    if seen:  # the input already uses the marker: decode would expand it
+        return text
+    _walk_dicts(obj, fn)
     return _LP_HDR + json.dumps(obj, **kw) + tail if n[0] else text
 
 
@@ -1539,7 +1538,7 @@ def lp_restore(text: str) -> str:
         if d.get("bytes") == "utf8" and isinstance(d.get("token"), str):
             d["bytes"] = list(d["token"].encode("utf-8"))
 
-    _lp_walk(obj, fn)
+    _walk_dicts(obj, fn)
     return json.dumps(obj, **kw) + tail
 
 
@@ -1652,10 +1651,14 @@ def _pm_core(text: str) -> str:
         return text
     obj, kw, tail = lay
     n = [0]
+    seen = []
+    _walk_dicts(obj, lambda d: seen.append(1) if "split" in d else None)
+    if seen:  # the input already has a split member: decode would try to expand it
+        return text
 
     def fn(d):
         raw = d.get("raw")
-        if isinstance(raw, str) and "host" in d and "split" not in d:
+        if isinstance(raw, str) and "host" in d:
             parts = _pm_split(raw)
             keys = list(d)
             if parts and keys[: 1 + len(parts)] == ["raw"] + [k for k in _PM_ORDER if k in parts] and all(d[k] == parts[k] for k in parts):
@@ -1666,7 +1669,7 @@ def _pm_core(text: str) -> str:
                 d.update(rest)
                 n[0] += 1
 
-    _lp_walk(obj, fn)  # generic dict walker
+    _walk_dicts(obj, fn)  # generic dict walker
     return _PM_HDR + json.dumps(obj, **kw) + tail if n[0] else text
 
 

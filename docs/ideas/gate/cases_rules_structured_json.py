@@ -4428,3 +4428,471 @@ case(
     ],
     min_gain=0.5,
 )
+
+
+# ===============================================================================================================
+# #1067 Strip SSR markers and stub hydration payloads in fetched HTML.
+# <script id="__NEXT_DATA__"> keeps only its size and key lists, the run of self.__next_f.push flight scripts becomes one stub script,
+# window.__APOLLO_STATE__ keeps its size and first keys, and hydration markers go from the markup: React '<!-- -->' and Suspense
+# comments, Angular _ngcontent-*/_nghost-*/ng-reflect-* attributes, Vue data-v-<hash> attributes. Scripts and styles are never
+# touched except for the three stubs, so JSON-LD and application code stay verbatim.
+
+_SS_SPLIT = re.compile(r"(<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>)", re.S | re.I)
+_NEXT_SCRIPT = re.compile(r'(<script\b[^>]*\bid="__NEXT_DATA__"[^>]*>)(.*)(</script>)\Z', re.S)
+_FLIGHT_SCRIPT = re.compile(r"<script>(self\.__next_f\.push\(.*\))</script>\Z", re.S)
+_APOLLO_SCRIPT = re.compile(r"(<script\b[^>]*>)(\s*window\.__APOLLO_STATE__\s*=\s*)(\{.*\})(\s*;?\s*)(</script>)\Z", re.S)
+_TAG = re.compile(r"<[A-Za-z][^<>]*>")
+_MARK_ATTR = re.compile(r"\s(?:_ngcontent-[\w-]+|_nghost-[\w-]+|ng-reflect-[\w-]+|data-v-[0-9a-f]{6,10})(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s\"'>]*))?(?=[\s/>])")
+_REACT_MARK = re.compile(r"<!-- -->|<!--\$[?!]?-->|<!--/\$-->")
+_STUB_NEXT = re.compile(r"<<stub __NEXT_DATA__ chars=(\d+) keys=(.*?) pageProps=(.*?)>>\Z", re.S)
+_STUB_FLIGHT = re.compile(r"<<stub __next_f chunks=(\d+) chars=(\d+)>>\Z")
+_STUB_APOLLO = re.compile(r"window\.__APOLLO_STATE__ = <<stub __APOLLO_STATE__ chars=(\d+) n=(\d+) keys=(.*?)>>;?\Z", re.S)
+
+
+def _clean_markup(part: str) -> str:
+    part = _REACT_MARK.sub("", part)
+    return _TAG.sub(lambda m: _MARK_ATTR.sub("", m.group(0)), part)
+
+
+def _keys_ok(keys) -> bool:
+    return all(isinstance(k, str) and "<" not in k and ">" not in k for k in keys)
+
+
+def _well_nested(text: str) -> bool:
+    """Comments, scripts and styles must open and close in turn; otherwise a real HTML parser reads the page differently from a regex."""
+    for pat, op in ((r"<!--|-->", "<!--"), (r"<script\b|</script>", None), (r"<style\b|</style>", None)):
+        depth = 0
+        for m in re.finditer(pat, text, re.I):
+            opening = m.group(0) == "<!--" if op else not m.group(0).startswith("</")
+            depth += 1 if opening else -1
+            if depth not in (0, 1):
+                return False
+        if depth:
+            return False
+    return True
+
+
+@total
+def strip_ssr_payloads(text: str) -> str:
+    if "<<stub " in text or not _well_nested(text):
+        return text
+    parts = _SS_SPLIT.split(text)
+    flight_n = flight_chars = 0
+    first_flight = None
+    for i in range(0, len(parts)):
+        p = parts[i]
+        if i % 2 == 0:
+            parts[i] = _clean_markup(p)
+            continue
+        if m := _FLIGHT_SCRIPT.match(p):
+            flight_n += 1
+            flight_chars += len(m.group(1))
+            if first_flight is None:
+                first_flight = i
+            parts[i] = ""
+        elif m := _NEXT_SCRIPT.match(p):
+            data = jload(m.group(2))
+            if isinstance(data, dict) and _keys_ok(data):
+                pp = (data.get("props") or {}).get("pageProps") if isinstance(data.get("props"), dict) else None
+                if pp is None or (isinstance(pp, dict) and _keys_ok(pp)):
+                    parts[i] = f"{m.group(1)}<<stub __NEXT_DATA__ chars={len(m.group(2))} keys={jc(list(data))} pageProps={jc(list(pp)) if isinstance(pp, dict) else '-'}>>{m.group(3)}"
+        elif m := _APOLLO_SCRIPT.match(p):
+            state = jload(m.group(3))
+            if isinstance(state, dict) and _keys_ok(list(state)[:10]):
+                parts[i] = f"{m.group(1)}window.__APOLLO_STATE__ = <<stub __APOLLO_STATE__ chars={len(m.group(3))} n={len(state)} keys={jc(list(state)[:10])}>>;{m.group(5)}"
+    if first_flight is not None:
+        parts[first_flight] = f"<script><<stub __next_f chunks={flight_n} chars={flight_chars}>></script>"
+    return gate(text, "".join(parts))
+
+
+def _is_marker_attr(k: str) -> bool:
+    return bool(re.match(r"(_ngcontent-|_nghost-|ng-reflect-)", k) or re.fullmatch(r"data-v-[0-9a-f]{6,10}", k))
+
+
+class _Page(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.text, self.tags, self.scripts, self.flight = [], [], [], [0, 0]
+        self.next_data, self.apollo = [], []
+        self._in, self._buf, self._attrs = None, [], None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._in, self._buf, self._attrs = tag, [], dict(attrs)
+        else:
+            self.tags.append((tag, tuple(sorted((k, v) for k, v in attrs if not _is_marker_attr(k)))))
+
+    def handle_endtag(self, tag):
+        if tag != self._in:
+            return
+        body, attrs = "".join(self._buf), self._attrs
+        self._in = None
+        if tag == "script" and not attrs and body.startswith("self.__next_f.push(") and body.endswith(")"):
+            self.flight[0] += 1
+            self.flight[1] += len(body)
+            return
+        if tag == "script" and (m := _STUB_FLIGHT.match(body)):
+            self.flight[0] += int(m.group(1))
+            self.flight[1] += int(m.group(2))
+            return
+        self.tags.append((tag, tuple(sorted((k, v) for k, v in attrs.items() if not _is_marker_attr(k)))))
+        if tag == "script" and attrs.get("id") == "__NEXT_DATA__":
+            if m := _STUB_NEXT.match(body):
+                self.next_data.append((int(m.group(1)), json.loads(m.group(2)), json.loads(m.group(3)) if m.group(3) != "-" else None))
+                return
+            d = jload(body)
+            if isinstance(d, dict):
+                pp = (d.get("props") or {}).get("pageProps") if isinstance(d.get("props"), dict) else None
+                self.next_data.append((len(body), list(d), list(pp) if isinstance(pp, dict) else None))
+                return
+        if tag == "script" and (m := _STUB_APOLLO.match(body.strip())):
+            self.apollo.append((int(m.group(1)), int(m.group(2)), json.loads(m.group(3))))
+            return
+        if tag == "script" and (m := re.match(r"\s*window\.__APOLLO_STATE__\s*=\s*(\{.*\})\s*;?\s*\Z", body, re.S)):
+            st = jload(m.group(1))
+            if isinstance(st, dict):
+                self.apollo.append((len(m.group(1)), len(st), list(st)[:10]))
+                return
+        self.scripts.append((tag, body))
+
+    def handle_data(self, data):
+        if self._in:
+            self._buf.append(data)
+        else:
+            self.text.append(data)
+
+
+def probes_1067(text: str) -> dict:
+    p = _Page()
+    p.feed(text)
+    p.close()
+    return {"visible text": " ".join("".join(p.text).split()), "tags and attributes (hydration markers aside)": p.tags, "other scripts and styles, verbatim": p.scripts,
+            "__NEXT_DATA__ (chars, top keys, pageProps keys)": p.next_data, "flight pushes (count, chars)": tuple(p.flight), "apollo state (chars, entries, first keys)": p.apollo}
+
+
+def _flight_chunk(i: int) -> str:
+    inner = json.dumps(f'{i:x}:["$","div",null,{{"className":"card","children":[["$","h2",null,{{"children":"Item {i}"}}],["$","p",null,{{"children":"{"lorem ipsum dolor sit amet " * 8}"}}]]}}]\n')
+    return f"<script>self.__next_f.push([1,{inner}])</script>"
+
+
+def _next_page_html(app_router: bool = True, apollo: bool = True) -> str:
+    items = "".join(f'<li class="item"><a href="/post/{i}">Post <!-- -->{i}<!-- --> by <!-- -->author{i % 5}</a></li>' for i in range(14))
+    svg = '<svg viewBox="0 0 24 24" width="24" height="24"><path d="' + "M12 2L2 7l10 5 10-5-10-5z M2 17l10 5 10-5 M2 12l10 5 10-5 " * 12 + '"/></svg>'
+    body = (f'<header><nav><a href="/">Home</a>{svg}</nav></header><main><h1>Weekly digest</h1><p>Hello, <!-- -->reader<!-- -->! You have <!-- -->3<!-- --> new posts.</p><!--$--><ul>{items}</ul><!--/$-->'
+            f'<script type="application/ld+json">{{"@context":"https://schema.org","@type":"Article","headline":"Weekly digest"}}</script><footer>Copyright <!-- -->2025<!-- --> Acme</footer></main>')
+    pageprops = {"posts": [{"id": i, "title": f"Post {i}", "body": "lorem ipsum " * 40} for i in range(30)], "user": {"id": 7, "name": "reader"}, "locale": "en"}
+    scripts = ""
+    if app_router:
+        scripts += "".join(_flight_chunk(i) for i in range(60))
+    else:
+        scripts += '<script id="__NEXT_DATA__" type="application/json">' + jc({"props": {"pageProps": pageprops, "__N_SSP": True}, "page": "/digest", "query": {}, "buildId": "Zk3_hQ", "isFallback": False, "gssp": True}) + "</script>"
+    if apollo:
+        scripts += "<script>window.__APOLLO_STATE__ = " + jc({"ROOT_QUERY": {"posts": [{"__ref": f"Post:{i}"} for i in range(30)]}, **{f"Post:{i}": {"__typename": "Post", "id": i, "title": f"Post {i}", "body": "lorem " * 30} for i in range(30)}}) + ";</script>"
+    return ('<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><title>Weekly digest</title><link rel="stylesheet" href="/_next/static/css/app.css" data-precedence="next"/>'
+            '<script src="/_next/static/chunks/webpack.js" async=""></script></head><body class="font-sans">' + body + scripts + "</body></html>")
+
+
+def _angular_html() -> str:
+    rows = "".join(f'<tr _ngcontent-ng-c3012345678="" ng-reflect-router-link="/orders/{i}" class="row"><td _ngcontent-ng-c3012345678="">Order #{i}</td><td _ngcontent-ng-c3012345678="" ng-reflect-ng-class="[object Object]">€ {i * 12}.50</td></tr>' for i in range(24))
+    return ('<!DOCTYPE html><html lang="en" ng-version="17.3.0"><head><title>Orders</title><style>.row{color:red}</style></head><body><app-root _nghost-ng-c1111111111="" ng-version="17.3.0" ng-server-context="ssr">'
+            f'<h1 _ngcontent-ng-c1111111111="">Orders</h1><table _ngcontent-ng-c3012345678="" ng-reflect-data-source="[object Object]">{rows}</table></app-root><script src="main.js" type="module"></script></body></html>')
+
+
+def _vue_html() -> str:
+    cards = "".join(f'<div data-v-7ba5bd90="" class="card" data-v-1f2e3d4c><h2 data-v-7ba5bd90="">Card {i}</h2><p data-v-7ba5bd90="">Body text of card {i}.</p></div>' for i in range(20))
+    return f'<!DOCTYPE html><html><head><title>Cards</title></head><body><div id="__nuxt"><main data-v-7ba5bd90="">{cards}</main></div><script>window.__NUXT__={{"state":{{}}}}</script></body></html>'
+
+
+_PLAIN_HTML = '<!DOCTYPE html><html><head><title>About</title></head><body><h1>About us</h1><p>We make widgets. <!-- note to self: update copy --> Call us.</p><script>var a = "<!-- -->";</script></body></html>'
+
+case(
+    1067,
+    claim="In fetched SSR HTML, __NEXT_DATA__ keeps only its size, top-level and pageProps key lists, the run of self.__next_f.push scripts becomes one stub with count and size, __APOLLO_STATE__ keeps size, entry count and first 10 keys, and React '<!-- -->' and Suspense comments, Angular _ngcontent/_nghost/ng-reflect attributes and Vue data-v attributes are removed from markup; the visible-text DOM dump, every tag with its other attributes, every other script and style verbatim (JSON-LD, application code) and the payload sizes and key lists are unchanged.",
+    loses="the values of the stubbed payloads (props, flight data, Apollo cache entries beyond the first 10 keys), the individual flight chunks, markers that carry no visible text, and Nuxt/SvelteKit payloads (window.__NUXT__ and svelte-kit data scripts stay as they are); inline SVG is not touched (that is #331)",
+    encode=strip_ssr_payloads,
+    probes=safe_probes(probes_1067),
+    fixtures=lambda: [
+        Fixture("Next.js app-router page: 60 flight chunks, Apollo state, React markers, JSON-LD, inline SVG", _next_page_html(True, True), True),
+        Fixture("Next.js pages-router page: __NEXT_DATA__ with 30 posts", _next_page_html(False, False), True),
+        Fixture("Angular SSR table: _ngcontent and ng-reflect attributes", _angular_html(), True),
+        Fixture("Vue/Nuxt page: data-v attributes, window.__NUXT__ stays", _vue_html(), True),
+        Fixture("plain page with a comment and a script mentioning '<!-- -->'", _PLAIN_HTML, False),
+        Fixture("page that already holds a stub", _next_page_html(False, False).replace("<footer>", "<p><<stub x>></p><footer>"), None),
+    ],
+    min_gain=0.15,
+)
+
+
+# ===============================================================================================================
+# #1154 Xcode pbxproj and .sln: alias opaque IDs, collapse configuration matrices.
+# pbxproj: every 24-hex object id becomes '§N' in order of first appearance (no legend: edits must use the saved original), comments
+# and structure stay. .sln: a project whose ProjectConfigurationPlatforms rows are exactly the identity matrix (every solution
+# configuration maps to itself for ActiveCfg and Build.0) collapses to '{GUID} = identity'; anything else stays verbatim.
+# The probes read pbxproj with a small property-list parser (so the object graph, not the ids, is compared) and .sln line by line.
+
+PBX_ID = re.compile(r"\b[0-9A-F]{24}\b")
+SLN_ID_LINE = re.compile(r"\t\t(\{[0-9A-Fa-f-]{36}\})\.(.+?)\.(ActiveCfg|Build\.0) = (.+)$")
+SLN_COLLAPSED = re.compile(r"\t\t(\{[0-9A-Fa-f-]{36}\}) = identity$")
+SLN_LEGEND = "\t\t# identity: ActiveCfg and Build.0 map every solution configuration to itself"
+
+
+@total
+def alias_project_ids(text: str) -> str:
+    body = text[1:] if text.startswith("﻿") else text
+    if body.startswith("// !$*UTF8*$!") and "objects = {" in body:
+        if "§" in text:
+            return text
+        ids: dict[str, str] = {}
+        return gate(text, PBX_ID.sub(lambda m: ids.setdefault(m.group(0), f"§{len(ids) + 1}"), text))
+    if body.startswith("Microsoft Visual Studio Solution File"):
+        return gate(text, _collapse_sln(text))
+    return text
+
+
+def _collapse_sln(text: str) -> str:
+    if "= identity" in text or "# identity:" in text:
+        return text
+    nl = "\r\n" if "\r\n" in text else "\n"
+    if nl == "\r\n" and text.replace("\r\n", "").count("\r"):
+        return text
+    lines = text.split(nl)
+    cfgs, in_cfg, in_proj = [], False, False
+    for ln in lines:
+        if ln.strip().startswith("GlobalSection(SolutionConfigurationPlatforms)"):
+            in_cfg = True
+        elif in_cfg and ln.strip() == "EndGlobalSection":
+            in_cfg = False
+        elif in_cfg and (m := re.match(r"\t\t(.+?) = (.+)$", ln)) and m.group(1) == m.group(2):
+            cfgs.append(m.group(1))
+        elif in_cfg:
+            return text  # a solution configuration that is not name = name: not a plain matrix
+    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("GlobalSection(ProjectConfigurationPlatforms)")), None)
+    if start is None or not cfgs:
+        return text
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() == "EndGlobalSection"), None)
+    if end is None:
+        return text
+    rows: dict[str, list[str]] = {}
+    order = []
+    for ln in lines[start + 1:end]:
+        m = SLN_ID_LINE.match(ln)
+        if not m:
+            return text
+        if m.group(1) not in rows:
+            rows[m.group(1)] = []
+            order.append(m.group(1))
+        rows[m.group(1)].append(ln)
+    out_rows, collapsed = [], 0
+    for g in order:
+        want = {f"\t\t{g}.{c}.{k} = {c}" for c in cfgs for k in ("ActiveCfg", "Build.0")}
+        if set(rows[g]) == want and len(rows[g]) == len(want):
+            out_rows.append(f"\t\t{g} = identity")
+            collapsed += 1
+        else:
+            out_rows += rows[g]
+    if not collapsed:
+        return text
+    return nl.join(lines[:start + 1] + [SLN_LEGEND] + out_rows + lines[end:])
+
+
+_PBX_TOK = re.compile(r'\s+|/\*.*?\*/|//[^\n]*|("(?:[^"\\]|\\.)*")|([{}();=,])|([^\s{}();=,"]+)', re.S)
+
+
+def _plist(text: str):
+    toks = [(m.group(1) or m.group(2) or m.group(3)) for m in _PBX_TOK.finditer(text) if m.group(1) or m.group(2) or m.group(3)]
+    pos = 0
+
+    def val():
+        nonlocal pos
+        t = toks[pos]
+        pos += 1
+        if t == "{":
+            d = {}
+            while toks[pos] != "}":
+                k = toks[pos]
+                assert toks[pos + 1] == "="
+                pos += 2
+                d[k.strip('"')] = val()
+                assert toks[pos] == ";"
+                pos += 1
+            pos += 1
+            return d
+        if t == "(":
+            a = []
+            while toks[pos] != ")":
+                a.append(val())
+                if toks[pos] == ",":
+                    pos += 1
+            pos += 1
+            return a
+        return t.strip('"') if t.startswith('"') else t
+
+    root = val()
+    if pos != len(toks):
+        raise ValueError("trailing tokens")
+    return root
+
+
+def _pbx_facts(text: str) -> dict:
+    root = _plist(text)
+    objs = root["objects"]
+    name_of = lambda r: (objs[r].get("name") or objs[r].get("path")) if r in objs and isinstance(objs[r], dict) else None  # noqa: E731
+    targets, by_file = {}, defaultdict(list)
+    for oid, o in objs.items():
+        if o.get("isa") != "PBXNativeTarget":
+            continue
+        phases = {}
+        for ph in o.get("buildPhases", []):
+            p = objs[ph]
+            files = sorted(name_of(objs[bf]["fileRef"]) or "?" for bf in p.get("files", []) if "fileRef" in objs[bf])
+            phases[p["isa"]] = files
+        cfgs = {}
+        for c in objs[o["buildConfigurationList"]]["buildConfigurations"]:
+            bs = objs[c]["buildSettings"]
+            cfgs[objs[c]["name"]] = {k: bs.get(k) for k in ("PRODUCT_BUNDLE_IDENTIFIER", "SWIFT_VERSION", "IPHONEOS_DEPLOYMENT_TARGET") if k in bs}
+        targets[o["name"]] = {"type": o.get("productType"), "sources": phases.get("PBXSourcesBuildPhase", []), "frameworks": phases.get("PBXFrameworksBuildPhase", []),
+                              "resources": phases.get("PBXResourcesBuildPhase", []), "configurations": cfgs}
+        for f in phases.get("PBXSourcesBuildPhase", []):
+            by_file[f].append(o["name"])
+    groups = sorted((name_of(i) or "<root>", sorted(str(name_of(c)) for c in o.get("children", []))) for i, o in objs.items() if o.get("isa") == "PBXGroup")
+    return {"targets (type, sources, frameworks, resources, settings)": targets, "which target builds each source file": {k: sorted(v) for k, v in sorted(by_file.items())}, "groups and their children": groups,
+            "object count": len(objs), "object versions": (root.get("objectVersion"), root.get("archiveVersion"))}
+
+
+def _sln_facts(text: str) -> dict:
+    lines = text.replace("\r\n", "\n").split("\n")
+    projects, cfgs, per, other, section = [], [], defaultdict(dict), [], None
+    for ln in lines:
+        if m := re.match(r'Project\("(\{[^}]+\})"\) = "(.*?)", "(.*?)", "(\{[^}]+\})"$', ln):
+            projects.append(m.groups())
+        elif m := re.match(r"\s*GlobalSection\((\w+)\)", ln):
+            section = m.group(1)
+            other.append(ln)
+        elif ln.strip() == "EndGlobalSection":
+            section = None
+            other.append(ln)
+        elif section == "SolutionConfigurationPlatforms" and (m := re.match(r"\t\t(.+?) = (.+)$", ln)):
+            cfgs.append(m.groups())
+            other.append(ln)
+        elif section == "ProjectConfigurationPlatforms":
+            if m := SLN_ID_LINE.match(ln):
+                per[m.group(1)].setdefault(m.group(2), {})[m.group(3)] = m.group(4)
+            elif m := SLN_COLLAPSED.match(ln):
+                per[m.group(1)]["*identity*"] = {}
+            elif ln != SLN_LEGEND:
+                other.append(ln)
+        else:
+            other.append(ln)
+    expanded = {}
+    for g, byc in per.items():
+        if "*identity*" in byc:
+            byc = {c: {"ActiveCfg": c, "Build.0": c} for c, _v in cfgs}
+        expanded[g] = {c: dict(v) for c, v in sorted(byc.items())}
+    return {"projects (type, name, path, guid)": projects, "solution configurations": cfgs, "per-project configuration mapping": expanded, "every other line": [x for x in other if x != SLN_LEGEND]}
+
+
+def probes_1154(text: str) -> dict:
+    body = text[1:] if text.startswith("﻿") else text
+    if body.startswith("// !$*UTF8*$!") and "objects = {" in body:
+        try:
+            return {"pbxproj": _pbx_facts(text)}
+        except (AssertionError, IndexError, KeyError, ValueError, TypeError, AttributeError):
+            return {"pbxproj": "unparsable"}
+    if body.startswith("Microsoft Visual Studio Solution File"):
+        return {"sln": _sln_facts(text)}
+    return {"document": None}
+
+
+def _oid(label: str) -> str:
+    return hashlib.sha1(label.encode()).hexdigest().upper()[:24]
+
+
+def _pbxproj(n_files: int = 40) -> str:
+    files = [f"Feature{i:02d}View.swift" if i % 3 else f"Feature{i:02d}Model.swift" for i in range(n_files)]
+    tests = [f"Feature{i:02d}Tests.swift" for i in range(0, n_files, 5)]
+    bf = lambda f, phase: _oid(f"bf:{phase}:{f}")  # noqa: E731
+    fr = lambda f: _oid(f"fr:{f}")  # noqa: E731
+    L = []
+    L.append("// !$*UTF8*$!\n{\n\tarchiveVersion = 1;\n\tclasses = {\n\t};\n\tobjectVersion = 56;\n\tobjects = {\n\n/* Begin PBXBuildFile section */")
+    for f in files:
+        L.append(f"\t\t{bf(f, 'src')} /* {f} in Sources */ = {{isa = PBXBuildFile; fileRef = {fr(f)} /* {f} */; }};")
+    for f in tests:
+        L.append(f"\t\t{bf(f, 'tsrc')} /* {f} in Sources */ = {{isa = PBXBuildFile; fileRef = {fr(f)} /* {f} */; }};")
+    L.append(f"\t\t{bf('UIKit', 'fw')} /* UIKit.framework in Frameworks */ = {{isa = PBXBuildFile; fileRef = {fr('UIKit')} /* UIKit.framework */; }};")
+    L.append("/* End PBXBuildFile section */\n\n/* Begin PBXFileReference section */")
+    for f in files + tests:
+        L.append(f"\t\t{fr(f)} /* {f} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = {f}; sourceTree = \"<group>\"; }};")
+    L.append(f"\t\t{fr('UIKit')} /* UIKit.framework */ = {{isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; }};")
+    L.append(f"\t\t{fr('App.app')} /* App.app */ = {{isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; }};")
+    L.append(f"\t\t{fr('AppTests.xctest')} /* AppTests.xctest */ = {{isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; }};")
+    L.append("/* End PBXFileReference section */\n\n/* Begin PBXFrameworksBuildPhase section */")
+    L.append(f"\t\t{_oid('ph:fw')} /* Frameworks */ = {{\n\t\t\tisa = PBXFrameworksBuildPhase;\n\t\t\tbuildActionMask = 2147483647;\n\t\t\tfiles = (\n\t\t\t\t{bf('UIKit', 'fw')} /* UIKit.framework in Frameworks */,\n\t\t\t);\n\t\t\trunOnlyForDeploymentPostprocessing = 0;\n\t\t}};")
+    L.append("/* End PBXFrameworksBuildPhase section */\n\n/* Begin PBXGroup section */")
+    L.append(f"\t\t{_oid('g:main')} = {{\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n\t\t\t\t{_oid('g:app')} /* App */,\n\t\t\t\t{_oid('g:tests')} /* AppTests */,\n\t\t\t\t{_oid('g:products')} /* Products */,\n\t\t\t);\n\t\t\tsourceTree = \"<group>\";\n\t\t}};")
+    L.append(f"\t\t{_oid('g:app')} /* App */ = {{\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n" + "".join(f"\t\t\t\t{fr(f)} /* {f} */,\n" for f in files) + "\t\t\t);\n\t\t\tpath = App;\n\t\t\tsourceTree = \"<group>\";\n\t\t};")
+    L.append(f"\t\t{_oid('g:tests')} /* AppTests */ = {{\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n" + "".join(f"\t\t\t\t{fr(f)} /* {f} */,\n" for f in tests) + "\t\t\t);\n\t\t\tpath = AppTests;\n\t\t\tsourceTree = \"<group>\";\n\t\t};")
+    L.append(f"\t\t{_oid('g:products')} /* Products */ = {{\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n\t\t\t\t{fr('App.app')} /* App.app */,\n\t\t\t\t{fr('AppTests.xctest')} /* AppTests.xctest */,\n\t\t\t);\n\t\t\tname = Products;\n\t\t\tsourceTree = \"<group>\";\n\t\t}};")
+    L.append("/* End PBXGroup section */\n\n/* Begin PBXNativeTarget section */")
+    for tname, ptype, pref, phases in (("App", "com.apple.product-type.application", "App.app", ["ph:src", "ph:fw"]), ("AppTests", "com.apple.product-type.bundle.unit-test", "AppTests.xctest", ["ph:tsrc"])):
+        L.append(f"\t\t{_oid('t:' + tname)} /* {tname} */ = {{\n\t\t\tisa = PBXNativeTarget;\n\t\t\tbuildConfigurationList = {_oid('cl:' + tname)} /* Build configuration list for PBXNativeTarget \"{tname}\" */;\n\t\t\tbuildPhases = (\n"
+                 + "".join(f"\t\t\t\t{_oid(p)} /* {'Sources' if 'src' in p else 'Frameworks'} */,\n" for p in phases) + f"\t\t\t);\n\t\t\tbuildRules = (\n\t\t\t);\n\t\t\tdependencies = (\n\t\t\t);\n\t\t\tname = {tname};\n\t\t\tproductName = {tname};\n"
+                 f"\t\t\tproductReference = {fr(pref)} /* {pref} */;\n\t\t\tproductType = \"{ptype}\";\n\t\t}};")
+    L.append("/* End PBXNativeTarget section */\n\n/* Begin PBXProject section */")
+    L.append(f"\t\t{_oid('proj')} /* Project object */ = {{\n\t\t\tisa = PBXProject;\n\t\t\tattributes = {{\n\t\t\t\tLastSwiftUpdateCheck = 1500;\n\t\t\t}};\n\t\t\tbuildConfigurationList = {_oid('cl:proj')} /* Build configuration list for PBXProject \"App\" */;\n"
+             f"\t\t\tcompatibilityVersion = \"Xcode 14.0\";\n\t\t\tdevelopmentRegion = en;\n\t\t\thasScannedForEncodings = 0;\n\t\t\tknownRegions = (\n\t\t\t\ten,\n\t\t\t\tBase,\n\t\t\t);\n\t\t\tmainGroup = {_oid('g:main')};\n"
+             f"\t\t\tproductRefGroup = {_oid('g:products')} /* Products */;\n\t\t\tprojectDirPath = \"\";\n\t\t\tprojectRoot = \"\";\n\t\t\ttargets = (\n\t\t\t\t{_oid('t:App')} /* App */,\n\t\t\t\t{_oid('t:AppTests')} /* AppTests */,\n\t\t\t);\n\t\t}};")
+    L.append("/* End PBXProject section */\n\n/* Begin PBXSourcesBuildPhase section */")
+    for ph, fs in (("ph:src", files), ("ph:tsrc", tests)):
+        L.append(f"\t\t{_oid(ph)} /* Sources */ = {{\n\t\t\tisa = PBXSourcesBuildPhase;\n\t\t\tbuildActionMask = 2147483647;\n\t\t\tfiles = (\n" + "".join(f"\t\t\t\t{bf(f, 'src' if ph == 'ph:src' else 'tsrc')} /* {f} in Sources */,\n" for f in fs)
+                 + "\t\t\t);\n\t\t\trunOnlyForDeploymentPostprocessing = 0;\n\t\t};")
+    L.append("/* End PBXSourcesBuildPhase section */\n\n/* Begin XCBuildConfiguration section */")
+    common = "\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n\t\t\t\tCLANG_ANALYZER_NONNULL = YES;\n\t\t\t\tCLANG_ENABLE_MODULES = YES;\n\t\t\t\tCLANG_ENABLE_OBJC_ARC = YES;\n\t\t\t\tGCC_C_LANGUAGE_STANDARD = gnu17;\n\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 16.0;\n\t\t\t\tSWIFT_VERSION = 5.0;\n"
+    for tname, bid in (("proj", None), ("App", "com.acme.app"), ("AppTests", "com.acme.app.tests")):
+        for cfg in ("Debug", "Release"):
+            extra = f"\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = {bid};\n\t\t\t\tLD_RUNPATH_SEARCH_PATHS = (\n\t\t\t\t\t\"$(inherited)\",\n\t\t\t\t\t\"@executable_path/Frameworks\",\n\t\t\t\t);\n" if bid else ""
+            L.append(f"\t\t{_oid(f'cfg:{tname}:{cfg}')} /* {cfg} */ = {{\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = {{\n{common}{extra}\t\t\t}};\n\t\t\tname = {cfg};\n\t\t}};")
+    L.append("/* End XCBuildConfiguration section */\n\n/* Begin XCConfigurationList section */")
+    for tname, lab in (("proj", 'PBXProject "App"'), ("App", 'PBXNativeTarget "App"'), ("AppTests", 'PBXNativeTarget "AppTests"')):
+        L.append(f"\t\t{_oid('cl:' + tname)} /* Build configuration list for {lab} */ = {{\n\t\t\tisa = XCConfigurationList;\n\t\t\tbuildConfigurations = (\n" + "".join(f"\t\t\t\t{_oid(f'cfg:{tname}:{c}')} /* {c} */,\n" for c in ("Debug", "Release"))
+                 + "\t\t\t);\n\t\t\tdefaultConfigurationIsVisible = 0;\n\t\t\tdefaultConfigurationName = Release;\n\t\t};")
+    L.append(f"/* End XCConfigurationList section */\n\t}};\n\trootObject = {_oid('proj')} /* Project object */;\n}}\n")
+    return "\n".join(L)
+
+
+def _sln(n_projects: int = 12, odd: bool = True) -> str:
+    cfgs = ["Debug|Any CPU", "Release|Any CPU"]
+    guid = lambda i: "{" + hashlib.sha1(f"p{i}".encode()).hexdigest().upper()[:8] + "-" + hashlib.sha1(f"q{i}".encode()).hexdigest().upper()[:4] + "-4A5B-8C9D-" + hashlib.sha1(f"r{i}".encode()).hexdigest().upper()[:12] + "}"  # noqa: E731
+    out = ["Microsoft Visual Studio Solution File, Format Version 12.00", "# Visual Studio Version 17", "VisualStudioVersion = 17.8.34330.188", "MinimumVisualStudioVersion = 10.0.40219.1"]
+    names = ["Core", "Data", "Api", "Web", "Worker", "Shared", "Auth", "Billing", "Reports", "Cli", "Tests.Unit", "Tests.Integration"][:n_projects]
+    for i, n in enumerate(names):
+        out += [f'Project("{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}") = "{n}", "src\\{n}\\{n}.csproj", "{guid(i)}"', "EndProject"]
+    out += ["Global", "\tGlobalSection(SolutionConfigurationPlatforms) = preSolution"] + [f"\t\t{c} = {c}" for c in cfgs] + ["\tEndGlobalSection", "\tGlobalSection(ProjectConfigurationPlatforms) = postSolution"]
+    for i, n in enumerate(names):
+        for c in cfgs:
+            if odd and n == "Worker" and c.startswith("Release"):
+                out += [f"\t\t{guid(i)}.{c}.ActiveCfg = Release|Any CPU"]  # built in Debug only: not an identity matrix, so it stays verbatim
+                continue
+            out += [f"\t\t{guid(i)}.{c}.ActiveCfg = {c}", f"\t\t{guid(i)}.{c}.Build.0 = {c}"]
+    out += ["\tEndGlobalSection", "\tGlobalSection(SolutionProperties) = preSolution", "\t\tHideSolutionNode = FALSE", "\tEndGlobalSection", "\tGlobalSection(ExtensibilityGlobals) = postSolution", "\t\tSolutionGuid = {9A1B2C3D-0000-4000-8000-0123456789AB}", "\tEndGlobalSection", "EndGlobal", ""]
+    return "\r\n".join(out)
+
+
+_PBX = _pbxproj()
+_SLN = _sln()
+
+case(
+    1154,
+    claim="In a project.pbxproj every 24-hex object id becomes a short '§N' alias in order of first appearance (structure, names, comments and build settings kept), and in a .sln the ProjectConfigurationPlatforms rows of every project whose matrix is exactly the identity collapse to one '{GUID} = identity' line; the object graph (which target builds which file, groups, settings) and every project, configuration and mapping are unchanged.",
+    loses="the 24-hex object ids themselves (no legend: an edit must anchor on the saved original file, not on the aliased text) and, in a .sln, the verbatim identity rows (restored exactly by the one-line rule); a .sln whose matrix is not identity for a project keeps that project's rows verbatim",
+    encode=alias_project_ids,
+    probes=safe_probes(probes_1154),
+    fixtures=lambda: [
+        Fixture("project.pbxproj: 40 Swift files, app and test targets", _PBX, True),
+        Fixture("12-project .sln, CRLF, one project not built in Release", _SLN, True),
+        Fixture("small pbxproj", _pbxproj(6), True),
+        Fixture("Package.swift is not a pbxproj", "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(name: \"App\")\n", False),
+        Fixture("a .sln whose configurations are not name = name", _SLN.replace("\t\tDebug|Any CPU = Debug|Any CPU", "\t\tDebug|Any CPU = Debug|x86"), False),
+        Fixture("pbxproj that already uses the alias sigil", _pbxproj(4).replace("\tarchiveVersion = 1;", "\tarchiveVersion = 1; // § keep"), None),
+    ],
+    min_gain=0.1,
+)

@@ -57,6 +57,457 @@ def cat(*parts: str) -> str:
 
 
 # ===============================================================================================================
+# #1068 Native-build failure digest for node-gyp, setuptools/pip and Ruby extconf/mkmf. Collapse the runs that every
+# failed native install repeats (gyp 'spawn args' blocks, make progress lines, creating/copying, 'checking ... yes',
+# mkmf's option list), hoist the flags shared by several compiler lines, drop the node/node-gyp versions that
+# 'gyp ERR!' repeats. RULE: every error line (compiler 'fatal error', 'checking ... no', gyp ERR!, pip/Ruby failure
+# lines), the names of what is missing, tool versions, the last make progress line (the failing object) and the
+# expanded compiler commands must survive. All five fixtures are real captures.
+
+BUILD_FAIL_PSYCOPG2 = (
+    'Collecting psycopg2==2.9.9\n'
+    '  Downloading psycopg2-2.9.9.tar.gz (384 kB)\n'
+    '     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 384.9/384.9 kB 576.6 kB/s eta 0:00:00\n'
+    '  Preparing metadata (setup.py): started\n'
+    "  Preparing metadata (setup.py): finished with status 'done'\n"
+    'Building wheels for collected packages: psycopg2\n'
+    '  Building wheel for psycopg2 (setup.py): started\n'
+    "  Building wheel for psycopg2 (setup.py): finished with status 'error'\n"
+    '  error: subprocess-exited-with-error\n'
+    '  \n'
+    '  × python setup.py bdist_wheel did not run successfully.\n'
+    '  │ exit code: 1\n'
+    '  ╰─> [38 lines of output]\n'
+    '      running bdist_wheel\n'
+    '      running build\n'
+    '      running build_py\n'
+    '      creating build\n'
+    '      creating build/lib.linux-x86_64-cpython-313\n'
+    '      creating build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/_range.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/pool.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/errors.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/errorcodes.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/extensions.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/tz.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/__init__.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/_json.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/sql.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/_ipaddress.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      copying lib/extras.py -> build/lib.linux-x86_64-cpython-313/psycopg2\n'
+    '      running build_ext\n'
+    "      building 'psycopg2._psycopg' extension\n"
+    '      creating build/temp.linux-x86_64-cpython-313\n'
+    '      creating build/temp.linux-x86_64-cpython-313/psycopg\n'
+    '      cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -O3 -fstack-protector -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fPIC -fPIC "-DPSYCOPG_VERSION=2.9.9 (dt dec pq3 ext lo64)" -DPSYCOPG_DEBUG=1 -DPG_VERSION_NUM=160015 -DHAVE_LO64=1 -DPSYCOPG_DEBUG=1 -I/usr/local/include/python3.13 -I. -I/usr/include/postgresql -I/usr/include/postgresql/16/server -I/usr/include/libxml2 -c psycopg/adapter_asis.c -o build/temp.linux-x86_64-cpython-313/psycopg/adapter_asis.o -Wdeclaration-after-statement\n'
+    '      In file included from psycopg/adapter_asis.c:28:\n'
+    '      ./psycopg/psycopg.h:36:10: fatal error: libpq-fe.h: No such file or directory\n'
+    '         36 | #include <libpq-fe.h>\n'
+    '            |          ^~~~~~~~~~~~\n'
+    '      compilation terminated.\n'
+    '      \n'
+    '      It appears you are missing some prerequisite to build the package from source.\n'
+    '      \n'
+    "      You may install a binary package by installing 'psycopg2-binary' from PyPI.\n"
+    '      If you want to install psycopg2 from source, please install the packages\n'
+    '      required for the build and try again.\n'
+    '      \n'
+    "      For further information please check the 'doc/src/install.rst' file (also at\n"
+    '      <https://www.psycopg.org/docs/install.html>).\n'
+    '      \n'
+    "      error: command '/usr/bin/cc' failed with exit code 1\n"
+    '      [end of output]\n'
+    '  \n'
+    '  note: This error originates from a subprocess, and is likely not a problem with pip.\n'
+    '  ERROR: Failed building wheel for psycopg2\n'
+    '  Running setup.py clean for psycopg2\n'
+    'Failed to build psycopg2\n'
+    'ERROR: Could not build wheels for psycopg2, which is required to install pyproject.toml-based projects\n'
+    'exit 1\n'
+)
+BUILD_FAIL_PGDEMO = (
+    'Processing /work/app/pg2\n'
+    '  Preparing metadata (setup.py): started\n'
+    "  Preparing metadata (setup.py): finished with status 'done'\n"
+    'Building wheels for collected packages: pgdemo\n'
+    '  Building wheel for pgdemo (setup.py): started\n'
+    "  Building wheel for pgdemo (setup.py): finished with status 'error'\n"
+    '  error: subprocess-exited-with-error\n'
+    '  \n'
+    '  × python setup.py bdist_wheel did not run successfully.\n'
+    '  │ exit code: 1\n'
+    '  ╰─> [14 lines of output]\n'
+    '      running bdist_wheel\n'
+    '      running build\n'
+    '      running build_ext\n'
+    "      building 'pgdemo._pgdemo' extension\n"
+    '      creating build\n'
+    '      creating build/temp.linux-x86_64-cpython-313\n'
+    '      creating build/temp.linux-x86_64-cpython-313/src\n'
+    '      cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -O3 -fstack-protector -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fPIC -fPIC -DPG_VERSION_NUM=160002 -DPSYCOPG_VERSION=\\"2.9.9\\" -I/usr/include/postgresql -I/usr/local/include/python3.13 -c src/conn.c -o build/temp.linux-x86_64-cpython-313/src/conn.o\n'
+    '      cc -pthread -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -O3 -fstack-protector -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -fPIC -fPIC -DPG_VERSION_NUM=160002 -DPSYCOPG_VERSION=\\"2.9.9\\" -I/usr/include/postgresql -I/usr/local/include/python3.13 -c src/pgdemo.c -o build/temp.linux-x86_64-cpython-313/src/pgdemo.o\n'
+    '      src/pgdemo.c:2:10: fatal error: libpq-fe.h: No such file or directory\n'
+    '          2 | #include <libpq-fe.h>\n'
+    '            |          ^~~~~~~~~~~~\n'
+    '      compilation terminated.\n'
+    "      error: command '/usr/bin/cc' failed with exit code 1\n"
+    '      [end of output]\n'
+    '  \n'
+    '  note: This error originates from a subprocess, and is likely not a problem with pip.\n'
+    '  ERROR: Failed building wheel for pgdemo\n'
+    '  Running setup.py clean for pgdemo\n'
+    'Failed to build pgdemo\n'
+    'ERROR: Could not build wheels for pgdemo, which is required to install pyproject.toml-based projects\n'
+)
+BUILD_FAIL_NOKOGIRI = (
+    'Successfully installed mini_portile2-2.8.9\n'
+    "Building native extensions with: '--use-system-libraries'\n"
+    'This could take a while...\n'
+    'ERROR:  Error installing nokogiri:\n'
+    '\tERROR: Failed to build gem native extension.\n'
+    '\n'
+    '    current directory: /work/app/n2/gems/gems/nokogiri-1.16.7/ext/nokogiri\n'
+    '/opt/rbenv/versions/3.3.6/bin/ruby extconf.rb --use-system-libraries\n'
+    'checking for whether -std=c99 is accepted as CFLAGS... yes\n'
+    'checking for whether -Wno-declaration-after-statement is accepted as CFLAGS... yes\n'
+    'checking for whether -O2 is accepted as CFLAGS... yes\n'
+    'checking for whether -g is accepted as CFLAGS... yes\n'
+    'checking for whether -Winline is accepted as CFLAGS... yes\n'
+    'checking for whether -Wmissing-noreturn is accepted as CFLAGS... yes\n'
+    'checking for whether -Wconversion -Wno-sign-conversion is accepted as CFLAGS... yes\n'
+    'Building nokogiri using system libraries.\n'
+    'checking for gzdopen() in -lz... yes\n'
+    'checking for xmlParseDoc() in -lxml2... no\n'
+    'checking for xmlParseDoc() in -llibxml2... no\n'
+    'checking for libxml-2.0 using `pkg_config`... no\n'
+    'Please install either the `pkg-config` utility or the `pkg-config` rubygem.\n'
+    'checking for xmlParseDoc() in -lxml2... no\n'
+    'checking for xmlParseDoc() in -llibxml2... no\n'
+    '-----\n'
+    "extconf.rb:295:in `ensure_package_configuration'\n"
+    "extconf.rb:704:in `<main>'\n"
+    'xml2 is missing. Please locate mkmf.log to investigate how it is failing.\n'
+    '-----\n'
+    '*** extconf.rb failed ***\n'
+    'Could not create Makefile due to some reason, probably lack of necessary\n'
+    'libraries and/or headers.  Check the mkmf.log file for more details.  You may\n'
+    'need configuration options.\n'
+    '\n'
+    'Provided configuration options:\n'
+    '\t--with-opt-dir\n'
+    '\t--without-opt-dir\n'
+    '\t--with-opt-include=${opt-dir}/include\n'
+    '\t--without-opt-include\n'
+    '\t--with-opt-lib=${opt-dir}/lib\n'
+    '\t--without-opt-lib\n'
+    '\t--with-make-prog\n'
+    '\t--without-make-prog\n'
+    '\t--srcdir=.\n'
+    '\t--curdir\n'
+    '\t--ruby=/opt/rbenv/versions/3.3.6/bin/$(RUBY_BASE_NAME)\n'
+    '\t--help\n'
+    '\t--clean\n'
+    '\t--prevent-strip\n'
+    '\t--enable-system-libraries\n'
+    '\t--disable-system-libraries\n'
+    '\t--use-system-libraries\n'
+    '\t--enable-system-libraries\n'
+    '\t--disable-system-libraries\n'
+    '\t--use-system-libraries\n'
+    '\t--with-zlib-dir\n'
+    '\t--without-zlib-dir\n'
+    '\t--with-zlib-include=${zlib-dir}/include\n'
+    '\t--without-zlib-include\n'
+    '\t--with-zlib-lib=${zlib-dir}/lib\n'
+    '\t--without-zlib-lib\n'
+    '\t--with-z-dir\n'
+    '\t--without-z-dir\n'
+    '\t--with-z-include=${z-dir}/include\n'
+    '\t--without-z-include\n'
+    '\t--with-z-lib=${z-dir}/lib\n'
+    '\t--without-z-lib\n'
+    '\t--with-zlib\n'
+    '\t--without-zlib\n'
+    '\t--with-xml2-dir\n'
+    '\t--without-xml2-dir\n'
+    '\t--with-xml2-include=${xml2-dir}/include\n'
+    '\t--without-xml2-include\n'
+    '\t--with-xml2-lib=${xml2-dir}/lib\n'
+    '\t--without-xml2-lib\n'
+    '\t--with-xml2lib\n'
+    '\t--without-xml2lib\n'
+    '\t--with-libxml2-dir\n'
+    '\t--without-libxml2-dir\n'
+    '\t--with-libxml2-include=${libxml2-dir}/include\n'
+    '\t--without-libxml2-include\n'
+    '\t--with-libxml2-lib=${libxml2-dir}/lib\n'
+    '\t--without-libxml2-lib\n'
+    '\t--with-libxml2lib\n'
+    '\t--without-libxml2lib\n'
+    '\t--with-libxml-2.0-dir\n'
+    '\t--without-libxml-2.0-dir\n'
+    '\t--with-libxml-2.0-include=${libxml-2.0-dir}/include\n'
+    '\t--without-libxml-2.0-include\n'
+    '\t--with-libxml-2.0-lib=${libxml-2.0-dir}/lib\n'
+    '\t--without-libxml-2.0-lib\n'
+    '\t--with-libxml-2.0-config\n'
+    '\t--without-libxml-2.0-config\n'
+    '\t--with-pkg-config\n'
+    '\t--without-pkg-config\n'
+    '\t--with-xml2lib\n'
+    '\t--without-xml2lib\n'
+    '\t--with-libxml2lib\n'
+    '\t--without-libxml2lib\n'
+    '\n'
+    'To see why this extension failed to compile, please check the mkmf.log which can be found here:\n'
+    '\n'
+    '  /work/app/n2/gems/extensions/x86_64-linux/3.3.0/nokogiri-1.16.7/mkmf.log\n'
+    '\n'
+    'extconf failed, exit code 1\n'
+    '\n'
+    'Gem files will remain installed in /work/app/n2/gems/gems/nokogiri-1.16.7 for inspection.\n'
+    'Results logged to /work/app/n2/gems/extensions/x86_64-linux/3.3.0/nokogiri-1.16.7/gem_make.out\n'
+    'exit 1\n'
+)
+BUILD_FAIL_NODE_GYP = (
+    'gyp info it worked if it ends with ok\n'
+    'gyp info using node-gyp@10.2.0\n'
+    'gyp info using node@22.23.4 | linux | x64\n'
+    'gyp info find Python using Python version 3.13.18 found at "/usr/local/bin/python3"\n'
+    '\n'
+    'gyp info spawn /usr/local/bin/python3\n'
+    'gyp info spawn args [\n'
+    "gyp info spawn args '/root/.npm/_npx/abc/node_modules/node-gyp/gyp/gyp_main.py',\n"
+    "gyp info spawn args 'binding.gyp',\n"
+    "gyp info spawn args '-f',\n"
+    "gyp info spawn args 'make',\n"
+    "gyp info spawn args '-I',\n"
+    "gyp info spawn args '/work/app/n4/build/config.gypi',\n"
+    "gyp info spawn args '-I',\n"
+    "gyp info spawn args '/root/.npm/_npx/abc/node_modules/node-gyp/addon.gypi',\n"
+    "gyp info spawn args '-I',\n"
+    "gyp info spawn args '/root/.cache/node-gyp/22.23.4/include/node/common.gypi',\n"
+    "gyp info spawn args '-Dlibrary=shared_library',\n"
+    "gyp info spawn args '-Dvisibility=default',\n"
+    "gyp info spawn args '-Dnode_root_dir=/root/.cache/node-gyp/22.23.4',\n"
+    "gyp info spawn args '-Dnode_gyp_dir=/root/.npm/_npx/abc/node_modules/node-gyp',\n"
+    "gyp info spawn args '-Dnode_lib_file=/root/.cache/node-gyp/22.23.4/<(target_arch)/node.lib',\n"
+    "gyp info spawn args '-Dmodule_root_dir=/work/app/n4',\n"
+    "gyp info spawn args '-Dnode_engine=v8',\n"
+    "gyp info spawn args '--depth=.',\n"
+    "gyp info spawn args '--no-parallel',\n"
+    "gyp info spawn args '--generator-output',\n"
+    "gyp info spawn args 'build',\n"
+    "gyp info spawn args '-Goutput_dir=.'\n"
+    'gyp info spawn args ]\n'
+    'gyp info spawn make\n'
+    "gyp info spawn args [ 'BUILDTYPE=Release', '-C', 'build' ]\n"
+    "make: Entering directory '/work/app/n4/build'\n"
+    '  CXX(target) Release/obj.target/imgproc/src/addon.o\n'
+    '  CXX(target) Release/obj.target/imgproc/src/resize.o\n'
+    '  CXX(target) Release/obj.target/imgproc/src/blur.o\n'
+    '../src/blur.cc:1:10: fatal error: vips/vips8: No such file or directory\n'
+    '    1 | #include <vips/vips8>\n'
+    '      |          ^~~~~~~~~~~~\n'
+    'compilation terminated.\n'
+    'make: *** [imgproc.target.mk:116: Release/obj.target/imgproc/src/blur.o] Error 1\n'
+    "make: Leaving directory '/work/app/n4/build'\n"
+    'gyp ERR! build error \n'
+    'gyp ERR! stack Error: `make` failed with exit code: 2\n'
+    'gyp ERR! stack at ChildProcess.<anonymous> (/root/.npm/_npx/abc/node_modules/node-gyp/lib/build.js:216:23)\n'
+    'gyp ERR! System Linux 6.18.44-fc-v233\n'
+    'gyp ERR! command "/opt/node22/bin/node" "/root/.npm/_npx/abc/node_modules/.bin/node-gyp" "rebuild"\n'
+    'gyp ERR! cwd /work/app/n4\n'
+    'gyp ERR! node -v v22.23.4\n'
+    'gyp ERR! node-gyp -v v10.2.0\n'
+    'gyp ERR! not ok \n'
+    'exit 1\n'
+)
+BUILD_FAIL_MKMF = (
+    'checking for xmlParseDoc() in -lxml2... no\n'
+    'libxml2 is missing.  please visit https://nokogiri.org/tutorials/installing_nokogiri.html for help with installing dependencies.\n'
+    '*** extconf.rb failed ***\n'
+    'Could not create Makefile due to some reason, probably lack of necessary\n'
+    'libraries and/or headers.  Check the mkmf.log file for more details.  You may\n'
+    'need configuration options.\n'
+    '\n'
+    'Provided configuration options:\n'
+    '\t--with-opt-dir\n'
+    '\t--without-opt-dir\n'
+    '\t--with-opt-include=${opt-dir}/include\n'
+    '\t--without-opt-include\n'
+    '\t--with-opt-lib=${opt-dir}/lib\n'
+    '\t--without-opt-lib\n'
+    '\t--with-make-prog\n'
+    '\t--without-make-prog\n'
+    '\t--srcdir=.\n'
+    '\t--curdir\n'
+    '\t--ruby=/opt/rbenv/versions/3.3.6/bin/$(RUBY_BASE_NAME)\n'
+    '\t--with-xml2-dir\n'
+    '\t--without-xml2-dir\n'
+    '\t--with-xml2-include=${xml2-dir}/include\n'
+    '\t--without-xml2-include\n'
+    '\t--with-xml2-lib=${xml2-dir}/lib\n'
+    '\t--without-xml2-lib\n'
+    '\t--with-xml2lib\n'
+    '\t--without-xml2lib\n'
+)
+
+_B_SPAWN = re.compile(r"^gyp info spawn args(?: |$)")
+_B_PROGRESS = re.compile(r"^\s*(?:CC|CXX|LINK|COPY|TOUCH|SOLINK_MODULE|AR)\((?:target|host)\) ")
+_B_COPY = re.compile(r"^\s*(?:creating \S|copying \S.* -> \S)")
+_B_YES = re.compile(r"^checking for .*\.\.\. yes$")
+_B_OPT_HEAD = "Provided configuration options:"
+_B_CC = re.compile(r"^(\s*)((?:/usr/bin/)?(?:cc|gcc|g\+\+|c\+\+|clang(?:\+\+)?))( .+)$")
+_B_LEGEND = re.compile(r"^\s*\[ctxprune: @(\d+) = (.*)\]$")
+_B_STUB = re.compile(r"^\s*\[ctxprune: \d+ (?:gyp spawn|object|copy|configure check|configuration option)")
+_B_VER = [re.compile(r"^gyp ERR! node -v v(\S+)$"), re.compile(r"^gyp ERR! node-gyp -v v(\S+)$")]
+
+
+def _b_run(lines, i, pred):
+    j = i
+    while j < len(lines) and pred(lines[j]):
+        j += 1
+    return j
+
+
+def digest_native_build(text: str) -> str:
+    lines = text.split("\n")
+    n = len(lines)
+    seen_ver = set()
+    for l in lines:
+        if m := re.match(r"^gyp info using node-gyp@(\S+)$", l):
+            seen_ver.add(("node-gyp", m.group(1)))
+        elif m := re.match(r"^gyp info using node@(\S+) \|", l):
+            seen_ver.add(("node", m.group(1)))
+    out, i = [], 0
+    while i < n:
+        l = lines[i]
+        j = i
+        if _B_SPAWN.match(l):
+            j = _b_run(lines, i, _B_SPAWN.match)
+            if j - i >= 3:
+                out.append(f"[ctxprune: {j - i} gyp spawn argument lines elided]")
+                i = j
+                continue
+        elif _B_PROGRESS.match(l):
+            j = _b_run(lines, i, _B_PROGRESS.match)
+            if j - i >= 3:
+                out.append(f"[ctxprune: {j - i - 1} object steps ok elided, the last one is shown]")
+                out.append(lines[j - 1])
+                i = j
+                continue
+        elif _B_COPY.match(l):
+            j = _b_run(lines, i, _B_COPY.match)
+            if j - i >= 3:
+                out.append(re.match(r"^\s*", l).group(0) + f"[ctxprune: {j - i} copy/create lines elided]")
+                i = j
+                continue
+        elif _B_YES.match(l):
+            j = _b_run(lines, i, _B_YES.match)
+            if j - i >= 3:
+                out.append(f"[ctxprune: {j - i} configure checks ok elided]")
+                i = j
+                continue
+        elif l == _B_OPT_HEAD:
+            j = _b_run(lines, i + 1, lambda x: x.startswith("\t--"))
+            if j - i - 1 >= 3:
+                out += [l, f"\t[ctxprune: {j - i - 1} configuration option lines elided]"]
+                i = j
+                continue
+        elif (m := _B_VER[0].match(l)) and ("node", m.group(1)) in seen_ver or (m := _B_VER[1].match(l)) and ("node-gyp", m.group(1)) in seen_ver:
+            i += 1
+            continue
+        out.append(l)
+        i += 1
+    # hoist flags shared by several compiler lines
+    cmds = []
+    for k, l in enumerate(out):
+        if (m := _B_CC.match(l)) and (toks := _tokens(m.group(2) + m.group(3))) and _eligible(toks):
+            cmds.append((k, m.group(1), toks))
+    if len(cmds) >= 2 and len({c[2][0] for c in cmds}) == 1:
+        ulists = [_units(c[2][1:]) for c in cmds]
+        common = Counter(ulists[0])
+        for u in ulists[1:]:
+            common &= Counter(u)
+        shared, left = [], Counter(common)
+        for u in ulists[0]:
+            if left[u] > 0:
+                shared.append(u)
+                left[u] -= 1
+        if len(shared) >= 3:
+            for (k, ind, toks), units in zip(cmds, ulists):
+                rest, left = [], Counter(shared)
+                for u in units:
+                    if left[u] > 0:
+                        left[u] -= 1
+                    else:
+                        rest.append(u)
+                out[k] = ind + " ".join([toks[0], "@1"] + rest)
+            out.insert(cmds[0][0], f"{cmds[0][1]}[ctxprune: @1 = {' '.join(shared)}]")
+    return shrink_only(text, "\n".join(out))
+
+
+_B_ERR = [re.compile(p) for p in (r"\b(?:fatal )?error\b", r"gyp ERR!", r"\.\.\. no$", r"\*\*\* extconf\.rb failed", r"is missing", r"not found", r"No such file", r"\bERROR\b", r"Failed to build", r"\bFAILED\b", r"Could not create Makefile")]
+
+
+def probes_1068(text: str) -> dict:
+    lines = text.split("\n")
+    legend = {}
+    for l in lines:
+        if m := _B_LEGEND.match(l):
+            legend[m.group(1)] = _units(_tokens(m.group(2)) or [])
+    errs, cmds, versions, progress = [], [], set(), None
+    for l in lines:
+        if _B_STUB.match(l) or _B_LEGEND.match(l):
+            continue
+        if (m := _B_CC.match(l)) and (toks := _tokens(m.group(2) + m.group(3))) and (_eligible(toks) or (len(toks) > 1 and toks[1].startswith("@") and toks[1][1:] in legend)):
+            units = []
+            for u in _units(toks[1:]):
+                units += legend[u[1:]] if u.startswith("@") and u[1:] in legend else [u]
+            cmds.append((toks[0], tuple(sorted(units))))
+            continue
+        if m := re.match(r"^gyp (?:info using node-gyp@|ERR! node-gyp -v v)(\S+)$", l):
+            versions.add(("node-gyp", m.group(1)))
+            continue
+        if m := re.match(r"^gyp (?:info using node@|ERR! node -v v)(\S+?)(?: \||$)", l):
+            versions.add(("node", m.group(1)))
+            continue
+        if m := re.search(r"Python version (\S+) found", l):
+            versions.add(("python", m.group(1)))
+        if _B_PROGRESS.match(l):
+            progress = l
+        if any(rx.search(l) for rx in _B_ERR):
+            errs.append(l)
+    missing = sorted(set(re.findall(r"fatal error: (\S+): No such file|(\S+) executable not found|(\S+) is missing", "\n".join(errs))))
+    return {"error lines": errs, "what is missing": missing, "tool versions": sorted(versions), "compiler commands (head, sorted flags)": cmds,
+            "last make progress line (the failing object)": progress}
+
+
+COMPOSITE_1068 = cat("$ pip install -r requirements.txt\n", BUILD_FAIL_PSYCOPG2.split("exit 1")[0], "$ npm rebuild\n", BUILD_FAIL_NODE_GYP, "$ gem install nokogiri\n", BUILD_FAIL_NOKOGIRI)
+
+case(
+    1068,
+    claim="Collapses gyp 'spawn args' blocks, make progress runs (the last object stays), setuptools creating/copying runs, mkmf 'checking ... yes' runs and mkmf's option list into count lines, hoists the flags shared by several cc/gcc lines into one '[ctxprune: @1 = ...]', and drops the node and node-gyp versions that 'gyp ERR!' repeats; every error line, the missing header/library/tool, the tool versions, the failing object and each compiler command (expanded) are unchanged.",
+    loses="the successful intermediate steps (which objects compiled, which files were copied, which configure probes passed), the order of hoisted compiler flags, and the argument list gyp passes to python and make",
+    encode=digest_native_build,
+    probes=probes_1068,
+    fixtures=lambda: [
+        Fixture("pip install psycopg2 from source without libpq-fe.h (real)", BUILD_FAIL_PSYCOPG2, True),
+        Fixture("setuptools build_ext with two cc lines sharing 20 flags, 11-file copy step absent (real)", BUILD_FAIL_PGDEMO, True),
+        Fixture("gem install nokogiri --use-system-libraries without libxml2 (real)", BUILD_FAIL_NOKOGIRI, True),
+        Fixture("node-gyp rebuild of an addon that includes vips/vips8 (real)", BUILD_FAIL_NODE_GYP, True),
+        Fixture("ruby extconf.rb: have_library xml2 fails (real)", BUILD_FAIL_MKMF, True),
+        Fixture("CI log: pip failure first, node-gyp in the middle, nokogiri last", COMPOSITE_1068, True),
+        Fixture("a successful, short build log", "running build_ext\nbuilding 'x' extension\ncc -c x.c -o x.o\ncc -shared x.o -o x.so\nOK\n", False),
+        Fixture("lines that merely start like the collapsed classes", "creating a plan\ngyp info spawn args\nchecking for tea... yes\n", False),
+    ],
+    min_gain=0.1,
+)
+
+
+
+# ===============================================================================================================
 # #1151 Warnings inside a shared header print once per translation unit that includes it; only the 'In file included
 # from' chain differs. Keep one copy per distinct (context line, warning, echoed code) and say how many TUs hit it.
 # RULE: probe = every distinct header warning site with the number of translation units that reported it (a Counter
@@ -441,6 +892,8 @@ def probes_1151(text: str) -> dict:
             "other output lines (make commands, summaries)": texts}
 
 
+_MAKE_BLOCKS = [b for b in re.split(r"(?m)^(?=g\+\+ )", MAKE_30_TUS) if b]  # one block per 'g++ -c modN.cpp' command
+
 case(
     1151,
     claim="A warning in a header (.h/.hpp/...) that repeats with the same context line and echoed code in several translation units is printed once, followed by '[ctxprune: this warning also occurred in N more translation units]'; the include-chain and context lines of fully duplicated blocks go with them. Every distinct header warning site with its translation-unit count, every error and every warning in a non-header file, and every make command line are unchanged.",
@@ -449,13 +902,13 @@ case(
     probes=probes_1151,
     fixtures=lambda: [
         Fixture("make -k over 30 .cpp files sharing noisy.h; two have an extra warning (real, gcc 13)", MAKE_30_TUS, True),
-        Fixture("two TUs only", "".join(MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod12.cpp -o mod12.o\n")[0:1]).split("g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n")[0] + "g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n" + MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod11.cpp -o mod11.o\n")[1].split("g++ -Wall -Wextra -O2 -std=c++17 -c mod12.cpp -o mod12.o\n")[0], True),
-        Fixture("one TU: nothing repeats", MAKE_30_TUS.split("g++ -Wall -Wextra -O2 -std=c++17 -c mod10.cpp -o mod10.o\n")[0], False),
+        Fixture("two TUs only", cat(*_MAKE_BLOCKS[1:3]), True),
+        Fixture("one TU: nothing repeats", _MAKE_BLOCKS[1], False),
         Fixture("header ERROR repeated in three TUs is not folded", "g++ -c a.cpp\nIn file included from a.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\ng++ -c b.cpp\nIn file included from b.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\ng++ -c c.cpp\nIn file included from c.cpp:1:\nbad.h:3:1: error: unknown type name 'Foo'\n    3 | Foo f;\n      | ^~~\n", False),
         Fixture("identical warnings in a .cpp (not a header) repeat on purpose", "a.cpp:2:5: warning: unused variable 'x' [-Wunused-variable]\n    2 |     int x;\n      |         ^\na.cpp:2:5: warning: unused variable 'x' [-Wunused-variable]\n    2 |     int x;\n      |         ^\n", False),
         Fixture("text that looks like the annotation", "[ctxprune: this warning also occurred in 4 more translation units]\nIn file included from a.cpp:1:\nx.h:1:1: warning: w [-Wall]\n", None),
     ],
-    min_gain=0.4,
+    min_gain=0.2,
 )
 
 
@@ -2384,6 +2837,683 @@ case(
         Fixture("two pids (trace-children) are not hoisted, a truncated shadow section", "==1== Memcheck\n==2== Memcheck\n==1== Invalid read of size 4\n==2== Invalid write of size 1\nShadow bytes around the buggy address:\n  0x501ffffffd80: 00 00 00 00\n", None),
     ],
     min_gain=0.15,
+)
+
+
+
+# ===============================================================================================================
+# #224 Maven reactor stanzas and Maven/Gradle failure footers. Per module Maven prints a banner, 'Building', a
+# '--- plugin:version:goal (id) @ module ---' header per goal and no-op results ('Nothing to compile'); failures end
+# with constant -e/-X/help advice. Gradle ends with a constant '* Try:' list and a deprecation advisory.
+# RULE: modules in order, the goals each ran, every WARNING/ERROR/test line, the Reactor Summary, the failing module
+# and goal, the Gradle task and error text must survive. Real captures: mvn verify over a 10-module reactor (all
+# green, and with mod-7 broken) and a failing gradle build.
+
+MVN_REACTOR_OK = (
+    '[INFO] Scanning for projects...\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Reactor Build Order:\n'
+    '[INFO] \n'
+    '[INFO] parent                                                             [pom]\n'
+    '[INFO] mod-1                                                              [jar]\n'
+    '[INFO] mod-2                                                              [jar]\n'
+    '[INFO] mod-3                                                              [jar]\n'
+    '[INFO] mod-4                                                              [jar]\n'
+    '[INFO] mod-5                                                              [jar]\n'
+    '[INFO] mod-6                                                              [jar]\n'
+    '[INFO] mod-7                                                              [jar]\n'
+    '[INFO] mod-8                                                              [jar]\n'
+    '[INFO] mod-9                                                              [jar]\n'
+    '[INFO] mod-10                                                             [jar]\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:parent >-------------------------\n'
+    '[INFO] Building parent 1.0.0                                             [1/11]\n'
+    '[INFO]   from pom.xml\n'
+    '[INFO] --------------------------------[ pom ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-1 >--------------------------\n'
+    '[INFO] Building mod-1 1.0.0                                              [2/11]\n'
+    '[INFO]   from mod-1/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-1 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-1/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-1 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-1 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-1/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-1 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-1 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-1 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-2 >--------------------------\n'
+    '[INFO] Building mod-2 1.0.0                                              [3/11]\n'
+    '[INFO]   from mod-2/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-2 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-2/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-2 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-2 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-2/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-2 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-2 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-2 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-3 >--------------------------\n'
+    '[INFO] Building mod-3 1.0.0                                              [4/11]\n'
+    '[INFO]   from mod-3/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-3 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-3/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-3 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-3 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-3/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-3 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-3 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-3 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-4 >--------------------------\n'
+    '[INFO] Building mod-4 1.0.0                                              [5/11]\n'
+    '[INFO]   from mod-4/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-4 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-4/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-4 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-4 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-4/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-4 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-4 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-4 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-5 >--------------------------\n'
+    '[INFO] Building mod-5 1.0.0                                              [6/11]\n'
+    '[INFO]   from mod-5/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-5 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-5/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-5 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-5 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-5/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-5 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-5 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-5 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-6 >--------------------------\n'
+    '[INFO] Building mod-6 1.0.0                                              [7/11]\n'
+    '[INFO]   from mod-6/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-6 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-6/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-6 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-6 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-6/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-6 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-6 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-6 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-7 >--------------------------\n'
+    '[INFO] Building mod-7 1.0.0                                              [8/11]\n'
+    '[INFO]   from mod-7/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-7 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-7/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-7 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-7 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-7/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-7 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-7 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-7 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-8 >--------------------------\n'
+    '[INFO] Building mod-8 1.0.0                                              [9/11]\n'
+    '[INFO]   from mod-8/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-8 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-8/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-8 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-8 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-8/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-8 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-8 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-8 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-9 >--------------------------\n'
+    '[INFO] Building mod-9 1.0.0                                             [10/11]\n'
+    '[INFO]   from mod-9/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-9 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-9/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-9 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-9 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-9/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-9 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-9 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-9 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-10 >-------------------------\n'
+    '[INFO] Building mod-10 1.0.0                                            [11/11]\n'
+    '[INFO]   from mod-10/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-10 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-10/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-10 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-10 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-10/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-10 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-10 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-10 ---\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Reactor Summary for parent 1.0.0:\n'
+    '[INFO] \n'
+    '[INFO] parent ............................................. SUCCESS [  0.001 s]\n'
+    '[INFO] mod-1 .............................................. SUCCESS [  0.794 s]\n'
+    '[INFO] mod-2 .............................................. SUCCESS [  0.022 s]\n'
+    '[INFO] mod-3 .............................................. SUCCESS [  0.018 s]\n'
+    '[INFO] mod-4 .............................................. SUCCESS [  0.019 s]\n'
+    '[INFO] mod-5 .............................................. SUCCESS [  0.016 s]\n'
+    '[INFO] mod-6 .............................................. SUCCESS [  0.017 s]\n'
+    '[INFO] mod-7 .............................................. SUCCESS [  0.035 s]\n'
+    '[INFO] mod-8 .............................................. SUCCESS [  0.019 s]\n'
+    '[INFO] mod-9 .............................................. SUCCESS [  0.014 s]\n'
+    '[INFO] mod-10 ............................................. SUCCESS [  0.016 s]\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] BUILD SUCCESS\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Total time:  1.126 s\n'
+    '[INFO] Finished at: 2026-11-04T17:40:17Z\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+)
+MVN_REACTOR_FAIL = (
+    '[INFO] Scanning for projects...\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Reactor Build Order:\n'
+    '[INFO] \n'
+    '[INFO] parent                                                             [pom]\n'
+    '[INFO] mod-1                                                              [jar]\n'
+    '[INFO] mod-2                                                              [jar]\n'
+    '[INFO] mod-3                                                              [jar]\n'
+    '[INFO] mod-4                                                              [jar]\n'
+    '[INFO] mod-5                                                              [jar]\n'
+    '[INFO] mod-6                                                              [jar]\n'
+    '[INFO] mod-7                                                              [jar]\n'
+    '[INFO] mod-8                                                              [jar]\n'
+    '[INFO] mod-9                                                              [jar]\n'
+    '[INFO] mod-10                                                             [jar]\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:parent >-------------------------\n'
+    '[INFO] Building parent 1.0.0                                             [1/11]\n'
+    '[INFO]   from pom.xml\n'
+    '[INFO] --------------------------------[ pom ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-1 >--------------------------\n'
+    '[INFO] Building mod-1 1.0.0                                              [2/11]\n'
+    '[INFO]   from mod-1/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-1 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-1/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-1 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-1 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-1/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-1 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-1 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-1 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-2 >--------------------------\n'
+    '[INFO] Building mod-2 1.0.0                                              [3/11]\n'
+    '[INFO]   from mod-2/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-2 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-2/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-2 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-2 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-2/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-2 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-2 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-2 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-3 >--------------------------\n'
+    '[INFO] Building mod-3 1.0.0                                              [4/11]\n'
+    '[INFO]   from mod-3/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-3 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-3/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-3 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-3 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-3/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-3 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-3 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-3 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-4 >--------------------------\n'
+    '[INFO] Building mod-4 1.0.0                                              [5/11]\n'
+    '[INFO]   from mod-4/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-4 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-4/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-4 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-4 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-4/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-4 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-4 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-4 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-5 >--------------------------\n'
+    '[INFO] Building mod-5 1.0.0                                              [6/11]\n'
+    '[INFO]   from mod-5/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-5 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-5/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-5 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-5 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-5/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-5 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-5 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-5 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-6 >--------------------------\n'
+    '[INFO] Building mod-6 1.0.0                                              [7/11]\n'
+    '[INFO]   from mod-6/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-6 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-6/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-6 ---\n'
+    '[INFO] Nothing to compile - all classes are up to date.\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:testResources (default-testResources) @ mod-6 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-6/src/test/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:testCompile (default-testCompile) @ mod-6 ---\n'
+    '[INFO] No sources to compile\n'
+    '[INFO] \n'
+    '[INFO] --- surefire:3.2.5:test (default-test) @ mod-6 ---\n'
+    '[INFO] No tests to run.\n'
+    '[INFO] \n'
+    '[INFO] --- jar:3.4.1:jar (default-jar) @ mod-6 ---\n'
+    '[INFO] \n'
+    '[INFO] -------------------------< com.example:mod-7 >--------------------------\n'
+    '[INFO] Building mod-7 1.0.0                                              [8/11]\n'
+    '[INFO]   from mod-7/pom.xml\n'
+    '[INFO] --------------------------------[ jar ]---------------------------------\n'
+    '[INFO] \n'
+    '[INFO] --- resources:3.3.1:resources (default-resources) @ mod-7 ---\n'
+    '[INFO] skip non existing resourceDirectory /work/app/mod-7/src/main/resources\n'
+    '[INFO] \n'
+    '[INFO] --- compiler:3.13.0:compile (default-compile) @ mod-7 ---\n'
+    '[INFO] Recompiling the module because of changed source code.\n'
+    '[INFO] Compiling 1 source file with javac [debug target 17] to target/classes\n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[WARNING] COMPILATION WARNING : \n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[WARNING] system modules path not set in conjunction with -source 17\n'
+    '[INFO] 1 warning\n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[ERROR] COMPILATION ERROR : \n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[ERROR] /work/app/mod-7/src/main/java/com/example/m7/Svc.java:[2,44] incompatible types: java.lang.String cannot be converted to int\n'
+    '[INFO] 1 error\n'
+    '[INFO] -------------------------------------------------------------\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Reactor Summary for parent 1.0.0:\n'
+    '[INFO] \n'
+    '[INFO] parent ............................................. SUCCESS [  0.002 s]\n'
+    '[INFO] mod-1 .............................................. SUCCESS [  0.858 s]\n'
+    '[INFO] mod-2 .............................................. SUCCESS [  0.019 s]\n'
+    '[INFO] mod-3 .............................................. SUCCESS [  0.018 s]\n'
+    '[INFO] mod-4 .............................................. SUCCESS [  0.018 s]\n'
+    '[INFO] mod-5 .............................................. SUCCESS [  0.031 s]\n'
+    '[INFO] mod-6 .............................................. SUCCESS [  0.024 s]\n'
+    '[INFO] mod-7 .............................................. FAILURE [  0.343 s]\n'
+    '[INFO] mod-8 .............................................. SKIPPED\n'
+    '[INFO] mod-9 .............................................. SKIPPED\n'
+    '[INFO] mod-10 ............................................. SKIPPED\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] BUILD FAILURE\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[INFO] Total time:  1.426 s\n'
+    '[INFO] Finished at: 2026-11-04T17:40:20Z\n'
+    '[INFO] ------------------------------------------------------------------------\n'
+    '[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.13.0:compile (default-compile) on project mod-7: Compilation failure\n'
+    '[ERROR] /work/app/mod-7/src/main/java/com/example/m7/Svc.java:[2,44] incompatible types: java.lang.String cannot be converted to int\n'
+    '[ERROR] -> [Help 1]\n'
+    '[ERROR] \n'
+    '[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.\n'
+    '[ERROR] Re-run Maven using the -X switch to enable full debug logging.\n'
+    '[ERROR] \n'
+    '[ERROR] For more information about the errors and possible solutions, please read the following articles:\n'
+    '[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException\n'
+    '[ERROR] \n'
+    '[ERROR] After correcting the problems, you can resume the build with the command\n'
+    '[ERROR]   mvn <args> -rf :mod-7\n'
+)
+GRADLE_COMPILE_FAIL = (
+    '\n'
+    '> Task :compileJava FAILED\n'
+    '/work/app/src/main/java/demo/Main.java:4: error: incompatible types: String cannot be converted to int\n'
+    '        int x = "not an int";\n'
+    '                ^\n'
+    '/work/app/src/main/java/demo/Main.java:5: error: cannot find symbol\n'
+    '        System.out.println(undefinedVar);\n'
+    '                           ^\n'
+    '  symbol:   variable undefinedVar\n'
+    '  location: class Main\n'
+    '2 errors\n'
+    '\n'
+    '[Incubating] Problems report is available at: file:///work/app/build/reports/problems/problems-report.html\n'
+    '\n'
+    'FAILURE: Build failed with an exception.\n'
+    '\n'
+    '* What went wrong:\n'
+    "Execution failed for task ':compileJava'.\n"
+    '> Compilation failed; see the compiler output below.\n'
+    '  /work/app/src/main/java/demo/Main.java:4: error: incompatible types: String cannot be converted to int\n'
+    '          int x = "not an int";\n'
+    '                  ^\n'
+    '  /work/app/src/main/java/demo/Main.java:5: error: cannot find symbol\n'
+    '          System.out.println(undefinedVar);\n'
+    '                             ^\n'
+    '    symbol:   variable undefinedVar\n'
+    '    location: class Main\n'
+    '  2 errors\n'
+    '\n'
+    '* Try:\n'
+    '> Check your code and dependencies to fix the compilation error(s)\n'
+    '> Run with --scan to get full insights.\n'
+    '\n'
+    'BUILD FAILED in 1s\n'
+    '1 actionable task: 1 executed\n'
+)
+
+_M_BANNER = re.compile(r"^\[INFO\] -+< (\S+):(\S+) >-+$")
+_M_BUILDING = re.compile(r"^\[INFO\] Building (.*?) (\S+)\s+\[(\d+)/(\d+)\]$")
+_M_HEAD = re.compile(r"^\[INFO\] \[(\d+)/(\d+)\] (.*?) (\S+)$")
+_M_FROM = re.compile(r"^\[INFO\]   from \S+$")
+_M_PKG = re.compile(r"^\[INFO\] -+\[ \S+ \]-+$")
+_M_GOAL = re.compile(r"^\[INFO\] --- (\S+:\S+:\S+) \(([^)]*)\) @ (\S+) ---$")
+_M_GOALS = "[INFO]   goals: "
+_M_NOOP = [re.compile(p) for p in (r"^\[INFO\] skip non existing resourceDirectory .*$", r"^\[INFO\] Nothing to compile - all classes are up to date\.?$",
+                                   r"^\[INFO\] No sources to compile$", r"^\[INFO\] No tests to run\.$", r"^\[INFO\] Using '.*' encoding to copy filtered resources\.$",
+                                   r"^\[INFO\] Copying \d+ resources?( from .* to .*)?$")]
+_M_END = re.compile(r"^\[INFO\] Reactor Summary for ")
+_M_RULE = re.compile(r"^\[INFO\] -{40,}$")
+_M_ADVICE = [re.compile(p) for p in (r"^\[ERROR\] To see the full stack trace of the errors, re-run Maven with the -e switch\.$", r"^\[ERROR\] Re-run Maven using the -X switch to enable full debug logging\.$",
+                                     r"^\[ERROR\] For more information about the errors and possible solutions, please read the following articles:$")]
+_M_ADV_TAG = "[ERROR] [ctxprune: -e/-X/help advice elided]"
+_G_ADVICE = [re.compile(p) for p in (r"^> Run with --stacktrace option to get the stack trace\.$", r"^> Run with --info or --debug option to get more log output\.$", r"^> Run with --scan to get full insights\.$",
+                                     r"^> Get more help at https://help\.gradle\.org\.?$", r"^\* Get more help at https://help\.gradle\.org$")]
+_G_ADV_TAG = "> [ctxprune: --stacktrace/--info/--scan/help elided]"
+_G_DEPR = [re.compile(p) for p in (r"^You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins\.$",
+                                   r"^For more on this, please refer to https://docs\.gradle\.org/\S+ in the Gradle documentation\.$")]
+_G_DEPR_TAG = "[ctxprune: deprecation advisory elided]"
+
+
+def _m_noop(l: str) -> bool:
+    return any(rx.match(l) for rx in _M_NOOP)
+
+
+def _m_stanza(lines: list[str]) -> list[str]:
+    if not any(_M_BUILDING.match(l) for l in lines):
+        return lines
+    out: list[str] = []
+    goals: list = []  # [header, kept lines]
+    bare: list[str] = []
+
+    def flush_goals():
+        nonlocal goals, bare
+        for header, kept in goals:
+            if kept:
+                if bare:
+                    out.append(_M_GOALS + ", ".join(bare))
+                    bare = []
+                out.extend([header] + kept)
+            else:
+                bare.append(_M_GOAL.match(header).group(1))
+        goals = []
+
+    for l in lines:
+        if m := _M_BUILDING.match(l):
+            flush_goals()
+            if bare:
+                out.append(_M_GOALS + ", ".join(bare))
+                bare = []
+            out.append(f"[INFO] [{m.group(3)}/{m.group(4)}] {m.group(1)} {m.group(2)}")
+        elif _M_BANNER.match(l) or _M_FROM.match(l) or _M_PKG.match(l) or l == "[INFO] " or _m_noop(l):
+            continue
+        elif _M_GOAL.match(l):
+            goals.append([l, []])
+        elif goals:
+            goals[-1][1].append(l)
+        else:
+            flush_goals()
+            if bare:
+                out.append(_M_GOALS + ", ".join(bare))
+                bare = []
+            out.append(l)
+    flush_goals()
+    if bare:
+        out.append(_M_GOALS + ", ".join(bare))
+    return out
+
+
+def trim_build_tool(text: str) -> str:
+    lines = text.split("\n")
+    n = len(lines)
+    out, i = [], 0
+    while i < n:
+        if _M_BANNER.match(lines[i]):
+            j = i + 1
+            while j < n and not _M_BANNER.match(lines[j]) and not _M_END.match(lines[j]):
+                j += 1
+            if j < n and _M_END.match(lines[j]) and _M_RULE.match(lines[j - 1]):
+                j -= 1
+            out += _m_stanza(lines[i:j])
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    # constant advice lines -> one tag per family, only when that is shorter than what it replaces
+    families = [(_M_ADVICE, _M_ADV_TAG), (_G_ADVICE, _G_ADV_TAG), (_G_DEPR, _G_DEPR_TAG)]
+    active = []
+    for rxs, tag in families:
+        total = sum(len(l) + 1 for l in out if any(rx.match(l) for rx in rxs))
+        if total > len(tag) + 1:
+            active.append((rxs, tag))
+    res, done = [], set()
+    k = 0
+    while k < len(out):
+        l = out[k]
+        fam = next((f for f in active if any(rx.match(l) for rx in f[0])), None)
+        if fam is None:
+            res.append(l)
+        else:
+            if fam[1] not in done:
+                res.append(fam[1])
+                done.add(fam[1])
+            if fam[0] is _M_ADVICE and k + 1 < len(out) and out[k + 1] == "[ERROR] ":
+                k += 1
+        k += 1
+    return shrink_only(text, "\n".join(res))
+
+
+def probes_224(text: str) -> dict:
+    modules, goals, wl, summary, gradle, other = [], [], [], [], [], []
+    cur = None
+    for l in text.split("\n"):
+        if m := _M_BUILDING.match(l):
+            modules.append((m.group(1), m.group(2), int(m.group(3)), int(m.group(4))))
+            cur = m.group(1)
+        elif m := _M_HEAD.match(l):
+            modules.append((m.group(3), m.group(4), int(m.group(1)), int(m.group(2))))
+            cur = m.group(3)
+        elif m := _M_GOAL.match(l):
+            goals.append((cur, m.group(1)))
+        elif l.startswith(_M_GOALS):
+            goals += [(cur, g) for g in l[len(_M_GOALS):].split(", ")]
+        elif l in (_M_ADV_TAG, _G_ADV_TAG, _G_DEPR_TAG) or any(rx.match(l) for rx in _M_ADVICE + _G_ADVICE + _G_DEPR):
+            continue
+        elif l.strip() != "[ERROR]" and re.match(r"^\[(?:WARNING|ERROR)\]", l) or re.search(r"Tests run:", l) or re.match(r"^\[INFO\] BUILD |^\[INFO\] (?:Total time|Finished at)", l):
+            wl.append(l)
+        elif re.match(r"^\[INFO\] (?:Reactor Summary|\S+ \.+ (?:SUCCESS|FAILURE|SKIPPED))", l):
+            summary.append(l)
+        elif re.match(r"^(?:> Task |FAILURE: |BUILD (?:FAILED|SUCCESSFUL)|\d+ actionable tasks?|\* What went wrong|Execution failed|> |  \S|Deprecated Gradle)", l) or l.startswith("* Try:"):
+            gradle.append(l)
+        elif l.startswith("[INFO]") and not (_M_BANNER.match(l) or _M_FROM.match(l) or _M_PKG.match(l) or l == "[INFO] " or _m_noop(l) or _M_RULE.match(l)):
+            other.append(l)
+    return {"modules in order (name, version, i, n)": modules, "goals run per module": goals, "warnings, errors, test and build result lines": wl,
+            "reactor summary lines": summary, "gradle tasks, error text and result": gradle, "other INFO lines": other}
+
+
+case(
+    224,
+    claim="Each Maven module stanza loses its banner, 'from pom', packaging rule, blank INFO lines and no-op results ('Nothing to compile', 'No tests to run', 'skip non existing resourceDirectory') and becomes '[INFO] [i/n] name version' plus one 'goals:' line (a goal with output keeps its full header and lines); the constant -e/-X/help paragraph of a Maven failure and the constant --stacktrace/--info/--scan/help and deprecation lines of a Gradle failure become one tag each. Module order, goals run, WARNING/ERROR/test lines, the Reactor Summary, the failing module and goal, and Gradle's task and error text are unchanged.",
+    loses="the execution ids ('(default-compile)'), the '@ module' repeat and decorative rules of each goal header, the no-op result lines, and the constant advice text (which --stacktrace/-e/-X/--scan do; the saved original keeps it)",
+    encode=trim_build_tool,
+    probes=probes_224,
+    fixtures=lambda: [
+        Fixture("mvn verify, 11-module reactor, all green (real, Maven 3.9.11)", MVN_REACTOR_OK, True),
+        Fixture("mvn verify, mod-7 fails to compile; reactor summary and failure footer last (real)", MVN_REACTOR_FAIL, True),
+        Fixture("gradle build, compileJava fails: Gradle 8.14 prints a single constant Try line, so the tag is not worth it (real)", GRADLE_COMPILE_FAIL, None),
+        Fixture("mvn -q: a single line of output", "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project api: There are test failures.\n", False),
+        Fixture("not a build log", "hello\n[INFO] this is a plain log line\n> Task is not a gradle line\n", False),
+        Fixture("gradle 7.x style footer: a task-specific Try line next to four constant ones (reconstructed from memory)", "FAILURE: Build failed with an exception.\n\n* What went wrong:\nTask 'foo' not found in root project 'demo'.\n\n* Try:\n> Run gradle tasks to get a list of available tasks.\n> Run with --stacktrace option to get the stack trace.\n> Run with --info or --debug option to get more log output.\n> Run with --scan to get full insights.\n> Get more help at https://help.gradle.org.\n\nDeprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.\n\nYou can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.\n\nFor more on this, please refer to https://docs.gradle.org/8.5/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.\n\nBUILD FAILED in 520ms\n", True),
+        Fixture("a banner with no 'Building' line and a text that looks like the tags", "[INFO] --------------------< a:b >---------------------\n[INFO] something else\n[ERROR] [ctxprune: standard Maven -e/-X/help advice elided]\n", None),
+    ],
+    min_gain=0.3,
 )
 
 

@@ -4346,3 +4346,1187 @@ case(
     ],
     min_gain=0.3,
 )
+
+
+# ===============================================================================================================
+# #1161 CloudTrail to one-line digests. `{"Records": [...]}` (S3 delivery) and `aws cloudtrail lookup-events` (`{"Events": [...]}` whose
+# CloudTrailEvent is the same record as a JSON string). One line per event: time, principal, source IP, service:action and the
+# request parameters (the resource identity); an event with an errorCode additionally keeps its full record on the next line.
+# The idea's own digest omits the source IP, which its Test question ('from which IP') needs, so the IP is part of the line here.
+# reconstructed from memory (no AWS account here)
+
+def _principal(r: dict) -> str:
+    ui = r.get("userIdentity") if isinstance(r.get("userIdentity"), dict) else {}
+    for k in ("arn", "userName", "principalId", "invokedBy", "type"):
+        if isinstance(ui.get(k), str) and ui[k]:
+            return ui[k]
+    return "unknown"
+
+
+def _ct_ok(r) -> bool:
+    return (isinstance(r, dict) and all(isinstance(r.get(k), str) and r[k] and " " not in r[k] for k in ("eventTime", "eventSource", "eventName", "sourceIPAddress"))
+            and " " not in _principal(r))
+
+
+def _ct_line(r: dict) -> list[str]:
+    svc = r["eventSource"].split(".")[0]
+    line = f"{r['eventTime']} {_principal(r)} {r['sourceIPAddress']} {svc}:{r['eventName']} {_jline(r.get('requestParameters'))}"
+    if r.get("errorCode"):
+        return [line + f" ERR {r['errorCode']}", "  " + _jline(r)]
+    return [line]
+
+
+def _ct_records(doc):
+    if isinstance(doc, dict) and isinstance(doc.get("Records"), list):
+        return "Records", doc["Records"], {k: v for k, v in doc.items() if k != "Records"}
+    if isinstance(doc, dict) and isinstance(doc.get("Events"), list):
+        recs = []
+        for e in doc["Events"]:
+            r = json.loads(e["CloudTrailEvent"])
+            if not (isinstance(r, dict) and e.get("EventName") == r.get("eventName") and e.get("EventSource") == r.get("eventSource") and e.get("EventId") == r.get("eventID")):
+                return None
+            recs.append(r)
+        return "Events", recs, {k: v for k, v in doc.items() if k != "Events"}
+    return None
+
+
+def digest_cloudtrail(text: str) -> str:
+    try:
+        doc = json.loads(text)
+        got = _ct_records(doc)
+    except Exception:  # noqa: BLE001
+        return text
+    if got is None or not got[1]:
+        return text
+    kind, recs, other = got
+    out = [f"# cloudtrail {kind}: {len(recs)} events; one line each (time, principal, source IP, service:action, request parameters); events with an errorCode keep the full record on the next line"]
+    for r in recs:
+        if _ct_ok(r):
+            out += _ct_line(r)
+        else:
+            out.append("FULL " + _jline(r))
+    if other:
+        out.append(f"# other keys: {_jline(other)}")
+    res = keep_nl(text, "\n".join(out))
+    return res if len(res) < len(text) else text
+
+
+def _ct_facts(r: dict) -> tuple:
+    return (r.get("eventTime"), _principal(r), r.get("sourceIPAddress"), f"{str(r.get('eventSource')).split('.')[0]}:{r.get('eventName')}", r.get("requestParameters"), r.get("errorCode"))
+
+
+def probes_1161(text: str) -> dict:
+    recs: list = []
+    try:
+        if text.startswith("# cloudtrail "):
+            lines = text.rstrip("\n").split("\n")[1:]
+            other = {}
+            i = 0
+            while i < len(lines):
+                l = lines[i]
+                if l.startswith("FULL "):
+                    recs.append(json.loads(l[5:]))
+                elif l.startswith("# other keys: "):
+                    other = json.loads(l[len("# other keys: "):])
+                elif l.startswith("  {"):
+                    pass
+                else:
+                    ts, who, ip, act, rest = l.split(" ", 4)
+                    params, end = json.JSONDecoder().raw_decode(rest)
+                    err = rest[end + 5:] if rest[end:].startswith(" ERR ") else None
+                    full = json.loads(lines[i + 1][2:]) if err else None
+                    recs.append(full if full is not None else {"eventTime": ts, "userIdentity": {"arn": who}, "sourceIPAddress": ip, "eventSource": act.split(":")[0] + ".amazonaws.com",
+                                                                 "eventName": act.split(":", 1)[1], "requestParameters": params})
+                i += 1
+        else:
+            got = _ct_records(json.loads(text))
+            if got is None:
+                return {"format": "other", "text": text}
+            _, recs, other = got
+    except Exception:  # noqa: BLE001
+        return {"parse": "failed"}
+    failed = [r for r in recs if r.get("errorCode")]
+    return {"events (time, principal, ip, action, request parameters, error)": [_ct_facts(r) for r in recs],
+            "failed events with every field": failed, "who did what from where": sorted({(_principal(r), r.get("sourceIPAddress"), r.get("eventName")) for r in recs}, key=repr),
+            "other keys": other}
+
+
+def _ct_record(k: int, who: str, name: str, ip: str, params: dict, err: str | None = None) -> dict:
+    r = {"eventVersion": "1.09", "userIdentity": {"type": "AssumedRole", "principalId": f"AROAEXAMPLE{k}:{who}", "arn": f"arn:aws:sts::123456789012:assumed-role/Admin/{who}",
+         "accountId": "123456789012", "accessKeyId": "ASIAEXAMPLE" + str(k), "sessionContext": {"sessionIssuer": {"type": "Role", "principalId": "AROAEXAMPLE", "arn": "arn:aws:iam::123456789012:role/Admin",
+         "accountId": "123456789012", "userName": "Admin"}, "attributes": {"creationDate": "2025-03-04T08:00:00Z", "mfaAuthenticated": "true"}}},
+         "eventTime": f"2025-03-04T10:{15 + k:02d}:02Z", "eventSource": "s3.amazonaws.com", "eventName": name, "awsRegion": "us-east-1", "sourceIPAddress": ip,
+         "userAgent": "[aws-cli/2.15.0 Python/3.11.6 Linux/6.1.0 exe/x86_64.ubuntu.22 prompt/off command/s3api." + name.lower() + "]", "requestParameters": params,
+         "responseElements": None, "additionalEventData": {"SignatureVersion": "SigV4", "CipherSuite": "ECDHE-RSA-AES128-GCM-SHA256", "bytesTransferredIn": 0, "AuthenticationMethod": "AuthHeader",
+         "x-amz-id-2": _sha(f"id2{k}", 40), "bytesTransferredOut": 1024 * (k + 1)}, "requestID": _sha(f"req{k}", 16).upper(), "eventID": _sha(f"evt{k}", 32),
+         "readOnly": name.startswith(("Get", "List")), "resources": [{"type": "AWS::S3::Object", "ARN": f"arn:aws:s3:::{params.get('bucketName', 'b')}/{params.get('key', '')}"}],
+         "eventType": "AwsApiCall", "managementEvent": False, "recipientAccountId": "123456789012", "eventCategory": "Data",
+         "tlsDetails": {"tlsVersion": "TLSv1.3", "cipherSuite": "TLS_AES_128_GCM_SHA256", "clientProvidedHostHeader": f"{params.get('bucketName', 'b')}.s3.us-east-1.amazonaws.com"}}
+    if err:
+        r["errorCode"], r["errorMessage"] = err, "User: " + r["userIdentity"]["arn"] + " is not authorized to perform: s3:" + name
+    return r
+
+
+def _ct_events(n: int = 10, lookup: bool = False) -> str:
+    recs = []
+    for k in range(n):
+        if k == 0:
+            recs.append(_ct_record(k, "alice", "DeleteObject", "203.0.113.9", {"bucketName": "acme-prod-data", "key": "exports/2025-03/customers.csv", "Host": "acme-prod-data.s3.us-east-1.amazonaws.com"}))
+        elif k == n // 2:
+            recs.append(_ct_record(k, "bob", "GetObject", "198.51.100.23", {"bucketName": "acme-prod-secrets", "key": "db/password.txt"}, err="AccessDenied"))
+        elif k == n - 1:
+            recs.append(_ct_record(k, "carol", "PutBucketPolicy", "192.0.2.77", {"bucketName": "acme-prod-data", "policy": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject"}]}}))
+        else:
+            recs.append(_ct_record(k, "dave", "GetObject", f"198.51.100.{k}", {"bucketName": "acme-prod-data", "key": f"reports/r{k}.pdf"}))
+    if lookup:
+        evs = [{"EventId": r["eventID"], "EventName": r["eventName"], "ReadOnly": str(r["readOnly"]).lower(), "AccessKeyId": r["userIdentity"]["accessKeyId"], "EventTime": 1741083302.0 + k,
+                "EventSource": r["eventSource"], "Username": r["userIdentity"]["arn"].rsplit("/", 1)[1], "Resources": [{"ResourceType": "AWS::S3::Object", "ResourceName": r["resources"][0]["ARN"].split(":::")[1]}],
+                "CloudTrailEvent": json.dumps(r, separators=(",", ":"))} for k, r in enumerate(recs)]
+        return json.dumps({"Events": evs, "NextToken": "eyJOZXh0VG9rZW4iOiBudWxs"}, indent=4) + "\n"
+    return json.dumps({"Records": recs}, indent=2) + "\n"
+
+
+case(
+    1161,
+    claim="Each CloudTrail event (from Records or from lookup-events) becomes one line with time, principal, source IP, service:action and its request parameters; an event with an errorCode also keeps its complete record, so who did what to which resource from which IP, and every field of every denied call, are unchanged.",
+    loses="userIdentity.sessionContext, tlsDetails, additionalEventData, requestID, eventID, userAgent, responseElements, resources and recipientAccountId of successful events; the lookup-events envelope fields (EventId, ReadOnly, AccessKeyId, Username, Resources) that repeat the record",
+    encode=digest_cloudtrail,
+    probes=probes_1161,
+    fixtures=[
+        Fixture("CloudTrail Records: a delete first, a denied GetObject in the middle, a public bucket policy last", _ct_events(10), True),
+        Fixture("aws cloudtrail lookup-events, 8 events", _ct_events(8, lookup=True), True),
+        Fixture("negative: lookup-events --query EventName", json.dumps(["GetObject", "DeleteObject"], indent=4) + "\n", False),
+        Fixture("negative: a Records document with no events", json.dumps({"Records": []}) + "\n", False),
+    ],
+    min_gain=0.5,
+)
+
+
+# ===============================================================================================================
+# #1164 macOS `log show` default style: drop the Thread, Activity and TTL columns, hoist date, zone and PID, mark non-Default types.
+# reconstructed from memory (no macOS here). Probes parse each line of the original and of the rendering into (date, time, zone, type,
+# pid, process, message) and compare them; Error and Fault lines keep their PID inline.
+
+_LOG = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d\.\d{6})([+-]\d{4}) +(0x[0-9a-f]+) +(\w+) +(0x[0-9a-f]+) +(\d+) +(\d+) +(\S.*)$")
+_LOGHDR = re.compile(r"^Timestamp +Thread +Type +Activity +PID +TTL *$")
+_PROC = re.compile(r"^[\w.\- ]+$")
+_TYPE_LETTER = {"Error": "E", "Fault": "F", "Info": "I", "Debug": "D"}
+_LETTER_TYPE = {v: k for k, v in _TYPE_LETTER.items()}
+
+
+def render_log_show(text: str) -> str:
+    lines = text.split("\n")
+    if any(l.startswith(("# date ", "# pids: ", "# log show")) for l in lines):
+        return text
+    rows = []
+    for l in lines:
+        m = _LOG.match(l)
+        proc, sep, msg = (m.group(9).partition(": ") if m else ("", "", ""))
+        rows.append((m, proc, msg) if m and sep and _PROC.match(proc) else None)
+    if not any(rows):
+        return text
+    pids: dict[str, set] = defaultdict(set)
+    for r in rows:
+        if r:
+            pids[r[1]].add(r[0].group(7))
+    legend = {p: next(iter(v)) for p, v in pids.items() if len(v) == 1}
+    out = []
+    cur = None
+    started = False
+    for l, r in zip(lines, rows):
+        if _LOGHDR.match(l):
+            continue
+        if r is None:
+            out.append(l)
+            continue
+        m, proc, msg = r
+        if not started:
+            out.append("# log show: thread, activity and TTL dropped; pids from the legend unless shown as proc[pid]; type letter E, F, I or D only when not Default")
+            out.append("# pids: " + "; ".join(f"{p}={v}" for p, v in legend.items()))
+            started = True
+        if cur != (m.group(1), m.group(3)):
+            out.append(f"# date {m.group(1)} tz {m.group(3)}")
+            cur = (m.group(1), m.group(3))
+        typ = m.group(5)
+        inline = typ in _TYPE_LETTER and typ != "Info" and typ != "Debug" or proc not in legend
+        letter = f"{_TYPE_LETTER[typ]} " if typ in _TYPE_LETTER else ""
+        out.append(f"{m.group(2)} {letter}{proc}{'[' + m.group(7) + ']' if inline else ''}: {msg}" if typ == "Default" or typ in _TYPE_LETTER else l)
+        if typ not in _TYPE_LETTER and typ != "Default":
+            out[-1] = l  # an unknown type is not guessed at: keep the whole line
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+_RENDERED = re.compile(r"^(\d\d:\d\d:\d\d\.\d{6}) (?:([EFID]) )?([\w.\- ]+?)(?:\[(\d+)\])?: (.*)$")
+
+
+def probes_1164(text: str) -> dict:
+    date = tz = None
+    legend: dict = {}
+    rows, raw, errors = [], [], []
+    for line in text.split("\n"):
+        m = _LOG.match(line)
+        if m and (m.group(9).partition(": ")[1]):
+            proc, _, msg = m.group(9).partition(": ")
+            rows.append((m.group(1), m.group(2), m.group(3), m.group(5), int(m.group(7)), proc, msg))
+            continue
+        if line.startswith("# pids: "):
+            legend = {}
+            for kv in line[len("# pids: "):].split("; "):
+                if "=" in kv:
+                    k, v = kv.rsplit("=", 1)
+                    legend[k] = int(v)
+            continue
+        if line.startswith("# date "):
+            _, _, d, _, z = line.split(" ", 4)
+            date, tz = d, z
+            continue
+        if line.startswith("# log show:") or _LOGHDR.match(line):
+            continue
+        r = _RENDERED.match(line)
+        if r and date is not None and (r.group(4) is not None or r.group(3) in legend):
+            pid = int(r.group(4)) if r.group(4) is not None else legend[r.group(3)]
+            rows.append((date, r.group(1), tz, _LETTER_TYPE.get(r.group(2), "Default"), pid, r.group(3), r.group(5)))
+            continue
+        raw.append(line)
+    for d, t, z, ty, pid, proc, msg in rows:
+        if ty in ("Error", "Fault"):
+            errors.append((d, t, ty, pid, proc, msg))
+    return {"every line: date, time, zone, type, pid, process, message": rows, "error and fault lines with pid": errors, "other lines": raw,
+            "processes and their pids": sorted({(r[5], r[4]) for r in rows})}
+
+
+def _log_show(n: int = 24) -> str:
+    procs = [("kernel", 0, "", ""), ("myd", 1234, "(libsystem_info.dylib) ", "[com.example.app:network] "), ("Safari", 412, "(WebKit) ", "[com.apple.WebKit:Loading] "), ("Safari", 5120, "(WebKit) ", "[com.apple.WebKit:Process] ")]
+    out = ['Filtering the log data using "process == \\"myd\\" OR process == \\"Safari\\""', "Skipping info and debug messages, pass --info and/or --debug to include.",
+           "Timestamp                       Thread     Type        Activity             PID    TTL  "]
+    for k in range(n):
+        proc, pid, lib, sub = procs[k % 4]
+        day, sec = ("2025-03-04", 2 + k) if k < n - 3 else ("2025-03-05", k - (n - 3))
+        typ = "Error" if k in (0, n // 2) else "Fault" if k == n - 1 else "Default"
+        msg = {0: "connection to payments:8443 failed: Operation timed out", n // 2: "NSURLErrorDomain -1001: the request timed out", n - 1: "assertion failed: file descriptor leak"}.get(k, f"request {k} completed in {5 + k} ms")
+        out.append(f"{day} 09:{15 + sec // 60:02d}:{sec % 60:02d}.{(123456 * (k + 1)) % 1000000:06d}-0800 0x{0x1f2a + k * 3:x}     {typ:<11} 0x0{'':<17} {pid:<6} 0    {proc}: {lib}{sub}{msg}")
+    return "\n".join(out) + "\n"
+
+
+case(
+    1164,
+    claim="Each default-style log show line becomes 'time [E|F|I|D ]process[pid]: message' with date and zone in '# date' lines, a legend of unique pids, and the type letter and inline pid kept for Error and Fault lines; thread, activity and TTL columns are dropped, so every line's date, time, zone, type, pid, process and message (including its subsystem and category text) survive.",
+    loses="the thread id, activity id and TTL columns of every line",
+    encode=render_log_show,
+    probes=probes_1164,
+    fixtures=[
+        Fixture("24 lines, three processes (Safari with two pids), errors first, middle and a Fault last, midnight rollover", _log_show(24), True),
+        Fixture("negative: --style compact output", "2025-03-04 09:15:02.123 Df myd[1234:1f2a] (libsystem_info.dylib) [com.example.app:network] request 1 completed\n2025-03-04 09:15:03.456 E  Safari[412:1f2d] [com.apple.WebKit:Loading] failed\n", False),
+        Fixture("negative: no matching lines", "Filtering the log data using \"process == \\\"nosuch\\\"\"\nTimestamp                       Thread     Type        Activity             PID    TTL  \n", False),
+    ],
+    min_gain=0.25,
+)
+
+
+# ===============================================================================================================
+# #1170 Windows Event XML to one flat line per event: `time channel id computer [provider] [Lnn] Name=value ...` for the Data elements whose
+# value is not '-' or empty (values with spaces, quotes or '=' are double-quoted with \ escapes). Probes parse the original with ElementTree
+# and the flat line with a tokenizer. reconstructed from memory (no Windows here).
+
+_NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
+_EVENT = re.compile(r"<Event\b[^>]*>.*?</Event>", re.S)
+
+
+def _q(v: str) -> str:
+    if v and all(c.isprintable() and c not in ' "=\\' for c in v):
+        return v
+    return '"' + v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + '"'
+
+
+def _event_fields(chunk: str):
+    root = ET.fromstring(chunk)
+    sysel = root.find(_NS + "System")
+    if root.tag != _NS + "Event" or sysel is None:
+        return None
+    g = lambda t: (sysel.findtext(_NS + t) or "")  # noqa: E731
+    tc = sysel.find(_NS + "TimeCreated")
+    prov = sysel.find(_NS + "Provider")
+    if tc is None or prov is None or not g("EventID") or not g("Channel") or not g("Computer"):
+        return None
+    ed = root.find(_NS + "EventData")
+    kv: list[tuple[str, str]] = []
+    if ed is not None:
+        n = 0
+        for el in ed:
+            if el.tag == _NS + "Data":
+                n += 1
+                name, val = el.get("Name") or f"#{n}", el.text or ""
+                if val not in ("", "-"):
+                    kv.append((name, val))
+            elif el.tag == _NS + "Binary":
+                kv.append(("Binary", el.text or ""))
+            else:
+                return None
+    if any(c.tag not in (_NS + "System", _NS + "EventData", _NS + "RenderingInfo") for c in root):
+        return None
+    return tc.get("SystemTime"), g("Channel"), g("EventID"), g("Computer"), prov.get("Name") or "", g("Level"), kv
+
+
+def flatten_events(text: str) -> str:
+    def one(m):
+        st, en, src = m.start(), m.end(), m.string
+        if (st > 0 and src[st - 1] != "\n") or (en < len(src) and src[en] != "\n"):
+            return m.group(0)  # an event must own its line, or the flat line would glue onto its neighbours
+        try:
+            f = _event_fields(m.group(0))
+        except ET.ParseError:
+            return m.group(0)
+        if f is None or not f[0] or " " in f[0] + f[1] + f[2] + f[3] or not f[4] or "]" in f[4] or "\n" in f[4] or "\r" in f[4]:
+            return m.group(0)
+        t, ch, eid, comp, prov, lvl, kv = f
+        head = f"{t} {ch} {eid} {comp} [{prov}]" + (f" L{lvl}" if lvl not in ("0", "4", "") else "")
+        return head + "".join(f" {k}={_q(v)}" for k, v in kv if k and " " not in k and "=" not in k) if all(k and " " not in k and "=" not in k for k, _ in kv) else m.group(0)
+
+    res = _EVENT.sub(one, text)
+    return res if len(res) < len(text) else text
+
+
+_FLAT = re.compile(r"^(\S+) (\S+) (\d+) (\S+) \[([^\]\n]+)\]( L\d+)?((?: [^\s=]+=(?:\"(?:[^\"\\]|\\.)*\"|[^\s\"]*))*)$")
+_KV = re.compile(r'([^\s=]+)=("(?:[^"\\]|\\.)*"|[^\s"]*)')
+
+
+def _unq(v: str) -> str:
+    if v.startswith('"'):
+        out, i = [], 1
+        while i < len(v) - 1:
+            if v[i] == "\\":
+                i += 1
+                out.append({"n": "\n", "r": "\r", "t": "\t"}.get(v[i], v[i]))
+            else:
+                out.append(v[i])
+            i += 1
+        return "".join(out)
+    return v
+
+
+def probes_1170(text: str) -> dict:
+    evs, other = [], []
+
+    def gap(t: str):
+        for l in t.split("\n"):
+            if not l.strip():
+                continue
+            fm = _FLAT.match(l)
+            if fm:
+                kv = [(k, _unq(v)) for k, v in _KV.findall(fm.group(7) or "")]
+                evs.append((fm.group(1), fm.group(2), fm.group(3), fm.group(4), fm.group(5), (fm.group(6) or "").strip()[1:], sorted(kv)))
+            else:
+                other.append(l)
+
+    pos = 0
+    for m in _EVENT.finditer(text):
+        gap(text[pos:m.start()])
+        pos = m.end()
+        try:
+            f = _event_fields(m.group(0))
+        except ET.ParseError:
+            f = None
+        evs.append(("raw", m.group(0)) if f is None else (f[0], f[1], f[2], f[3], f[4], f[5] if f[5] not in ("0", "4", "") else "", sorted(f[6])))
+    gap(text[pos:])
+    return {"events (time, channel, id, computer, provider, level, non-dash data)": sorted(evs, key=repr), "other lines": other,
+            "failed logons (user, domain, ip)": sorted((dict(e[6]).get("TargetUserName"), dict(e[6]).get("TargetDomainName"), dict(e[6]).get("IpAddress"))
+                                                       for e in evs if len(e) > 2 and e[2] == "4625")}
+
+
+def _win_event(eid: str, channel: str, prov: str, guid: str, comp: str, level: int, t: str, data: list, rec: int, binary: str | None = None) -> str:
+    d = "".join(f'<Data Name="{n}">{v}</Data>' if n else f"<Data>{v}</Data>" for n, v in data) + (f"<Binary>{binary}</Binary>" if binary else "")
+    return (f'<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="{prov}" Guid="{{{guid}}}"/><EventID>{eid}</EventID><Version>0</Version><Level>{level}</Level>'
+            f'<Task>12546</Task><Opcode>0</Opcode><Keywords>0x8010000000000000</Keywords><TimeCreated SystemTime="{t}"/><EventRecordID>{rec}</EventRecordID>'
+            f'<Correlation ActivityID="{{{_uuid("act" + str(rec))}}}"/><Execution ProcessID="652" ThreadID="{1200 + rec % 50}"/><Channel>{channel}</Channel><Computer>{comp}</Computer><Security/></System>'
+            f"<EventData>{d}</EventData></Event>")
+
+
+def _win_events() -> str:
+    sec = ("Microsoft-Windows-Security-Auditing", "54849625-5478-4994-A5BA-3E3B0328C30D", "DC01.corp.example.com")
+
+    def fail(user, ip, rec, t):
+        return _win_event("4625", "Security", *sec[:2], sec[2], 0, t, [("SubjectUserSid", "S-1-0-0"), ("SubjectUserName", "-"), ("SubjectDomainName", "-"), ("SubjectLogonId", "0x0"),
+                          ("TargetUserSid", "S-1-0-0"), ("TargetUserName", user), ("TargetDomainName", "CORP"), ("Status", "0xc000006d"), ("FailureReason", "%%2313"), ("SubStatus", "0xc000006a"),
+                          ("LogonType", "3"), ("LogonProcessName", "NtLmSsp "), ("AuthenticationPackageName", "NTLM"), ("WorkstationName", "WS-0042"), ("TransitedServices", "-"),
+                          ("PackageName", "-"), ("KeyLength", "0"), ("ProcessId", "0x0"), ("ProcessName", "-"), ("IpAddress", ip), ("IpPort", "51234")], rec)
+    ok = _win_event("4624", "Security", *sec[:2], sec[2], 0, "2025-03-04T10:15:05.5000000Z", [("SubjectUserSid", "S-1-5-18"), ("SubjectUserName", "DC01$"), ("SubjectDomainName", "CORP"),
+                    ("TargetUserSid", "S-1-5-21-1-2-3-1105"), ("TargetUserName", "bob"), ("TargetDomainName", "CORP"), ("LogonType", "3"), ("IpAddress", "10.0.0.7"), ("IpPort", "49152"),
+                    ("ProcessName", "-"), ("WorkstationName", "-")], 1234571)
+    scm = _win_event("7034", "System", "Service Control Manager", "555908d1-a6d7-4695-8e1e-26931d2012f4", "WS-0042.corp.example.com", 2, "2025-03-04T10:15:09.0000000Z",
+                     [("param1", "Print Spooler"), ("param2", "1")], 88112, binary="530070006F006F006C00650072000000")
+    unnamed = _win_event("1000", "Application", "Application Error", "a0e9b4e1-0000-0000-0000-000000000001", "WS-0042.corp.example.com", 2, "2025-03-04T10:15:11.0000000Z",
+                         [("", "app.exe"), ("", "1.2.3.4"), ("", 'C:\\Program Files\\App "x"\\app.exe'), ("", "")], 88113)
+    evs = [fail("alice", "203.0.113.9", 1234567, "2025-03-04T10:15:02.1234567Z"), fail("bob", "198.51.100.23", 1234568, "2025-03-04T10:15:03.2000000Z"), ok, scm, unnamed,
+           fail("mallory", "192.0.2.77", 1234580, "2025-03-04T10:15:12.9000000Z")]
+    return "\n".join(evs) + "\n"
+
+
+case(
+    1170,
+    claim="Each Windows event XML becomes one line with time, channel, EventID, computer, provider, the level when it is not 0 or 4, and Name=value for every Data or Binary element whose value is not '-' or empty (quoted when needed); parsing the original and the line gives the same time, channel, id, computer, provider, level and Name/value set, including the failing user and source IP of a 4625.",
+    loses="provider GUID, Version, Task, Opcode, Keywords, EventRecordID, Correlation, Execution, the Security element and Data elements whose value is '-' or empty",
+    encode=flatten_events,
+    probes=probes_1170,
+    fixtures=[
+        Fixture("six events: failed logon first, a success, a service crash, an unnamed-Data application error, a failed logon last", _win_events(), True),
+        Fixture("negative: Event Viewer text rendering", "Log Name:      Security\nSource:        Microsoft-Windows-Security-Auditing\nEvent ID:      4625\nTask Category: Logon\nLevel:         Information\n", False),
+        Fixture("negative: an Event whose EventData holds a nested element is not flattened", '<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="X"/><EventID>1</EventID><TimeCreated SystemTime="2025-03-04T10:15:02Z"/><Channel>Application</Channel><Computer>h</Computer></System><EventData><ComplexData><A>1</A></ComplexData></EventData></Event>\n', False),
+    ],
+    min_gain=0.5,
+)
+
+
+# Real captures of `cargo test` on a 3-test crate (two failures) in this container with RUST_BACKTRACE=0 and =1 (cargo 1.97.0). The =full
+# run (26,353 chars, 10,805 o200k tokens) was measured but is not embedded.
+_CARGO_BT0 = r'''   Compiling ledger v0.1.0 (/tmp/claude-0/-home-user-ctxprune/d7bbec31-4626-52ed-8422-7b4860cedd2e/scratchpad/ext/ci_infra_cloud/crate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.59s
+     Running unittests src/lib.rs (target/debug/deps/ledger-8b2411f4a0f0f4f3)
+
+running 3 tests
+test tests::deposit_adds ... ok
+test tests::transfer_moves_money ... FAILED
+test tests::transfer_from_unknown_account ... FAILED
+
+failures:
+
+---- tests::transfer_moves_money stdout ----
+
+thread 'tests::transfer_moves_money' (4793) panicked at src/lib.rs:49:9:
+assertion `left == right` failed
+  left: 20
+ right: 25
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::transfer_from_unknown_account stdout ----
+
+thread 'tests::transfer_from_unknown_account' (4792) panicked at src/lib.rs:17:33:
+unknown account
+
+
+failures:
+    tests::transfer_from_unknown_account
+    tests::transfer_moves_money
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+'''
+_CARGO_BT1 = r'''    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/ledger-8b2411f4a0f0f4f3)
+
+running 3 tests
+test tests::deposit_adds ... ok
+test tests::transfer_from_unknown_account ... FAILED
+test tests::transfer_moves_money ... FAILED
+
+failures:
+
+---- tests::transfer_from_unknown_account stdout ----
+
+thread 'tests::transfer_from_unknown_account' (4808) panicked at src/lib.rs:17:33:
+unknown account
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_display::<&str>
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:259:5
+   3: core::option::expect_failed
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/option.rs:2257:5
+   4: <core::option::Option<&i64>>::expect
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/option.rs:968:21
+   5: <ledger::Ledger>::balance_of
+             at ./src/lib.rs:17:33
+   6: <ledger::Ledger>::transfer
+             at ./src/lib.rs:21:25
+   7: ledger::tests::transfer_from_unknown_account
+             at ./src/lib.rs:55:11
+   8: ledger::tests::transfer_from_unknown_account::{closure#0}
+             at ./src/lib.rs:53:39
+   9: <ledger::tests::transfer_from_unknown_account::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+  10: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests::transfer_moves_money stdout ----
+
+thread 'tests::transfer_moves_money' (4809) panicked at src/lib.rs:49:9:
+assertion `left == right` failed
+  left: 20
+ right: 25
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:439:17
+   3: core::panicking::assert_failed::<i64, i64>
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:394:5
+   4: ledger::tests::transfer_moves_money
+             at ./src/lib.rs:49:9
+   5: ledger::tests::transfer_moves_money::{closure#0}
+             at ./src/lib.rs:45:30
+   6: <ledger::tests::transfer_moves_money::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    tests::transfer_from_unknown_account
+    tests::transfer_moves_money
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `--lib`
+'''
+_CARGO_FULL_TOKENS = 10805
+
+
+# ===============================================================================================================
+# #1235 Digest cloud CLI debug traces: kubectl -v=8 (glog lines) and aws --debug (botocore log records). Kept: one digest line per request
+# (method, URL, status, latency), the verbatim request and response bodies of a failed (>=400) request, every other non-request line,
+# credential and retry events, tracebacks and the final error. Folded: request and response header dumps and 2xx bodies (dropped), runs of
+# three or more kubectl discovery GETs (one count line), botocore hook, loader and signing noise (one count line). TF_LOG is not covered.
+# reconstructed from memory (no cluster or AWS account here)
+
+_GLOG = re.compile(r"^([IWEF])(\d{4}) (\d\d:\d\d:\d\d\.\d{6})\s+(\d+) (\S+:\d+)\] (.*)$")
+_KREQ = re.compile(r"^(GET|POST|PUT|PATCH|DELETE|HEAD) (https?://\S+)$")
+_KSTATUS = re.compile(r"^Response Status: (.+?)(?: in (\d+) milliseconds)?$")
+_KBODY = re.compile(r"^(?:Request|Response) Body: ")
+_KHDR = re.compile(r"^(?:(?:Request|Response) Headers:|    [\w-]+: .*)$")
+_KDISC = re.compile(r"^https?://[^/]+/(?:api|apis|api/[^/?]+|apis/[^/?]+/[^/?]+|openapi/v3)\?timeout=\d+s$")
+_KDIG = re.compile(r"^(\S+) (GET|POST|PUT|PATCH|DELETE|HEAD) (\S+) -> (.*?) in (\d+)ms$|^(\S+) (GET|POST|PUT|PATCH|DELETE|HEAD) (\S+) -> \(no status line\)$")
+_KFOLD = re.compile(r"^(\S+) discovery: (\d+) GETs \((.*); slowest (\d+)ms\)$")
+
+
+def _code(status: str):
+    m = re.match(r"^(\d{3})\b", status)
+    return int(m.group(1)) if m else None
+
+
+def digest_kubectl_trace(text: str) -> str:
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        g = _GLOG.match(lines[i])
+        r = _KREQ.match(g.group(6)) if g else None
+        if not r:
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        status, ms, kept_bodies = None, None, []
+        while j < len(lines):
+            gj = _GLOG.match(lines[j])
+            if not gj:
+                break
+            m = gj.group(6)
+            if _KREQ.match(m):
+                break
+            if (s := _KSTATUS.match(m)) and status is None:
+                status, ms = s.group(1), s.group(2)
+            elif _KBODY.match(m):
+                kept_bodies.append(lines[j])
+            elif not _KHDR.match(m):
+                break
+            j += 1
+        c = _code(status) if status else None
+        head = f"{g.group(3)} {r.group(1)} {r.group(2)} -> " + (f"{status} in {ms}ms" if status and ms is not None else "(no status line)")
+        if status and ms is None:
+            out += lines[i:j]  # a status without a latency does not fit the digest grammar: keep the group as it was
+        else:
+            out.append(head)
+            if c is not None and c >= 400:
+                out += kept_bodies
+        i = j
+    # fold runs of discovery digests
+    res, k = [], 0
+    while k < len(out):
+        d = _KDIG.match(out[k])
+        if d and d.group(2) and _KDISC.match(d.group(3)):
+            e = k
+            while e < len(out) and (dd := _KDIG.match(out[e])) and dd.group(2) and _KDISC.match(dd.group(3)) and (_code(dd.group(4)) or 0) < 400:
+                e += 1
+            if e - k >= 3:
+                sts = Counter(_KDIG.match(l).group(4) for l in out[k:e])
+                slow = max(int(_KDIG.match(l).group(5)) for l in out[k:e])
+                res.append(f"{d.group(1)} discovery: {e - k} GETs (" + ", ".join(f"{s} x{n}" for s, n in sorted(sts.items())) + f"; slowest {slow}ms)")
+                k = e
+                continue
+        res.append(out[k])
+        k += 1
+    final = "\n".join(res)
+    return final if len(final) < len(text) else text
+
+
+def probes_kubectl(text: str) -> dict:
+    reqs, disc, fails, other = [], [], [], []
+    cur = None
+
+    def close():
+        nonlocal cur
+        if cur is not None:
+            c = _code(cur["status"]) if cur["status"] else None
+            if cur["disc"] and (c is None or c < 400):
+                disc.append((cur["status"], cur["ms"]))
+            else:
+                reqs.append((cur["method"], cur["url"], cur["status"], cur["ms"]))
+            if c is not None and c >= 400:
+                fails.append((cur["url"], cur["bodies"]))
+        cur = None
+
+    for line in text.split("\n"):
+        f = _KFOLD.match(line)
+        if f:
+            close()
+            for part in f.group(3).split(", "):
+                st, n = part.rsplit(" x", 1)
+                disc += [(st, None)] * int(n)
+            disc.append(("slowest", int(f.group(4))))
+            continue
+        d = _KDIG.match(line)
+        if d:
+            close()
+            if d.group(2):
+                cur = {"method": d.group(2), "url": d.group(3), "status": d.group(4), "ms": int(d.group(5)), "bodies": [], "disc": bool(_KDISC.match(d.group(3)))}
+            else:
+                cur = {"method": d.group(7), "url": d.group(8), "status": None, "ms": None, "bodies": [], "disc": bool(_KDISC.match(d.group(8)))}
+            continue
+        g = _GLOG.match(line)
+        m = g.group(6) if g else None
+        if g and (r := _KREQ.match(m)):
+            close()
+            cur = {"method": r.group(1), "url": r.group(2), "status": None, "ms": None, "bodies": [], "disc": bool(_KDISC.match(r.group(2)))}
+        elif cur is not None and g and (s := _KSTATUS.match(m)) and cur["status"] is None and s.group(2) is not None:
+            cur["status"], cur["ms"] = s.group(1), int(s.group(2))
+        elif cur is not None and g and _KBODY.match(m):
+            cur["bodies"].append(line)
+        elif cur is not None and g and _KHDR.match(m):
+            continue
+        else:
+            close()
+            other.append(line)
+    close()
+    stat = Counter(s for s, n in disc if s != "slowest")
+    slow = max([ms for s, ms in disc if s == "slowest"] + [ms for s, ms in disc if s != "slowest" and ms is not None] + [-1])
+    return {"requests (method, url, status, ms)": reqs, "discovery GETs by status, slowest ms": (sorted(stat.items(), key=repr), slow),
+            "bodies of failed requests": fails, "every other line": other}
+
+
+_BREC = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) - (\S+) - ([\w.]+) - (DEBUG|INFO|WARNING|ERROR) - (.*)$")
+_BSTATUS = re.compile(r'^(https?://\S+) "(\w+) (\S+) HTTP/[\d.]+" (\d{3}) (\S+)$')
+_BDIG = re.compile(r"^(\S+ \S+) request (\w+) (\w+) (\S+)$")
+_BDROP = re.compile(r"^# dropped (\d+) debug records: (.*)$")
+
+
+def digest_aws_debug(text: str) -> str:
+    lines = text.split("\n")
+    if any(_BDIG.match(l) or _BDROP.match(l) for l in lines):
+        return text
+    recs: list[list[str]] = []
+    pre: list[list[str]] = []
+    for l in lines:
+        if _BREC.match(l):
+            recs.append([l])
+        elif recs:
+            recs[-1].append(l)
+        else:
+            pre.append([l])
+    out = [x for p in pre for x in p]
+    dropped: Counter = Counter()
+    last = None
+    summary_at = None
+    for r in recs:
+        m = _BREC.match(r[0])
+        ts, logger, lvl, msg = m.group(1), m.group(3), m.group(4), m.group(5)
+        body = "\n".join([msg] + r[1:])
+        keep = False
+        if logger == "botocore.endpoint" and msg.startswith("Making request for OperationModel(name="):
+            op = re.match(r"Making request for OperationModel\(name=(\w+)\)", msg)
+            me, url = re.search(r"'method': '(\w+)'", msg), re.search(r"'url': '([^']+)'", msg)
+            if op and me and url and len(r) == 1:
+                out.append(f"{ts} request {op.group(1)} {me.group(1)} {url.group(1)}")
+                continue
+            keep = True
+        elif logger == "urllib3.connectionpool" and _BSTATUS.match(msg):
+            last = int(_BSTATUS.match(msg).group(4))
+            keep = True
+        elif logger == "botocore.parsers" and msg.startswith("Response body"):
+            keep = last is not None and last >= 400
+        elif logger == "botocore.parsers" and msg.startswith("Response headers"):
+            keep = False
+        elif logger in ("awscli.clidriver", "botocore.credentials"):
+            keep = True
+        elif logger == "botocore.retryhandler":
+            keep = msg != "No retry needed."
+        elif logger == "botocore.endpoint":
+            keep = bool(re.search(r"retry|sleep", msg, re.I))
+        elif lvl in ("WARNING", "ERROR") or re.search(r"Traceback|Exception", body):
+            keep = True
+        if keep:
+            out += r
+        else:
+            dropped[logger] += 1
+            if summary_at is None:
+                summary_at = len(out)
+                out.append("")
+    if summary_at is not None:
+        out[summary_at] = f"# dropped {sum(dropped.values())} debug records: " + ", ".join(f"{k} x{v}" for k, v in sorted(dropped.items(), key=lambda kv: (-kv[1], kv[0])))
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def probes_aws_debug(text: str) -> dict:
+    reqs, statuses, errbodies, auth, retries, cli, other, errs = [], [], [], [], [], [], [], []
+    cur = None  # (logger, msg, [continuation])
+    last = None
+
+    def close():
+        nonlocal cur, last
+        if cur is None:
+            return
+        ts, logger, lvl, msg, cont = cur
+        body = "\n".join([msg] + cont)
+        if logger == "urllib3.connectionpool" and (s := _BSTATUS.match(msg)):
+            last = int(s.group(4))
+            statuses.append((ts, s.group(2), s.group(3), last))
+        elif logger == "botocore.parsers" and msg.startswith("Response body"):
+            if last is not None and last >= 400:
+                errbodies.append((ts, body))
+        elif logger == "botocore.credentials":
+            auth.append((ts, msg))
+        elif logger == "botocore.retryhandler" and msg != "No retry needed.":
+            retries.append((ts, msg))
+        elif logger == "botocore.endpoint" and re.search(r"retry|sleep", msg, re.I) and not msg.startswith("Making request for"):
+            retries.append((ts, msg))
+        elif logger == "awscli.clidriver":
+            cli.append((ts, body))
+        elif lvl in ("WARNING", "ERROR") or re.search(r"Traceback|Exception", body):
+            errs.append((ts, logger, body))
+        cur = None
+
+    for line in text.split("\n"):
+        m = _BREC.match(line)
+        if m:
+            close()
+            ts, logger, lvl, msg = m.group(1), m.group(3), m.group(4), m.group(5)
+            if logger == "botocore.endpoint" and (o := re.match(r"Making request for OperationModel\(name=(\w+)\)", msg)):
+                me, url = re.search(r"'method': '(\w+)'", msg), re.search(r"'url': '([^']+)'", msg)
+                if me and url:
+                    reqs.append((ts, o.group(1), me.group(1), url.group(1)))
+                    continue
+            cur = (ts, logger, lvl, msg, [])
+            continue
+        d = _BDIG.match(line)
+        if d:
+            close()
+            reqs.append((d.group(1), d.group(2), d.group(3), d.group(4)))
+            continue
+        if _BDROP.match(line):
+            close()
+            continue
+        if cur is not None:
+            cur[4].append(line)
+        else:
+            other.append(line)
+    close()
+    return {"requests (time, operation, method, url)": reqs, "http statuses": statuses, "bodies of failed responses": errbodies, "credential events": auth,
+            "retry events": retries, "cli driver records": cli, "warnings, errors, tracebacks": errs, "lines outside records": other}
+
+
+def _kubectl_trace(failure: bool = False, n_disc: int = 40) -> str:
+    out = ["I0304 10:15:02.001000   12345 loader.go:373] Config loaded from file:  /home/user/.kube/config"]
+    t = [2]
+
+    def ts():
+        t[0] += 1
+        return f"10:15:{t[0] // 1000:02d}.{t[0] % 1000:03d}000"
+
+    def req(method, url, status, ms, body=None, rbody=None):
+        s = [f"I0304 {ts()}   12345 round_trippers.go:463] {method} {url}", f"I0304 {ts()}   12345 round_trippers.go:469] Request Headers:",
+             f"I0304 {ts()}   12345 round_trippers.go:473]     Accept: application/json;as=Table;v=v1;g=meta.k8s.io,application/json;as=Table;v=v1beta1;g=meta.k8s.io,application/json",
+             f"I0304 {ts()}   12345 round_trippers.go:473]     User-Agent: kubectl/v1.30.0 (linux/amd64) kubernetes/7c48c2b"]
+        if rbody:
+            s.append(f"I0304 {ts()}   12345 request.go:1212] Request Body: {rbody}")
+        s += [f"I0304 {ts()}   12345 round_trippers.go:574] Response Status: {status} in {ms} milliseconds", f"I0304 {ts()}   12345 round_trippers.go:577] Response Headers:",
+              f"I0304 {ts()}   12345 round_trippers.go:580]     Audit-Id: {_uuid(url + str(t[0]))}", f"I0304 {ts()}   12345 round_trippers.go:580]     Cache-Control: no-cache, private",
+              f"I0304 {ts()}   12345 round_trippers.go:580]     Content-Type: application/json", f"I0304 {ts()}   12345 round_trippers.go:580]     Date: Tue, 04 Mar 2025 10:15:02 GMT"]
+        if body:
+            s.append(f"I0304 {ts()}   12345 request.go:1212] Response Body: {body}")
+        return s
+
+    api = "https://127.0.0.1:6443"
+    out += req("GET", f"{api}/api/v1/namespaces/default/pods?limit=500", "200 OK", 24, body='{"kind":"Table","apiVersion":"meta.k8s.io/v1","metadata":{"resourceVersion":"190233"},"columnDefinitions":[{"name":"Name","type":"string"}],"rows":[{"cells":["web-6d8f7c9b5-x2k9p"]}]}')
+    for k in range(n_disc):
+        path = "/api" if k == 0 else "/apis" if k == 1 else f"/apis/group{k}.example.com/v1" if k % 2 else f"/api/v{k}"
+        out += req("GET", f"{api}{path}?timeout=32s", "200 OK" if k != 7 else "304 Not Modified", 2 + k % 9, body='{"kind":"APIGroupList","apiVersion":"v1","groups":[]}')
+    if failure:
+        out += req("GET", f"{api}/api/v1/namespaces/kube-system/secrets?limit=500", "403 Forbidden", 12,
+                   body='{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"secrets is forbidden: User \\"alice\\" cannot list resource \\"secrets\\" in API group \\"\\" in the namespace \\"kube-system\\"","reason":"Forbidden","details":{"kind":"secrets"},"code":403}')
+        out.append('E0304 10:15:03.900000   12345 memcache.go:265] couldn\'t get current server API group list: Get "https://127.0.0.1:6443/api?timeout=32s": dial tcp 127.0.0.1:6443: connect: connection refused')
+        out.append('Error from server (Forbidden): secrets is forbidden: User "alice" cannot list resource "secrets" in API group "" in the namespace "kube-system"')
+    else:
+        out += req("GET", f"{api}/api/v1/namespaces/default/services?limit=500", "200 OK", 18, body='{"kind":"Table","rows":[]}')
+    return "\n".join(out) + "\n"
+
+
+def _aws_debug(failure: bool = False) -> str:
+    out = ["2025-03-04 10:15:02,100 - MainThread - awscli.clidriver - DEBUG - CLI version: aws-cli/2.15.0 Python/3.11.6 Linux/6.1.0 exe/x86_64.ubuntu.22 prompt/off",
+           "2025-03-04 10:15:02,101 - MainThread - awscli.clidriver - DEBUG - Arguments entered to CLI: ['s3', 'ls', '--debug']"]
+    for k in range(40):
+        out.append(f"2025-03-04 10:15:02,{110 + k:03d} - MainThread - botocore.hooks - DEBUG - Event session-initialized: calling handler <function handler_{k} at 0x7f3a2c{k:04x}>")
+    out += ["2025-03-04 10:15:02,200 - MainThread - botocore.credentials - DEBUG - Looking for credentials via: env",
+            "2025-03-04 10:15:02,201 - MainThread - botocore.credentials - INFO - Found credentials in shared credentials file: ~/.aws/credentials"]
+    for k in range(6):
+        out.append(f"2025-03-04 10:15:02,{210 + k:03d} - MainThread - botocore.loaders - DEBUG - Loading JSON file: /usr/local/aws-cli/v2/2.15.0/dist/awscli/botocore/data/s3/2006-03-01/endpoint-rule-set-{k}.json")
+    out += ["2025-03-04 10:15:02,300 - MainThread - botocore.endpoint - DEBUG - Making request for OperationModel(name=ListBuckets) with params: {'url_path': '/', 'query_string': '', 'method': 'GET', "
+            "'headers': {'User-Agent': 'aws-cli/2.15.0'}, 'body': b'', 'url': 'https://s3.us-east-1.amazonaws.com/', 'context': {'client_region': 'us-east-1'}}",
+            "2025-03-04 10:15:02,301 - MainThread - botocore.auth - DEBUG - Calculating signature using v4 auth.",
+            "2025-03-04 10:15:02,301 - MainThread - botocore.auth - DEBUG - CanonicalRequest:", "GET", "/", "", "host:s3.us-east-1.amazonaws.com", "x-amz-date:20250304T101502Z", "",
+            "2025-03-04 10:15:02,306 - MainThread - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): s3.us-east-1.amazonaws.com:443"]
+    if failure:
+        out += ['2025-03-04 10:15:02,455 - MainThread - urllib3.connectionpool - DEBUG - https://s3.us-east-1.amazonaws.com:443 "GET / HTTP/1.1" 403 None',
+                "2025-03-04 10:15:02,456 - MainThread - botocore.parsers - DEBUG - Response headers: {'x-amz-request-id': 'ABC', 'Content-Type': 'application/xml'}",
+                "2025-03-04 10:15:02,456 - MainThread - botocore.parsers - DEBUG - Response body:",
+                "b'<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<Error><Code>AccessDenied</Code><Message>Access Denied</Message><RequestId>ABC</RequestId></Error>'",
+                "2025-03-04 10:15:02,460 - MainThread - botocore.hooks - DEBUG - Event needs-retry.s3.ListBuckets: calling handler <bound method RetryHandler.needs_retry>",
+                "2025-03-04 10:15:02,461 - MainThread - botocore.retryhandler - DEBUG - No retry needed.",
+                "2025-03-04 10:15:02,470 - MainThread - awscli.clidriver - DEBUG - Exception caught in main()", "Traceback (most recent call last):",
+                '  File "awscli/clidriver.py", line 460, in main', "botocore.exceptions.ClientError: An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied", "",
+                "An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied"]
+    else:
+        out += ['2025-03-04 10:15:02,455 - MainThread - urllib3.connectionpool - DEBUG - https://s3.us-east-1.amazonaws.com:443 "GET / HTTP/1.1" 200 None',
+                "2025-03-04 10:15:02,456 - MainThread - botocore.parsers - DEBUG - Response headers: {'x-amz-id-2': 'abc', 'Content-Type': 'application/xml'}",
+                "2025-03-04 10:15:02,456 - MainThread - botocore.parsers - DEBUG - Response body:", "b'<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<ListAllMyBucketsResult><Buckets><Bucket><Name>acme-prod</Name></Bucket></Buckets></ListAllMyBucketsResult>'",
+                "2025-03-04 10:15:02,461 - MainThread - botocore.retryhandler - DEBUG - No retry needed.", "2025-03-04 acme-prod"]
+    return "\n".join(out) + "\n"
+
+
+case(
+    1235,
+    claim="For kubectl -v=8 output, each request becomes one 'time METHOD url -> status in Nms' line, header dumps and 2xx bodies are dropped, the request and response bodies and the final error of a failed request stay verbatim, and runs of three or more discovery GETs become one count line; for aws --debug, requests become one digest line while HTTP status lines, credential and retry events, the failed response body, tracebacks and the final error stay verbatim and hook, loader and signing noise becomes one count line.",
+    loses="request and response headers, 2xx response bodies, per-request detail of discovery GETs, the botocore signing, hook and loader records and 'No retry needed' lines; TF_LOG output is not handled",
+    encode=lambda t: digest_aws_debug(t) if _BREC.search(t) and not _GLOG.search(t) else digest_kubectl_trace(t),
+    probes=lambda t: probes_aws_debug(t) if _BREC.search(t) or _BDIG.search(t) or _BDROP.search(t) else probes_kubectl(t),
+    fixtures=[
+        Fixture("kubectl get pods -v=8 with 40 discovery GETs, then a list", _kubectl_trace(), True),
+        Fixture("kubectl get secrets -v=8 failing with 403 at the end", _kubectl_trace(failure=True), True),
+        Fixture("aws s3 ls --debug, success", _aws_debug(), True),
+        Fixture("aws s3 ls --debug, AccessDenied: status, body, traceback and error at the end", _aws_debug(failure=True), True),
+        Fixture("negative: kubectl -v=6 prints one line per request already", "I0304 10:15:02.134567   12345 round_trippers.go:553] GET https://127.0.0.1:6443/api/v1/namespaces/default/pods?limit=500 200 OK in 24 milliseconds\nNAME   READY   STATUS\nweb    1/1     Running\n", False),
+        Fixture("negative: plain command output", "NAME   READY   STATUS\nweb    1/1     Running\n", False),
+    ],
+    min_gain=0.4,
+)
+
+
+# ===============================================================================================================
+# #1158 Fold `xcrun simctl list` and xcodebuild destination errors; bound bare `adb shell dumpsys`.
+# simctl: devices of an `-- Unavailable: runtime --` section become one count line; Device Types, Device Pairs and unavailable runtimes fold to
+# counts; every available runtime keeps every device with its UDID and state (an agent needs the UDID). xcodebuild: the 'Ineligible
+# destinations' block and placeholder destinations fold to counts, every eligible destination stays. dumpsys: each `DUMP OF SERVICE x:` section
+# keeps its first 3 lines and a '[N more lines omitted; run: dumpsys x]' line, the service list stays. reconstructed from memory (no Mac, no adb).
+
+_UDID = r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
+_SIMDEV = re.compile(rf"^    (.+) \(({_UDID})\) \((Booted|Shutdown|Shutting Down|Creating)\)(?: \((unavailable[^)]*)\))? *$")
+_SIMSEC = re.compile(r"^-- (.+) --$")
+_SIMTOP = re.compile(r"^== (Device Types|Runtimes|Devices|Device Pairs) ==$")
+_DUMPSYS = re.compile(r"^DUMP OF SERVICE ([\w.:/\-]+):$")
+_DSEP = "-" * 79
+
+
+def fold_device_lists(text: str) -> str:
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        l = lines[i]
+        if _SIMTOP.match(l) and l in ("== Device Types ==", "== Device Pairs =="):
+            j = i + 1
+            while j < n and not _SIMTOP.match(lines[j]) and lines[j].strip():
+                j += 1
+            cnt = j - i - 1
+            out.append(l if cnt < 3 else f"{l} ({cnt} lines omitted)")
+            if cnt < 3:
+                out += lines[i + 1:j]
+            i = j
+            continue
+        m = _SIMSEC.match(l)
+        if m and m.group(1).startswith("Unavailable: "):
+            j = i + 1
+            while j < n and _SIMDEV.match(lines[j]):
+                j += 1
+            if j - i - 1 >= 1:
+                out.append(f"-- {m.group(1)} -- ({j - i - 1} devices omitted)")
+                i = j
+                continue
+        if re.match(r"^\S.* \(\S+ - \S+\) - \S+ \(unavailable[^)]*\)$", l):
+            j = i + 1
+            while j < n and re.match(r"^\S.* \(\S+ - \S+\) - \S+ \(unavailable[^)]*\)$", lines[j]):
+                j += 1
+            out.append(f"({j - i} unavailable runtimes omitted)" if j - i >= 2 else l)
+            i = j if j - i >= 2 else i + 1
+            continue
+        if l.strip() == "Ineligible destinations" or re.match(r'^\tIneligible destinations for the ".*" scheme:$', l):
+            j = i + 1
+            while j < n and lines[j].startswith("\t\t{"):
+                j += 1
+            out.append(f"{l} ({j - i - 1} omitted)" if j - i - 1 >= 2 else l)
+            if j - i - 1 < 2:
+                out += lines[i + 1:j]
+            i = j
+            continue
+        if _DUMPSYS.match(l) and i > 0 and lines[i - 1] == _DSEP:
+            j = i + 1
+            while j < n and not (lines[j] == _DSEP and j + 1 < n and _DUMPSYS.match(lines[j + 1])):
+                j += 1
+            body = lines[i + 1:j]
+            while body and not body[-1].strip():
+                body = body[:-1]
+            out.append(l)
+            if len(body) > 4:
+                out += body[:3] + [f"    [{len(body) - 3} more lines omitted; run: dumpsys {_DUMPSYS.match(l).group(1)}]"]
+                out += lines[i + 1 + len(body):j]
+            else:
+                out += lines[i + 1:j]
+            i = j
+            continue
+        out.append(l)
+        i += 1
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+_UNAV_RT = re.compile(r"^\S.* \(\S+ - \S+\) - \S+ \(unavailable[^)]*\)$")
+_OMIT_DEV = re.compile(r"^-- (Unavailable: .+) -- \((\d+) devices omitted\)$")
+_OMIT_LINES = re.compile(r"^(== Device Types ==|== Device Pairs ==) \((\d+) lines omitted\)$")
+_OMIT_RT = re.compile(r"^\((\d+) unavailable runtimes omitted\)$")
+_OMIT_DEST = re.compile(r"^(.*Ineligible destinations.*) \((\d+) omitted\)$")
+_OMIT_DUMP = re.compile(r"^    \[(\d+) more lines omitted; run: dumpsys (\S+)\]$")
+
+
+def probes_1158(text: str) -> dict:
+    lines = text.split("\n")
+    top, sec = None, None
+    devices, unavailable, counts, runtimes_unavail, dests, inelig = [], Counter(), {}, 0, [], 0
+    services, svc_in, sections, cur = [], False, [], None
+    other = []
+    for l in lines:
+        t = _SIMTOP.match(l)
+        if t:
+            top, sec = t.group(1), None
+            continue
+        if (o := _OMIT_LINES.match(l)):
+            counts[o.group(1)] = int(o.group(2))
+            top = o.group(1).strip("= ")
+            continue
+        s = _SIMSEC.match(l)
+        if s and top in ("Devices", "Runtimes", None) or (s and top):
+            sec = s.group(1)
+            continue
+        if (o := _OMIT_DEV.match(l)):
+            unavailable[o.group(1)] += int(o.group(2))
+            sec = None
+            continue
+        d = _SIMDEV.match(l)
+        if d:
+            if sec and sec.startswith("Unavailable: "):
+                unavailable[sec] += 1
+            else:
+                devices.append((sec, d.group(1), d.group(2), d.group(3)))
+            continue
+        if _UNAV_RT.match(l):
+            runtimes_unavail += 1
+            continue
+        if (o := _OMIT_RT.match(l)):
+            runtimes_unavail += int(o.group(1))
+            continue
+        if l.startswith("\t\t{"):
+            (inelig_lines := dests).append(l) if "Ineligible" not in (cur or "") else None
+            inelig += 1 if "Ineligible" in (cur or "") else 0
+            continue
+        if "Ineligible destinations" in l:
+            cur = "Ineligible"
+            m = _OMIT_DEST.match(l)
+            inelig += int(m.group(2)) if m else 0
+            other.append(re.sub(r" \(\d+ omitted\)$", "", l))
+            continue
+        if l.startswith("\tAvailable destinations"):
+            cur = "Available"
+        if l.strip() == "Currently running services:":
+            svc_in = True
+            other.append(l)
+            continue
+        if svc_in and l.startswith("  ") and l.strip():
+            services.append(l.strip())
+            continue
+        m = _DUMPSYS.match(l)
+        if m:
+            svc_in = False
+            cur = None
+            sections.append([m.group(1), [], 0])
+            continue
+        if (o := _OMIT_DUMP.match(l)) and sections:
+            sections[-1][2] += int(o.group(1))
+            continue
+        if sections and l != _DSEP:
+            if len(sections[-1][1]) < 3 and l.strip():
+                sections[-1][1].append(l)
+            elif l.strip():
+                sections[-1][2] += 1
+            continue
+        if l.strip() or True:
+            other.append(l)
+    return {"available devices (runtime, name, udid, state)": devices, "devices omitted per unavailable runtime": sorted(unavailable.items()),
+            "device types and pairs line counts": sorted(counts.items()), "unavailable runtimes": runtimes_unavail, "eligible destinations": dests, "ineligible destination count": inelig,
+            "dumpsys services": services, "dumpsys sections (name, first lines, lines beyond them)": [(a, b, c) for a, b, c in sections],
+            "all other non-blank lines": [x for x in other if x.strip()]}
+
+
+def _simctl(n_unavail: int = 4) -> str:
+    def dev(name, k, state="Shutdown", extra=""):
+        return f"    {name} ({_uuid(f'{name}{k}').upper()}) ({state}){extra} "
+    out = ["== Device Types ==", *[f"iPhone {k} (com.apple.CoreSimulator.SimDeviceType.iPhone-{k})" for k in range(8, 16)], *[f"iPad Pro {k}-inch (com.apple.CoreSimulator.SimDeviceType.iPad-Pro-{k})" for k in (11, 13)],
+           "", "== Runtimes ==", "iOS 17.5 (17.5 - 21F79) - com.apple.CoreSimulator.SimRuntime.iOS-17-5", "iOS 16.4 (16.4 - 20E247) - com.apple.CoreSimulator.SimRuntime.iOS-16-4",
+           *[f"iOS 15.{k} (15.{k} - 19F70) - com.apple.CoreSimulator.SimRuntime.iOS-15-{k} (unavailable, runtime profile not found)" for k in range(1, 4)],
+           "", "== Devices ==", "-- iOS 17.5 --", dev("iPhone SE (3rd generation)", 1), dev("iPhone 15", 2, "Booted"), dev("iPhone 15 Pro", 3), dev("iPad Pro 11-inch (4th generation)", 4), "-- iOS 16.4 --",
+           dev("iPhone 14", 5), dev("iPhone 14 Pro", 6)]
+    for r in range(n_unavail):
+        out += [f"-- Unavailable: com.apple.CoreSimulator.SimRuntime.iOS-15-{r + 1} --"] + [dev(f"iPhone {13 - k}", f"u{r}{k}", extra=" (unavailable, runtime profile not found)") for k in range(5)]
+    out += ["", "== Device Pairs =="]
+    return "\n".join(out) + "\n"
+
+
+def _xcodebuild_dest(n_inelig: int = 5) -> str:
+    out = ["xcodebuild: error: Unable to find a destination matching the provided destination specifier:", "\t\t{ platform:iOS Simulator, OS:latest, name:iPhone 99 }", "",
+           '\tAvailable destinations for the "App" scheme:', "\t\t{ platform:macOS, arch:arm64, variant:Mac Catalyst, id:00006000-001A2B3C4D5E001E, name:My Mac }",
+           f"\t\t{{ platform:iOS Simulator, id:{_uuid('s1').upper()}, OS:17.5, name:iPhone 15 }}", f"\t\t{{ platform:iOS Simulator, id:{_uuid('s2').upper()}, OS:17.5, name:iPhone 15 Pro }}",
+           f"\t\t{{ platform:iOS Simulator, id:{_uuid('s3').upper()}, OS:16.4, name:iPhone 14 }}", "", '\tIneligible destinations for the "App" scheme:',
+           "\t\t{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device, error:iOS 17.5 is not installed. }",
+           "\t\t{ platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }"]
+    out += [f"\t\t{{ platform:iOS Simulator, id:{_uuid(f'x{k}').upper()}, OS:15.{k % 5}, name:iPhone {13 - k % 3}, error:iOS 15.{k % 5} is not installed. }}" for k in range(n_inelig)]
+    return "\n".join(out) + "\n"
+
+
+def _dumpsys(n_sections: int = 8) -> str:
+    names = ["SurfaceFlinger", "accessibility", "activity", "alarm", "audio", "battery", "connectivity", "wifi", "window", "package"][:n_sections]
+    out = ["Currently running services:"] + [f"  {nm}" for nm in names]
+    for k, nm in enumerate(names):
+        out += [_DSEP, f"DUMP OF SERVICE {nm}:"] + [f"  {nm} line {j}: state=ok value={j * (k + 1)}" for j in range(3 + (k * 7) % 25)] + [""]
+    return "\n".join(out) + "\n"
+
+
+case(
+    1158,
+    claim="Folds the devices of unavailable simulator runtimes, the Device Types and Device Pairs listings, unavailable runtimes and xcodebuild's ineligible destinations to counts, and bounds each dumpsys section to 3 lines plus a '[N more lines omitted; run: dumpsys NAME]' marker; every available runtime's devices with name, UDID and state, every eligible destination with its id, the dumpsys service list and section names are unchanged.",
+    loses="the identity of devices in unavailable runtimes, the device type identifiers, ineligible destinations (including their error text), and everything in a dumpsys section after its third line (re-run with the service name)",
+    encode=fold_device_lists,
+    probes=probes_1158,
+    fixtures=[
+        Fixture("xcrun simctl list: available iOS 17.5 and 16.4 devices, four unavailable runtimes with five devices each", _simctl(4), True),
+        Fixture("xcodebuild: no matching destination, five ineligible destinations", _xcodebuild_dest(8), True),
+        Fixture("adb shell dumpsys with no service name: eight sections", _dumpsys(8), True),
+        Fixture("negative: simctl list devices with only available runtimes", "== Devices ==\n-- iOS 17.5 --\n" + "\n".join(f"    iPhone 15 ({_uuid(f'q{k}').upper()}) (Shutdown) " for k in range(3)) + "\n", False),
+        Fixture("negative: adb shell dumpsys battery (one service, short)", _DSEP + "\nDUMP OF SERVICE battery:\n  AC powered: false\n  USB powered: true\n  level: 87\n", False),
+    ],
+    min_gain=0.3,
+)
+
+
+# ===============================================================================================================
+# #1153 Audit inherited verbosity env defaults such as RUST_BACKTRACE=1. A policy (a PreToolUse rewrite driven by the process environment),
+# so a sim. The outputs are REAL: `cargo test` on a 3-test crate with two failures, run here with RUST_BACKTRACE=0 and =1 (this sandbox
+# exports RUST_BACKTRACE=1). The table of variables beyond RUST_BACKTRACE is from memory.
+
+_QUIET = {
+    "RUST_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest)|rustc|cargo build|cargo run)\b")),
+    "RUST_LIB_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest))\b")),
+    "GOTRACEBACK": (lambda v: v in ("all", "system", "crash"), "single", re.compile(r"^\s*(?:cd \S+ && )?(go test)\b")),
+    "RUST_LOG": (lambda v: v in ("debug", "trace"), "warn", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest))\b")),
+}
+
+
+def audit_env(env: dict, command: str) -> dict:
+    """Quiet overrides for the verbosity variables that are inherited noisy, apply to this command, and are not set by the command itself."""
+    out = {}
+    try:
+        for var, (noisy, quiet, applies) in _QUIET.items():
+            v = env.get(var)
+            if isinstance(v, str) and noisy(v) and applies.match(command) and not re.search(rf"\b{var}=", command):
+                out[var] = quiet
+    except Exception:  # noqa: BLE001  (fail open: never block a command because the audit broke)
+        return {}
+    return out
+
+
+def rewrite_command(env: dict, command: str) -> str:
+    try:
+        ov = audit_env(env, command)
+        if not ov:
+            return command
+        m = re.match(r"^(\s*(?:cd \S+ && )?)(.*)$", command, re.S)
+        return m.group(1) + " ".join(f"{k}={v}" for k, v in ov.items()) + " " + m.group(2)
+    except Exception:  # noqa: BLE001
+        return command
+
+
+def _fake_run(command: str, env: dict) -> str:
+    """Stand-in for the shell: the output of `cargo test` is the real capture for the RUST_BACKTRACE in force."""
+    m = re.match(r"^(?:cd \S+ && )?((?:[A-Z_]+=\S+ )*)cargo test", command)
+    if not m:
+        return ""
+    inline = dict(kv.split("=", 1) for kv in m.group(1).split())
+    bt = inline.get("RUST_BACKTRACE", env.get("RUST_BACKTRACE", "0"))
+    return _CARGO_BT1 if bt in ("1", "full") else _CARGO_BT0
+
+
+def _reading(out: str) -> dict:
+    """What an agent needs from a failed cargo test: which tests failed, where, with what message, and the totals."""
+    tests = sorted(re.findall(r"^test (\S+) \.\.\. FAILED$", out, re.M))
+    panics = sorted(re.findall(r"thread '([^']+)' \(\d+\) panicked at (\S+):\n(.*)", out))
+    summary = re.search(r"^test result: (.*?);? finished", out, re.M)
+    return {"failed tests": tests, "panic site and first message line": panics, "test result": summary.group(1) if summary else None, "exit hint": "error: test failed" in out}
+
+
+def sim_1153() -> dict:
+    env = {"RUST_BACKTRACE": "1", "PATH": "/usr/bin", "HOME": "/root"}
+    cmd = "cargo test --offline"
+    new = rewrite_command(env, cmd)
+    assert new == "RUST_BACKTRACE=0 cargo test --offline", new
+    noisy, quiet = _fake_run(cmd, env), _fake_run(new, env)
+    assert noisy == _CARGO_BT1 and quiet == _CARGO_BT0
+    t_noisy, t_quiet = tokens(noisy), tokens(quiet)
+    assert t_quiet <= 0.3 * t_noisy and len(quiet) <= 0.35 * len(noisy), (t_quiet, t_noisy)  # asserted saving; =full is 10,805 tokens measured here
+    # reader view: everything needed to fix the bug is in the quiet output (test names, panic site, assertion text, totals)
+    r0, r1 = _reading(quiet), _reading(noisy)
+    assert r0 == r1 and r0["failed tests"] == ["tests::transfer_from_unknown_account", "tests::transfer_moves_money"], (r0, r1)
+    assert ("tests::transfer_moves_money", "src/lib.rs:49:9:", "assertion `left == right` failed") in r0["panic site and first message line"]
+    # what is lost: the call chain. The panic in balance_of (src/lib.rs:17:33) was reached from transfer at src/lib.rs:21, and only the backtrace says so
+    assert "src/lib.rs:21:25" in noisy and "src/lib.rs:21:25" not in quiet
+    assert "run with `RUST_BACKTRACE=1`" in quiet, "the quiet output must still tell the agent how to get the backtrace for one test"
+    # (c) must NOT apply
+    assert rewrite_command(env, "RUST_BACKTRACE=full cargo test") == "RUST_BACKTRACE=full cargo test", "the command's own setting wins"
+    assert rewrite_command(env, "cargo clippy") == "cargo clippy" and rewrite_command(env, "pytest -x") == "pytest -x"
+    assert rewrite_command({"RUST_BACKTRACE": "0"}, cmd) == cmd and rewrite_command({}, cmd) == cmd
+    assert rewrite_command({"GOTRACEBACK": "all"}, cmd) == cmd, "a Go variable does not touch a cargo command"
+    assert rewrite_command({"GOTRACEBACK": "all"}, "go test ./...") == "GOTRACEBACK=single go test ./..."
+    assert rewrite_command({"RUST_BACKTRACE": "1", "RUST_LOG": "trace"}, "cd app && cargo test") == "cd app && RUST_BACKTRACE=0 RUST_LOG=warn cargo test"
+    # (d) fail open
+    assert rewrite_command({"RUST_BACKTRACE": 1}, cmd) == cmd and rewrite_command(None, cmd) == cmd and rewrite_command(env, None) is None
+    return {"quiet_tokens": t_quiet, "noisy_tokens": t_noisy, "full_backtrace_tokens_measured": _CARGO_FULL_TOKENS, "saving_vs_backtrace_1": round(1 - t_quiet / t_noisy, 2),
+            "saving_vs_full": round(1 - t_quiet / _CARGO_FULL_TOKENS, 2), "chars": f"{len(noisy)}->{len(quiet)}"}
+
+
+case(
+    1153,
+    claim="A PreToolUse rewrite prefixes a cargo test or go test command with the quiet value of an inherited RUST_BACKTRACE, RUST_LIB_BACKTRACE, GOTRACEBACK or RUST_LOG when the environment has a noisy one and the command does not set it itself; on real cargo output the failed tests, panic sites, messages and totals are identical at a quarter of the tokens, only the call chain is lost, and non-test commands, explicit settings, quiet or missing variables and a broken audit leave the command untouched.",
+    sim=sim_1153,
+)

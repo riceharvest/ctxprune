@@ -4746,3 +4746,906 @@ case(
     ],
     min_gain=0.3,
 )
+
+# ===============================================================================================================
+# #728 Digest HAR files to one line per request (HAR 1.2 as exported by Chrome DevTools; reconstructed from memory).
+# 'METHOD url status ms Nbytes type' per entry; failed (status >= 400 or 0), slow (>= 1000 ms), the 5 slowest (ties included),
+# XHR/fetch, documents, redirects and non-GET rows stay, with the first 160 characters of a text body on failed, slow and XHR
+# rows; successful static GETs (script, stylesheet, image, font, media) fold into one 'static (N requests: ...)' line.
+
+_HAR_ROW = re.compile(r"^([A-Z]+) (\S+) (\d{3}) (\d+)ms (\d+)B (\S+)$")
+_HAR_BODY = re.compile(r'^  body: (".*")$')
+_HAR_STATIC = re.compile(r"^static \((\d+) requests: ((?:[a-z]+=\d+ ?)+)\): (\d+)B, slowest (\d+)ms$")
+_HAR_HEAD = re.compile(r"^HAR (\d+) entries, (\d+)B transferred$")
+_STATIC_TYPES = {"script", "stylesheet", "image", "font", "media"}
+_MIME_TYPE = (("text/html", "document"), ("javascript", "script"), ("text/css", "stylesheet"), ("image/", "image"), ("font", "font"), ("json", "xhr"))
+
+
+def _har_type(e: dict) -> str:
+    t = e.get("_resourceType")
+    if isinstance(t, str) and t.isalpha():
+        return t.lower()
+    mime = ((e.get("response") or {}).get("content") or {}).get("mimeType", "")
+    return next((v for k, v in _MIME_TYPE if k in mime), "other")
+
+
+def _har_entries(d):
+    try:
+        es = d["log"]["entries"]
+        out = []
+        for e in es:
+            req, resp = e["request"], e["response"]
+            status = resp["status"]
+            if not isinstance(req["method"], str) or not req["method"].isalpha() or not req["method"].isupper() or not isinstance(req["url"], str) or not req["url"] or any(c.isspace() for c in req["url"]):
+                return None
+            if isinstance(status, bool) or not isinstance(status, int) or not 0 <= status <= 999 or isinstance(e["time"], bool) or not isinstance(e["time"], (int, float)) or not 0 <= e["time"] < 1e9:
+                return None
+            size = resp.get("_transferSize", (resp.get("content") or {}).get("size", 0))
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                size = max(0, int(resp.get("bodySize", 0) or 0)) if isinstance(resp.get("bodySize", 0), int) else 0
+            out.append((req["method"], req["url"], status, round(e["time"]), size, _har_type(e), e))
+        return out if out else None
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def _har_body(e: dict) -> str | None:
+    c = (e.get("response") or {}).get("content") or {}
+    t = c.get("text")
+    if isinstance(t, str) and c.get("encoding") != "base64" and t:
+        return t[:160]
+    return None
+
+
+def digest_har(text: str) -> str:
+    if not text.lstrip().startswith("{") or '"entries"' not in text:
+        return text
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return text
+    ents = _har_entries(d)
+    if ents is None:
+        return text
+    times = sorted((r[3] for r in ents), reverse=True)
+    top_cut = times[min(4, len(times) - 1)]
+    rows, static = [], []
+    for r in ents:
+        m, u, st, ms, size, ty, e = r
+        keep = st >= 400 or st == 0 or ms >= 1000 or ms >= top_cut or ty not in _STATIC_TYPES or m != "GET" or st not in (200, 304)
+        (rows if keep else static).append(r)
+    out = [f"HAR {len(ents)} entries, {sum(r[4] for r in ents)}B transferred"]
+    placed = False
+    for r in ents:
+        m, u, st, ms, size, ty, e = r
+        if r in static:
+            if not placed:
+                placed = True
+                hist = Counter(x[5] for x in static)
+                out.append(f"static ({len(static)} requests: " + " ".join(f"{k}={v}" for k, v in sorted(hist.items())) + f"): {sum(x[4] for x in static)}B, slowest {max(x[3] for x in static)}ms")
+            continue
+        out.append(f"{m} {u} {st} {ms}ms {size}B {ty}")
+        if (st >= 400 or st == 0 or ms >= 1000 or ty in ("xhr", "fetch")) and (b := _har_body(e)):
+            out.append("  body: " + json.dumps(b, ensure_ascii=False))
+    res = "\n".join(out) + "\n"
+    return res if len(res) < len(text) else text
+
+
+def probes_728(text: str) -> dict:
+    """Reader view from the JSON (walk the entries) or from the digest (parse rows): totals, failures, slowest five, XHR rows, type histogram."""
+    rows: list[tuple] = []  # (method, url, status, ms, bytes, type)
+    hist: Counter = Counter()
+    n_static = bytes_static = 0
+    total_bytes = None
+    try:
+        d = json.loads(text) if text.lstrip().startswith("{") else None
+    except ValueError:
+        d = None
+    ents = _har_entries(d) if d is not None else None
+    bodies: dict[int, str] = {}
+    if ents is not None:
+        for i, r in enumerate(ents):
+            rows.append(r[:6])
+            hist[r[5]] += 1
+        total_bytes = sum(r[4] for r in ents)
+        n_entries = len(ents)
+    else:
+        n_entries = None
+        lines = text.split("\n")
+        for l in lines:
+            if (m := _HAR_ROW.match(l)):
+                rows.append((m.group(1), m.group(2), int(m.group(3)), int(m.group(4)), int(m.group(5)), m.group(6)))
+                hist[m.group(6)] += 1
+            elif (m := _HAR_STATIC.match(l)):
+                n_static += int(m.group(1))
+                bytes_static += int(m.group(3))
+                for kv in m.group(2).split():
+                    k, v = kv.split("=")
+                    hist[k] += int(v)
+            elif (m := _HAR_HEAD.match(l)):
+                n_entries, total_bytes = int(m.group(1)), int(m.group(2))
+        if n_entries is None:
+            return {"unparsed": text}
+    slowest = sorted(((r[3], r[1], r[0]) for r in rows), key=lambda x: (-x[0], x[1], x[2]))[:5]
+    return {
+        "entries and total transferred bytes": (n_entries, total_bytes),
+        "failed requests (status >= 400 or 0)": [(r[0], r[1], r[2], r[3]) for r in rows if r[2] >= 400 or r[2] == 0],
+        "five slowest (ms, url)": [(a, b) for a, b, _ in slowest],
+        "xhr and fetch requests": [(r[0], r[1], r[2]) for r in rows if r[5] in ("xhr", "fetch")],
+        "requests per resource type": sorted(hist.items()),
+        "rows at or above 1000 ms": [(r[0], r[1], r[3]) for r in rows if r[3] >= 1000],
+    }
+
+
+def make_har(n_static: int = 36, seed: int = 9) -> str:
+    rnd = random.Random(seed)
+    base = "https://app.example.com"
+    hdr_req = [{"name": ":authority", "value": "app.example.com"}, {"name": ":method", "value": "GET"}, {"name": ":scheme", "value": "https"}, {"name": "accept", "value": "*/*"},
+               {"name": "accept-encoding", "value": "gzip, deflate, br"}, {"name": "accept-language", "value": "en-US,en;q=0.9,nl;q=0.8"}, {"name": "cookie", "value": "sid=" + "ab12" * 12 + "; theme=dark"},
+               {"name": "referer", "value": base + "/"}, {"name": "sec-ch-ua", "value": '"Chromium";v="119", "Not?A_Brand";v="24"'}, {"name": "sec-fetch-mode", "value": "cors"},
+               {"name": "user-agent", "value": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"}]
+    hdr_resp = [{"name": "cache-control", "value": "public, max-age=31536000, immutable"}, {"name": "content-encoding", "value": "br"}, {"name": "content-type", "value": "application/javascript"},
+                {"name": "date", "value": "Mon, 02 Mar 2026 10:15:30 GMT"}, {"name": "etag", "value": 'W/"5f2c-18a3b4c5d6e"'}, {"name": "server", "value": "nginx"}, {"name": "vary", "value": "Accept-Encoding"},
+                {"name": "x-request-id", "value": "%032x" % rnd.getrandbits(128)}]
+    ents = []
+
+    def entry(method, path, status, ms, rtype, mime, size, text=None, enc=None):
+        resp_content = {"size": size, "mimeType": mime}
+        if text is not None:
+            resp_content["text"] = text
+        if enc:
+            resp_content["encoding"] = enc
+        t = {"blocked": round(rnd.random() * 3, 3), "dns": -1, "ssl": -1, "connect": -1, "send": 0.3, "wait": round(ms * 0.8, 3), "receive": round(ms * 0.2, 3), "_blocked_queueing": 0.8}
+        return {"_initiator": {"type": "parser", "url": base + "/", "lineNumber": 14}, "_priority": "High", "_resourceType": rtype, "cache": {}, "connection": "443", "pageref": "page_1",
+                "request": {"method": method, "url": base + path, "httpVersion": "h2", "headers": hdr_req, "queryString": [], "cookies": [{"name": "sid", "value": "ab12" * 12}], "headersSize": -1, "bodySize": 0},
+                "response": {"status": status, "statusText": "", "httpVersion": "h2", "headers": hdr_resp, "cookies": [], "content": resp_content, "redirectURL": "", "headersSize": -1, "bodySize": size // 3, "_transferSize": size // 3 + 310},
+                "serverIPAddress": "203.0.113.7", "startedDateTime": "2026-03-02T10:15:30.123Z", "time": round(ms, 3), "timings": t}
+    ents.append(entry("GET", "/", 200, 312.4, "document", "text/html", 14211, "<!doctype html><html><head><title>Acme</title></head><body><div id=root></div>" * 3))
+    for i in range(n_static):
+        kind = ("script", "stylesheet", "image", "font")[i % 4]
+        mime = {"script": "application/javascript", "stylesheet": "text/css", "image": "image/png", "font": "font/woff2"}[kind]
+        ext = {"script": "js", "stylesheet": "css", "image": "png", "font": "woff2"}[kind]
+        ents.append(entry("GET", f"/assets/{kind}-{i}.{ext}", 304 if i % 9 == 0 else 200, 20 + rnd.random() * 180, kind, mime, 2000 + rnd.randrange(60000), "QUJD" if kind == "image" else None, "base64" if kind == "image" else None))
+    ents.insert(12, entry("GET", "/api/products?page=1&limit=24", 200, 288.9, "fetch", "application/json", 5321, '{"items":[{"id":1,"name":"Anvil","price":19.99}],"total":240,"page":1}'))
+    ents.insert(20, entry("POST", "/api/login", 401, 188.0, "xhr", "application/json", 41, '{"error":"invalid credentials","attempts_left":2}'))
+    ents.insert(30, entry("GET", "/assets/script-slow.js", 200, 1850.2, "script", "application/javascript", 450000))
+    ents.insert(33, entry("GET", "/api/search?q=anvil", 200, 2301.7, "xhr", "application/json", 91820, '{"hits":' + "[" + '{"id":%d,"title":"result"},' * 5 + "]}"))
+    ents.insert(40, entry("GET", "/favicon.ico", 404, 41.2, "other", "text/html", 0))
+    ents.append(entry("GET", "/api/cart", 500, 977.1, "fetch", "application/json", 112, '{"error":"upstream timeout","trace":"c1f9e2"}'))
+    ents.append(entry("POST", "/api/events", 204, 55.0, "ping", "text/plain", 0))
+    ents.append(entry("GET", "/assets/hero-large.png", 200, 1004.0, "image", "image/png", 880000, "QUJD", "base64"))
+    har = {"log": {"version": "1.2", "creator": {"name": "WebInspector", "version": "537.36"}, "pages": [{"startedDateTime": "2026-03-02T10:15:30.000Z", "id": "page_1", "title": base + "/", "pageTimings": {"onContentLoad": 812.4, "onLoad": 1411.9}}], "entries": ents}}
+    return json.dumps(har, indent=2) + "\n"
+
+
+_HAR = make_har()
+case(
+    728,
+    claim="A HAR file becomes one 'METHOD url status ms bytes type' row per kept entry (failed, slow, 5 slowest, XHR/fetch, documents, non-GET; 160 characters of text body on failed, slow and XHR rows) plus one 'static (N requests: ...)' line; "
+          "the entry count, total bytes, every 4xx/5xx/status-0 request, the five slowest, every XHR/fetch request, the request count per resource type and every row at or above 1000 ms are unchanged.",
+    loses="request and response headers, cookies, timings breakdown, initiator, IPs, base64 bodies, bodies beyond 160 characters, and the identity of individual successful static assets (only their per-type count, bytes and slowest time stay)",
+    encode=digest_har,
+    probes=probes_728,
+    fixtures=[
+        Fixture("Chrome HAR: 1 document, 36 static assets, 6 XHR/fetch (401, 500), slow script, 404 favicon, 880 kB image", _HAR, True),
+        Fixture("small HAR: 8 static assets", make_har(8, seed=3), True),
+        Fixture("HAR whose entries have no response (cut-off export): left alone", json.dumps({"log": {"entries": [{"request": {"method": "GET", "url": "https://x.io/"}, "time": 1}] * 5}}, indent=2), False),
+        Fixture("JSON that is not a HAR", json.dumps({"entries": [1, 2]}), False),
+        Fixture("entry with a space in the url (left alone)", json.dumps({"log": {"entries": [{"request": {"method": "GET", "url": "https://x.io/a b"}, "response": {"status": 200, "content": {"size": 3, "mimeType": "text/css"}}, "time": 1.0, "_resourceType": "stylesheet"}] * 9}}, indent=2), False),
+        Fixture("text that already looks like a digest", "HAR 3 entries, 10B transferred\nGET https://x.io/ 200 5ms 10B document\n", None),
+    ],
+    min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #729 OCR engine outputs (tesseract hOCR and TSV; reconstructed from memory of tesseract 5) to plain text lines.
+# One text line per ocr_line, a blank line between paragraphs/blocks, '[page N]' before pages 2+, words under confidence 60
+# written 'word[?NN]'. hOCR is read with html.parser, the probe re-reads it with regular expressions, and the encoder only
+# rewrites when both agree (a cheap self-check: truncated or mangled markup is left alone). Textract / Vision JSON are not
+# covered. Word geometry, baselines, font sizes and the conf of confident words are dropped.
+
+CONF_FLOOR = 60
+_FLAG_W = re.compile(r"^(.*)\[\?(\d+)\]$")
+_PAGE_MARK = re.compile(r"^\[page (\d+)\]$")
+
+
+class _HocrParser(__import__("html.parser", fromlist=["HTMLParser"]).HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.pages: list[list[list[list[tuple[str, float | None]]]]] = []  # page -> paragraph -> line -> (word, conf)
+        self.word = None
+        self.depth_word = 0
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        cls = a.get("class", "")
+        if tag == "div" and cls == "ocr_page":
+            self.pages.append([])
+        elif tag == "p" and cls == "ocr_par" and self.pages:
+            self.pages[-1].append([])
+        elif tag == "span" and cls == "ocr_line" and self.pages and self.pages[-1]:
+            self.pages[-1][-1].append([])
+        elif tag == "span" and cls == "ocrx_word" and self.pages and self.pages[-1] and self.pages[-1][-1]:
+            m = re.search(r"x_wconf (-?\d+(?:\.\d+)?)", a.get("title", ""))
+            self.word = ["", float(m.group(1)) if m else None]
+            self.depth_word = 1
+        elif self.word is not None and tag == "span":
+            self.depth_word += 1
+
+    def handle_endtag(self, tag):
+        if self.word is not None and tag == "span":
+            self.depth_word -= 1
+            if self.depth_word == 0:
+                w = "".join(self.word[0].split())
+                if w:
+                    self.pages[-1][-1][-1].append((w, self.word[1]))
+                self.word = None
+
+    def handle_data(self, data):
+        if self.word is not None:
+            self.word[0] += data
+
+
+def _render_pages(pages) -> str | None:
+    out: list[str] = []
+    for pi, page in enumerate(pages):
+        if pi > 0:
+            out.append(f"[page {pi + 1}]")
+        first_par = True
+        for par in page:
+            lines = []
+            for line in par:
+                ws = [f"{w}[?{round(c)}]" if c is not None and c < CONF_FLOOR else w for w, c in line]
+                if any("[?" in w and not _FLAG_W.match(w) for w in ws) or any(("[?" in w) for w, _ in line):
+                    return None
+                if ws:
+                    lines.append(" ".join(ws))
+            if lines:
+                if not first_par:
+                    out.append("")
+                out += lines
+                first_par = False
+    return "\n".join(out) + "\n" if out else None
+
+
+def _tsv_pages(text: str):
+    rows = [l.split("\t") for l in text.rstrip("\n").split("\n")]
+    if not rows or rows[0][:12] != ["level", "page_num", "block_num", "par_num", "line_num", "word_num", "left", "top", "width", "height", "conf", "text"]:
+        return None
+    pages: list = []
+    last = (None, None, None, None)
+    for r in rows[1:]:
+        if len(r) != 12 or not all(x.lstrip("-").isdigit() for x in r[:10]):
+            return None
+        try:
+            conf = float(r[10])
+        except ValueError:
+            return None
+        if r[0] != "5" or not r[11].strip():
+            continue
+        page, block, par, line = r[1], r[2], r[3], r[4]
+        if not pages or page != last[0]:
+            pages.append([])
+            last = (page, None, None, None)
+        if (block, par) != last[1:3]:
+            pages[-1].append([])
+            last = (page, block, par, None)
+        if line != last[3]:
+            pages[-1][-1].append([])
+            last = (page, block, par, line)
+        pages[-1][-1][-1].append((r[11].strip(), conf if conf >= 0 else None))
+    return pages
+
+
+def ocr_to_text(text: str) -> str:
+    pages = None
+    if "ocrx_word" in text and "<html" in text.lower():
+        p = _HocrParser()
+        try:
+            p.feed(text)
+            p.close()
+        except Exception:  # noqa: BLE001 (an HTML parser on mangled input)
+            return text
+        pages = p.pages
+    elif text.startswith("level\tpage_num\t"):
+        pages = _tsv_pages(text)
+    if not pages:
+        return text
+    out = _render_pages(pages)
+    if out is None or len(out) >= len(text) or probes_729(out) != probes_729(text):
+        return text
+    return out
+
+
+def _model_from_text(text: str):
+    pages = [[]]
+    for line in text.split("\n"):
+        m = _PAGE_MARK.match(line)
+        if m:
+            pages.append([])
+        elif line == "":
+            pages[-1].append([]) if pages[-1] and pages[-1][-1] else None
+        elif line:
+            if not pages[-1]:
+                pages[-1].append([])
+            pages[-1][-1].append(line.split(" "))
+    return [[par for par in page if par] for page in pages]
+
+
+def probes_729(text: str) -> dict:
+    """Reader view: pages -> paragraphs -> lines of words, and every low-confidence word with its confidence. hOCR is read with regexes, TSV by columns, plain text by splitting."""
+    lines_out: list = []
+    flagged: list = []
+    npages = None
+    if "ocrx_word" in text and "<html" in text.lower():
+        events = []
+        for m in re.finditer(r"<div class=['\"]ocr_page['\"]|<p class=['\"]ocr_par['\"]|<span class=['\"]ocr_line['\"]|<span class=['\"]ocrx_word['\"][^>]*?title=['\"]([^'\"]*)['\"][^>]*>(.*?)</span>", text, re.S):
+            events.append(m)
+        page = par = line = -1
+        cur: dict = {}
+        for m in events:
+            g = m.group(0)
+            if g.startswith("<div"):
+                page, par, line = page + 1, -1, -1
+            elif g.startswith("<p"):
+                par, line = par + 1, -1
+            elif g.startswith("<span class='ocr_line") or g.startswith('<span class="ocr_line'):
+                line += 1
+            else:
+                if page < 0 or par < 0 or line < 0:
+                    continue
+                w = "".join(html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).split())
+                conf = re.search(r"x_wconf (-?\d+(?:\.\d+)?)", m.group(1))
+                c = float(conf.group(1)) if conf else None
+                if w:
+                    cur.setdefault((page, par, line), []).append((w, c))
+        npages = page + 1
+        grouped: dict = {}
+        for (pg, pr, ln), ws in sorted(cur.items()):
+            grouped.setdefault((pg, pr), []).append(ws)
+        for (pg, pr), lns in sorted(grouped.items()):
+            lines_out.append((pg, pr, tuple(tuple(w for w, _ in l) for l in lns)))
+            for li, l in enumerate(lns):
+                for w, c in l:
+                    if c is not None and c < CONF_FLOOR:
+                        flagged.append((pg, pr, li, w, round(c)))
+        # renumber pages/paragraphs densely (empty ones vanish in the rendering)
+        dense: list = []
+        pm, qm = {}, {}
+        for pg, pr, lns in lines_out:
+            pm.setdefault(pg, len(pm))
+            qm.setdefault((pg, pr), sum(1 for k in qm if k[0] == pg))
+            dense.append((pm[pg], qm[(pg, pr)], lns))
+        lines_out = dense
+        flagged = [(pm[pg], qm[(pg, pr)], li, w, c) for pg, pr, li, w, c in flagged]
+        npages = len(pm)
+    elif text.startswith("level\tpage_num\t") and (pg := _tsv_pages(text)) is not None:
+        for pi, page in enumerate(pg):
+            for qi, par in enumerate([p for p in page if any(p)]):
+                lines_out.append((pi, qi, tuple(tuple(w for w, _ in l) for l in par if l)))
+                for li, l in enumerate([l for l in par if l]):
+                    for w, c in l:
+                        if c is not None and c < CONF_FLOOR:
+                            flagged.append((pi, qi, li, w, round(c)))
+        npages = len(pg)
+    else:
+        model = _model_from_text(text)
+        npages = len([p for p in model if p]) if any(model) else 0
+        pi_map = [i for i, p in enumerate(model) if p]
+        for pi, page in enumerate(p for p in model if p):
+            for qi, par in enumerate(page):
+                clean = []
+                for li, ws in enumerate(par):
+                    cw = []
+                    for w in ws:
+                        m = _FLAG_W.match(w)
+                        if m:
+                            flagged.append((pi, qi, li, m.group(1), int(m.group(2))))
+                            cw.append(m.group(1))
+                        else:
+                            cw.append(w)
+                    clean.append(tuple(cw))
+                lines_out.append((pi, qi, tuple(clean)))
+    return {"pages": npages, "paragraphs of lines of words (page, paragraph, lines)": lines_out, "words under the confidence floor (page, paragraph, line, word, conf)": flagged}
+
+
+_INVOICE = [
+    ["Invoice", "No.", "2026-00417"], ["Acme", "Industrial", "Supply", "B.V."], ["Keizersgracht", "12,", "1015", "CJ", "Amsterdam"],
+    None,
+    ["Bill", "to:", "Northwind", "Traders"], ["Attn:", "Accounts", "Payable"], ["PO", "number", "88-4410"],
+    None,
+    ["Item", "Qty", "Unit", "price", "Total"], ["Hex", "bolt", "M8x40", "500", "0.12", "60.00"], ["Washer", "M8", "1000", "0.03", "30.00"], ["Anvil", "20kg", "2", "89.50", "179.00"],
+    ["Shipping", "and", "handling", "25.00"],
+    None,
+    ["Subtotal", "294.00"], ["VAT", "21%", "61.74"], ["Total", "due", "EUR", "355.74"],
+    None,
+    ["Payment", "within", "30", "days", "to", "IBAN", "NL91", "ABNA", "0417", "4354", "43"], ["Thank", "you", "for", "your", "business!"],
+]
+_LOWCONF = {"2026-00417": 41, "88-4410": 52, "NL91": 38, "4354": 55, "Anvil": 58, "Attn:": 47}
+
+
+def make_ocr(fmt: str = "hocr", pages: int = 1) -> str:
+    def conf(w: str, k: int) -> int:
+        return _LOWCONF.get(w, 90 + (len(w) * 7 + k * 3) % 10)
+    if fmt == "tsv":
+        out = ["level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext"]
+        for pg in range(1, pages + 1):
+            out.append(f"1\t{pg}\t0\t0\t0\t0\t0\t0\t1654\t2339\t-1\t")
+            block, y, line_no = 0, 140, 0
+            par_open = False
+            for ln in _INVOICE:
+                if ln is None:
+                    par_open = False
+                    y += 40
+                    continue
+                if not par_open:
+                    block += 1
+                    line_no = 0
+                    out += [f"2\t{pg}\t{block}\t0\t0\t0\t148\t{y}\t1358\t61\t-1\t", f"3\t{pg}\t{block}\t1\t0\t0\t148\t{y}\t1358\t61\t-1\t"]
+                    par_open = True
+                line_no += 1
+                out.append(f"4\t{pg}\t{block}\t1\t{line_no}\t0\t148\t{y}\t1358\t61\t-1\t")
+                x = 148
+                for k, w in enumerate(ln, 1):
+                    out.append(f"5\t{pg}\t{block}\t1\t{line_no}\t{k}\t{x}\t{y}\t{len(w) * 22}\t61\t{conf(w, k) + (0.123 if k % 2 else 0.5):.6f}\t{w}")
+                    x += len(w) * 22 + 19
+                y += 70
+        return "\n".join(out) + "\n"
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"', '    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
+           '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">', ' <head>', '  <title></title>', '  <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />',
+           "  <meta name='ocr-system' content='tesseract 5.3.0' />", "  <meta name='ocr-capabilities' content='ocr_page ocr_carea ocr_par ocr_line ocrx_word ocrp_wconf' />", ' </head>', ' <body>']
+    for pg in range(1, pages + 1):
+        out.append(f"  <div class='ocr_page' id='page_{pg}' title='image \"scan{pg}.png\"; bbox 0 0 1654 2339; ppageno {pg - 1}; scan_res 300 300'>")
+        block, y, par_open, wid, lid = 0, 140, False, 0, 0
+        for ln in _INVOICE:
+            if ln is None:
+                if par_open:
+                    out += ["    </p>", "   </div>"]
+                par_open = False
+                y += 40
+                continue
+            if not par_open:
+                block += 1
+                out += [f"   <div class='ocr_carea' id='block_{pg}_{block}' title=\"bbox 148 {y} 1506 {y + 61}\">", f"    <p class='ocr_par' id='par_{pg}_{block}' lang='eng' title=\"bbox 148 {y} 1506 {y + 61}\">"]
+                par_open = True
+            lid += 1
+            out.append(f"     <span class='ocr_line' id='line_{pg}_{lid}' title=\"bbox 148 {y} 1506 {y + 61}; baseline 0 -12; x_size 53; x_descenders 11; x_ascenders 13\">")
+            x = 148
+            for k, w in enumerate(ln, 1):
+                wid += 1
+                esc = w.replace("&", "&amp;")
+                out.append(f"      <span class='ocrx_word' id='word_{pg}_{wid}' title='bbox {x} {y} {x + len(w) * 22} {y + 61}; x_wconf {conf(w, k)}'>" + ("<strong>" + esc + "</strong>" if k == 1 and ln[0] in ("Invoice", "Total") else esc) + "</span>")
+                x += len(w) * 22 + 19
+            out.append("     </span>")
+            y += 70
+        if par_open:
+            out += ["    </p>", "   </div>"]
+        out.append("  </div>")
+    out += [" </body>", "</html>"]
+    return "\n".join(out) + "\n"
+
+
+_HOCR = make_ocr("hocr")
+case(
+    729,
+    claim="tesseract hOCR or TSV becomes plain text lines (a blank line between paragraphs, '[page N]' before later pages) with words under confidence 60 written 'word[?NN]'; the words of every line in order, "
+          "the paragraph and page structure and every low-confidence word with its confidence are unchanged (the rewrite is skipped when the hOCR parse and an independent regex parse disagree).",
+    loses="word, line and block bounding boxes, baselines, font sizes, ids, the confidence of confident words, bold markup, and the image name and resolution",
+    encode=ocr_to_text,
+    probes=probes_729,
+    fixtures=[
+        Fixture("hOCR of an invoice page (6 low-confidence words, bold <strong> words, '&amp;'-free)", _HOCR, True),
+        Fixture("tesseract TSV of the same page", make_ocr("tsv"), True),
+        Fixture("two-page hOCR", make_ocr("hocr", pages=2), True),
+        Fixture("two-page TSV", make_ocr("tsv", pages=2), True),
+        Fixture("hOCR with an entity inside a word", _HOCR.replace(">Industrial<", ">R&amp;D<", 1), True),
+        Fixture("plain tesseract text output", "Invoice No. 2026-00417\nAcme Industrial Supply B.V.\n\nBill to: Northwind Traders\n", False),
+        Fixture("html that is not hOCR", "<html><body><p class='x'>hello</p></body></html>\n", False),
+        Fixture("word that already looks like a flag", _HOCR.replace(">Industrial<", ">odd[?12]<", 1), None),
+    ],
+    min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #760 Collapse printed LlamaIndex NodeWithScore reprs (print(retriever.retrieve(q)), response.source_nodes). Each node becomes
+# one valid-Python line: NodeWithScore(id=..., score=..., start=..., end=..., metadata={...}, text=...). Kept: the id, the score,
+# the character offsets, the metadata entries that are NOT in excluded_llm_metadata_keys (what the LLM sees: the file path,
+# page label, ...), and the text exactly. Dropped: embedding=None, both excluded_*_metadata_keys lists, relationships (with the
+# metadata and hash of the source document repeated per node), metadata_template/separator, text_template, mimetype. The field
+# order of TextNode is reconstructed from memory of llama-index-core 0.10-0.12. LangChain Document reprs have no constant
+# fields to drop and stay as they are. The encoder scans the repr with a string-aware bracket matcher, the probe re-reads it
+# with regexes and ast; the rewrite happens only when both agree.
+
+_NWS_START = "NodeWithScore(node=TextNode("
+_STR = r"""'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*\""""
+_NODE_LINE = re.compile(r"^NodeWithScore\(id=")
+
+
+def _skip_str(s: str, i: int) -> int:
+    q = s[i]
+    i += 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == q:
+            return i + 1
+        else:
+            i += 1
+    raise ValueError("unterminated string")
+
+
+def _match(s: str, i: int, open_c: str = "(", close_c: str = ")") -> int:
+    """Index just after the bracket matching s[i], skipping string literals."""
+    depth = 0
+    while i < len(s):
+        c = s[i]
+        if c in "'\"":
+            i = _skip_str(s, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    raise ValueError("unbalanced")
+
+
+def _split_top(s: str) -> list[str]:
+    parts, depth, i, start = [], 0, 0, 0
+    while i < len(s):
+        c = s[i]
+        if c in "'\"":
+            i = _skip_str(s, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(s[start:i].strip())
+            start = i + 1
+        i += 1
+    parts.append(s[start:].strip())
+    return parts
+
+
+def _node_line(node_args: str, score: str) -> str:
+    f = {}
+    for p in _split_top(node_args):
+        k, _, v = p.partition("=")
+        f[k.strip()] = v.strip()
+    meta = ast.literal_eval(f["metadata"])
+    excl = ast.literal_eval(f.get("excluded_llm_metadata_keys", "[]"))
+    kept = {k: v for k, v in meta.items() if k not in excl}
+    ast.literal_eval(f["text"])  # must be one string literal
+    return (f"NodeWithScore(id={f['id_']}, score={score}, start={f.get('start_char_idx', 'None')}, end={f.get('end_char_idx', 'None')}, "
+            f"metadata={kept!r}, text={f['text']})")
+
+
+def collapse_nodes(text: str) -> str:
+    i = text.find("[" + _NWS_START)
+    if i < 0 or text.count("[" + _NWS_START) > 1:
+        return text
+    lines: list[str] = []
+    try:
+        j = i + 1
+        while text.startswith(_NWS_START, j):
+            end = _match(text, j + len("NodeWithScore"))  # the NodeWithScore( ... ) call
+            inner = text[j + len("NodeWithScore("): end - 1]
+            parts = _split_top(inner)
+            if len(parts) != 2 or not parts[0].startswith("node=TextNode(") or not parts[1].startswith("score="):
+                return text
+            node_args = parts[0][len("node=TextNode("):-1]
+            lines.append(_node_line(node_args, parts[1][6:]))
+            j = end
+            if text.startswith(", ", j):
+                j += 2
+        if not text.startswith("]", j) or not lines:
+            return text
+        j += 1
+    except (ValueError, SyntaxError, KeyError):
+        return text
+    res = text[:i] + "\n".join(lines) + text[j:]
+    if len(res) >= len(text) or probes_760(res) != probes_760(text):
+        return text
+    return res
+
+
+def probes_760(text: str) -> dict:
+    """Per node: id, score, offsets, the LLM-visible metadata and the text; read with regexes (original repr) or ast (collapsed lines)."""
+    nodes: list[tuple] = []
+    outside: list[str] = []
+    for ln in text.split("\n"):
+        if _NODE_LINE.match(ln):
+            try:
+                call = ast.parse(ln, mode="eval").body
+                kw = {k.arg: ast.literal_eval(k.value) for k in call.keywords}
+                nodes.append((kw["id"], kw["score"], kw["start"], kw["end"], tuple(sorted(kw["metadata"].items())), kw["text"]))
+                continue
+            except (SyntaxError, ValueError, KeyError):
+                pass
+        pos = 0
+        found = False
+        got: list[tuple] = []
+        try:
+            while (k := ln.find("[" + _NWS_START if pos == 0 else _NWS_START, pos)) >= 0:
+                found = True
+                m_id = re.compile(r"id_=(" + _STR + ")").search(ln, k)
+                m_meta = re.compile(r"metadata=(\{[^{}]*\}), excluded_embed_metadata_keys=").search(ln, k)
+                m_ex = re.compile(r"excluded_llm_metadata_keys=(\[[^\]]*\])").search(ln, k)
+                m_txt = re.compile(r", text=(" + _STR + r"), mimetype=").search(ln, k)
+                m_s = re.compile(r", start_char_idx=(\d+|None), end_char_idx=(\d+|None)").search(ln, k)
+                m_sc = re.compile(r"\), score=([-0-9.eE+]+|None)\)").search(ln, m_txt.end() if m_txt else k)
+                if not (m_id and m_meta and m_ex and m_txt and m_s and m_sc):
+                    found = False
+                    break
+                meta = ast.literal_eval(m_meta.group(1))
+                excl = ast.literal_eval(m_ex.group(1))
+                got.append((ast.literal_eval(m_id.group(1)), ast.literal_eval(m_sc.group(1)), ast.literal_eval(m_s.group(1)), ast.literal_eval(m_s.group(2)),
+                            tuple(sorted((a, b) for a, b in meta.items() if a not in excl)), ast.literal_eval(m_txt.group(1))))
+                pos = m_sc.end()
+        except (SyntaxError, ValueError, AttributeError, TypeError):
+            found = False
+        if found:
+            nodes.extend(got)
+        if not found:
+            outside.append(ln)
+    return {"nodes (id, score, start, end, llm-visible metadata, text)": nodes, "other lines": outside}
+
+
+def make_nodes(n: int = 8, text_len: int = 700, seed: int = 21) -> str:
+    rnd = random.Random(seed)
+    files = [("/home/dev/docs/guide.md", "guide.md", 4821), ("/home/dev/docs/api/auth.md", "auth.md", 9210), ("/home/dev/docs/api/webhooks.md", "webhooks.md", 7342), ("/home/dev/docs/faq.md", "faq.md", 2210),
+             ("/home/dev/docs/changelog.md", "changelog.md", 15012)]
+    sentences = ["Tokens expire after fifteen minutes and must be refreshed with the refresh endpoint.", "Webhook payloads are signed with HMAC-SHA256; verify the `X-Signature` header before parsing.",
+                 "Rate limits are per API key: 600 requests per minute on the Team plan, 3,000 on Business.", "If you see a 429 response, back off exponentially and honour the Retry-After header.",
+                 "Use idempotency keys for POST requests so that retries never create duplicate orders.", "Don't store secrets in the repository; use the secret manager's \"read-only\" role instead.",
+                 "The sandbox mirrors production but resets every night at 03:00 UTC.", "Pagination uses opaque cursors; never construct them by hand."]
+    ex = "['file_name', 'file_type', 'file_size', 'creation_date', 'last_modified_date', 'last_accessed_date']"
+    nodes = []
+    for k in range(n):
+        path, name, size = files[k % len(files)]
+        meta = f"{{'file_path': '{path}', 'file_name': '{name}', 'file_type': 'text/markdown', 'file_size': {size}, 'creation_date': '2026-03-02', 'last_modified_date': '2026-03-02'" + (", 'page_label': '%d'" % (k + 1) if k % 3 == 0 else "") + "}"
+        txt = ""
+        while len(txt) < text_len:
+            txt += rnd.choice(sentences) + (" " if rnd.random() < 0.7 else "\n\n")
+        doc = "%032x" % rnd.getrandbits(128)
+        rel = (f"{{<NodeRelationship.SOURCE: '1'>: RelatedNodeInfo(node_id='{doc[:8]}-{doc[8:12]}-{doc[12:16]}-{doc[16:20]}-{doc[20:]}', node_type=<ObjectType.DOCUMENT: '4'>, metadata={meta}, hash='{'%064x' % rnd.getrandbits(256)}'), "
+               f"<NodeRelationship.PREVIOUS: '2'>: RelatedNodeInfo(node_id='{'%032x' % rnd.getrandbits(128)}', node_type=<ObjectType.TEXT: '1'>, metadata={{}}, hash='{'%064x' % rnd.getrandbits(256)}'), "
+               f"<NodeRelationship.NEXT: '3'>: RelatedNodeInfo(node_id='{'%032x' % rnd.getrandbits(128)}', node_type=<ObjectType.TEXT: '1'>, metadata={{}}, hash='{'%064x' % rnd.getrandbits(256)}')}}")
+        nid = "%032x" % rnd.getrandbits(128)
+        start = 1024 * (k % 4)
+        nodes.append(f"NodeWithScore(node=TextNode(id_='{nid[:8]}-{nid[8:12]}-{nid[12:16]}-{nid[16:20]}-{nid[20:]}', embedding=None, metadata={meta}, excluded_embed_metadata_keys={ex}, excluded_llm_metadata_keys={ex}, "
+                     f"relationships={rel}, metadata_template='{{key}}: {{value}}', metadata_separator='\\n', text={txt!r}, mimetype='text/plain', start_char_idx={start}, end_char_idx={start + len(txt)}, "
+                     f"metadata_seperator='\\n', text_template='{{metadata_str}}\\n\\n{{content}}'), score={0.8921 - 0.0317 * k:.4f})")
+    return "[" + ", ".join(nodes) + "]\n"
+
+
+_NODES = make_nodes()
+case(
+    760,
+    claim="A printed list of LlamaIndex NodeWithScore reprs becomes one valid-Python 'NodeWithScore(id=..., score=..., start=..., end=..., metadata={...}, text=...)' line per node; the id, score, character offsets, "
+          "the metadata entries the LLM is shown (not in excluded_llm_metadata_keys) and the text exactly are unchanged; embedding, excluded-key lists, relationships, templates and mimetype are dropped.",
+    loses="the embedding field, both excluded_*_metadata_keys lists, the relationships (previous/next/source node ids, the source document's hash and its metadata copy), the templates and separators, mimetype, and metadata entries listed in excluded_llm_metadata_keys",
+    encode=collapse_nodes,
+    probes=probes_760,
+    fixtures=[
+        Fixture("top-8 retrieval, 700-character chunks from 5 markdown files", _NODES, True),
+        Fixture("top-3 retrieval with 2,500-character chunks (default-size chunks)", make_nodes(3, 2500, seed=4), True),
+        Fixture("top-8 retrieval with 120-character chunks (the finder's small synthetic case)", make_nodes(8, 120, seed=6), True),
+        Fixture("nodes printed after other output lines", "Retrieved 8 nodes:\n" + _NODES + "done\n", True),
+        Fixture("LangChain Document repr (nothing constant to drop)", "[Document(metadata={'source': 'guide.md', 'page': 3}, page_content='Tokens expire after fifteen minutes.'), Document(metadata={'source': 'auth.md', 'page': 1}, page_content='Rate limits are per key.')]\n", False),
+        Fixture("print(node) str form", "Node ID: 4f1c8a2e\nText: Tokens expire after fifteen minutes.\nScore:  0.892\n", False),
+        Fixture("a text that contains the repr marker inside the chunk", _NODES.replace("Tokens expire", "[NodeWithScore(node=TextNode( Tokens expire", 1), None),
+    ],
+    min_gain=0.25,
+)
+
+# ===============================================================================================================
+# #765 Strip layout geometry and confidences from document-parser JSON dumps: Unstructured (list of elements), Docling
+# (texts / tables with prov), Azure Document Intelligence (analyzeResult). Per schema, geometry (coordinates, bbox, polygon),
+# probabilities (detection_class_prob, confidence), duplicates of text (text_as_html, orig == text, words, lines and the
+# top-level content when paragraphs exist), span offsets, ids and parent links and per-file constants are removed; the
+# remaining JSON keeps its structure, so the same reader works on both forms. Shapes reconstructed from memory of the three
+# parsers' JSON output; text, type/label/role and page of every element are kept.
+
+_UNS_META_KEEP = {"page_number", "category_depth", "link_urls"}
+_DOCLING_DROP = {"bbox", "charspan", "self_ref", "parent", "children", "content_layer", "image"}
+_AZURE_DROP = {"polygon", "confidence", "spans", "words", "styles", "selectionMarks"}
+
+
+def _drop_keys(o, keys):
+    if isinstance(o, dict):
+        return {k: _drop_keys(v, keys) for k, v in o.items() if k not in keys}
+    if isinstance(o, list):
+        return [_drop_keys(v, keys) for v in o]
+    return o
+
+
+def _schema(d):
+    if isinstance(d, list) and d and all(isinstance(e, dict) and isinstance(e.get("type"), str) and isinstance(e.get("text"), str) for e in d):
+        return "unstructured"
+    if isinstance(d, dict) and isinstance(d.get("texts"), list) and isinstance(d.get("body"), dict):
+        return "docling"
+    if isinstance(d, dict) and isinstance(d.get("analyzeResult"), dict) and isinstance(d["analyzeResult"].get("pages"), list):
+        return "azure"
+    return None
+
+
+def strip_parser_json(text: str) -> str:
+    if not text.lstrip().startswith(("[", "{")):
+        return text
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return text
+    kind = _schema(d)
+    if kind is None:
+        return text
+    if kind == "unstructured":
+        out = []
+        for e in d:
+            md = e.get("metadata")
+            ne = {k: v for k, v in e.items() if k not in ("element_id", "metadata")}
+            if isinstance(md, dict):
+                ne["metadata"] = {k: v for k, v in md.items() if k in _UNS_META_KEEP}
+            out.append(ne)
+    elif kind == "docling":
+        out = {k: v for k, v in d.items() if k not in ("pages", "origin", "furniture", "groups", "pictures_data")}
+        out = _drop_keys(out, _DOCLING_DROP)
+        for t in out.get("texts", []):
+            if isinstance(t, dict) and t.get("orig") == t.get("text"):
+                t.pop("orig", None)
+        for t in out.get("tables", []):
+            if isinstance(t, dict):
+                t.pop("orig", None)
+    else:
+        ar = dict(d["analyzeResult"])
+        has_par = isinstance(ar.get("paragraphs"), list)
+        drops = set(_AZURE_DROP) | ({"lines"} if has_par else set())
+        ar = _drop_keys(ar, drops)
+        if has_par:
+            ar.pop("content", None)
+        out = {k: v for k, v in d.items() if k != "analyzeResult"}
+        out["analyzeResult"] = ar
+    res = json.dumps(out, ensure_ascii=False, separators=(",", ":")) + ("\n" if text.endswith("\n") else "")
+    if len(res) >= len(text) or probes_765(res) != probes_765(text):
+        return text
+    return res
+
+
+def _page_of(o) -> int | None:
+    """First page number found under an element dict, whatever the parser calls it."""
+    if isinstance(o, dict):
+        for k in ("page_number", "page_no", "pageNumber"):
+            if isinstance(o.get(k), int):
+                return o[k]
+        for v in o.values():
+            if (p := _page_of(v)) is not None:
+                return p
+    elif isinstance(o, list):
+        for v in o:
+            if (p := _page_of(v)) is not None:
+                return p
+    return None
+
+
+def probes_765(text: str) -> dict:
+    """Walk the JSON: (type/label/role, page, text) of every element, table cells with their row and column, the page count."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return {"unparsed": text}
+    kind = _schema(d)
+    if kind == "unstructured":
+        return {"schema": kind, "elements (type, page, text)": [(e["type"], _page_of(e.get("metadata")), e["text"]) for e in d]}
+    if kind == "docling":
+        cells = []
+        for ti, t in enumerate(d.get("tables", [])):
+            for c in ((t.get("data") or {}).get("table_cells") or []) if isinstance(t, dict) else []:
+                cells.append((ti, c.get("start_row_offset_idx"), c.get("start_col_offset_idx"), c.get("text")))
+        return {"schema": kind, "elements (label, page, text)": [(t.get("label"), _page_of(t.get("prov")), t.get("text")) for t in d["texts"] if isinstance(t, dict)],
+                "table cells (table, row, col, text)": cells, "table pages": [_page_of(t.get("prov")) for t in d.get("tables", []) if isinstance(t, dict)]}
+    if kind == "azure":
+        ar = d["analyzeResult"]
+        cells = [(ti, c.get("rowIndex"), c.get("columnIndex"), c.get("content")) for ti, t in enumerate(ar.get("tables", [])) for c in t.get("cells", [])]
+        pars = [(p.get("role"), _page_of(p.get("boundingRegions")), p.get("content")) for p in ar.get("paragraphs", [])] if isinstance(ar.get("paragraphs"), list) else None
+        lines = None if pars is not None else [(pg.get("pageNumber"), [ln.get("content") for ln in pg.get("lines", [])]) for pg in ar["pages"]]
+        return {"schema": kind, "paragraphs (role, page, content)": pars, "lines per page (when no paragraphs)": lines, "table cells (table, row, col, content)": cells,
+                "page numbers": [pg.get("pageNumber") for pg in ar["pages"]]}
+    return {"schema": None, "unparsed": text}
+
+
+_PARAS = [("Title", "Quarterly Operations Review"), ("NarrativeText", "Revenue grew 12 percent year over year, driven mainly by the Team plan price change introduced in March."),
+          ("Header", "Acme Inc | Confidential"), ("NarrativeText", "Churn stayed flat at 2.1 percent. Support tickets fell by a fifth after the new onboarding flow shipped."),
+          ("ListItem", "Migrate the billing service by March 14."), ("ListItem", "Freeze the schema on March 1."), ("Table", "Region Q1 Q2 EMEA 120 134 AMER 98 101"),
+          ("NarrativeText", "The cutover is owned by Bob; the customer email by Alice. Legal review is booked for Monday."), ("Footer", "Page 2 of 7")]
+
+
+def make_unstructured(n: int = 3) -> str:
+    rnd = random.Random(5)
+    els = []
+    for pg in range(1, n + 1):
+        for k, (ty, tx) in enumerate(_PARAS):
+            x, y = 100 + rnd.randrange(40), 150 + k * 190 + rnd.randrange(20)
+            md = {"detection_class_prob": round(0.80 + rnd.random() * 0.19, 4),
+                  "coordinates": {"points": [[x, y], [x, y + 90], [x + 1480, y + 90], [x + 1480, y]], "system": "PixelSpace", "layout_width": 1700, "layout_height": 2200},
+                  "last_modified": "2026-03-02T10:15:30", "filetype": "application/pdf", "languages": ["eng"], "page_number": pg, "file_directory": "/data/reports", "filename": "q-review.pdf"}
+            if ty == "Title":
+                md["category_depth"] = 0
+            if ty == "Table":
+                md["text_as_html"] = "<table><thead><tr><th>Region</th><th>Q1</th><th>Q2</th></tr></thead><tbody><tr><td>EMEA</td><td>120</td><td>134</td></tr><tr><td>AMER</td><td>98</td><td>101</td></tr></tbody></table>"
+            if k > 1:
+                md["parent_id"] = "%032x" % rnd.getrandbits(128)
+            els.append({"type": ty, "element_id": "%032x" % rnd.getrandbits(128), "text": tx, "metadata": md})
+    return json.dumps(els, indent=2) + "\n"
+
+
+def make_docling(n: int = 3) -> str:
+    rnd = random.Random(8)
+    texts, tables = [], []
+    for pg in range(1, n + 1):
+        for k, (ty, tx) in enumerate(_PARAS):
+            if ty == "Table":
+                cells = [{"bbox": {"l": 70.2, "t": 400.1 + r * 18, "r": 520.9, "b": 415.0 + r * 18, "coord_origin": "BOTTOMLEFT"}, "row_span": 1, "col_span": 1, "start_row_offset_idx": r, "end_row_offset_idx": r + 1, "start_col_offset_idx": c,
+                          "end_col_offset_idx": c + 1, "text": f"{r}{c}", "column_header": r == 0, "row_header": False, "row_section": False} for r in range(3) for c in range(3)]
+                tables.append({"self_ref": f"#/tables/{len(tables)}", "parent": {"$ref": "#/body"}, "children": [], "label": "table", "prov": [{"page_no": pg, "bbox": {"l": 70.2, "t": 400.1, "r": 520.9, "b": 460.0, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, 0]}],
+                               "data": {"table_cells": cells, "num_rows": 3, "num_cols": 3}})
+                continue
+            label = {"Title": "title", "NarrativeText": "text", "Header": "page_header", "Footer": "page_footer", "ListItem": "list_item"}[ty]
+            texts.append({"self_ref": f"#/texts/{len(texts)}", "parent": {"$ref": "#/body"}, "children": [], "content_layer": "body", "label": label,
+                          "prov": [{"page_no": pg, "bbox": {"l": 72.0 + rnd.random(), "t": 700.5 - k * 60, "r": 540.0, "b": 680.2 - k * 60, "coord_origin": "BOTTOMLEFT"}, "charspan": [0, len(tx)]}], "orig": tx, "text": tx})
+    d = {"schema_name": "DoclingDocument", "version": "1.0.0", "name": "q-review", "origin": {"mimetype": "application/pdf", "binary_hash": 13987445581, "filename": "q-review.pdf"},
+         "furniture": {"self_ref": "#/furniture", "children": [], "name": "_root_", "label": "unspecified"}, "body": {"self_ref": "#/body", "children": [{"$ref": f"#/texts/{i}"} for i in range(len(texts))], "name": "_root_", "label": "unspecified"},
+         "groups": [], "texts": texts, "pictures": [], "tables": tables, "pages": {str(p): {"size": {"width": 612.0, "height": 792.0}, "page_no": p} for p in range(1, n + 1)}}
+    return json.dumps(d, indent=2) + "\n"
+
+
+def make_azure(n: int = 2) -> str:
+    rnd = random.Random(2)
+    pages, paras, off = [], [], 0
+    content = ""
+    for pg in range(1, n + 1):
+        words, lines = [], []
+        for k, (ty, tx) in enumerate(_PARAS):
+            if ty == "Table":
+                continue
+            poly = [round(0.9 + rnd.random() * 0.1, 4), round(1 + k * 0.9, 4), 7.6, round(1 + k * 0.9, 4), 7.6, round(1.3 + k * 0.9, 4), 0.9, round(1.3 + k * 0.9, 4)]
+            role = {"Title": "title", "Header": "pageHeader", "Footer": "pageFooter"}.get(ty)
+            p = {"spans": [{"offset": off, "length": len(tx)}], "boundingRegions": [{"pageNumber": pg, "polygon": poly}], "content": tx}
+            if role:
+                p["role"] = role
+            paras.append(p)
+            lines.append({"content": tx, "polygon": poly, "spans": [{"offset": off, "length": len(tx)}]})
+            for w in tx.split():
+                words.append({"content": w, "polygon": poly, "confidence": round(0.93 + rnd.random() * 0.07, 3), "span": {"offset": off, "length": len(w)}})
+            content += tx + "\n"
+            off += len(tx) + 1
+        pages.append({"pageNumber": pg, "angle": 0, "width": 8.5, "height": 11, "unit": "inch", "words": words, "lines": lines, "spans": [{"offset": 0, "length": off}]})
+    tables = [{"rowCount": 3, "columnCount": 3, "cells": [{"rowIndex": r, "columnIndex": c, "content": f"{r}{c}", "boundingRegions": [{"pageNumber": 1, "polygon": [1, 2, 3, 4, 5, 6, 7, 8]}], "spans": [{"offset": 5, "length": 2}]} for r in range(3) for c in range(3)]}]
+    d = {"status": "succeeded", "createdDateTime": "2026-03-02T10:15:30Z", "analyzeResult": {"apiVersion": "2023-07-31", "modelId": "prebuilt-layout", "stringIndexType": "textElements", "content": content, "pages": pages,
+                                                                                        "paragraphs": paras, "tables": tables, "styles": [{"isHandwritten": False, "confidence": 0.95, "spans": [{"offset": 0, "length": 50}]}]}}
+    return json.dumps(d, indent=2) + "\n"
+
+
+case(
+    765,
+    claim="Unstructured, Docling and Azure Document Intelligence JSON dumps lose their geometry (coordinates, bbox, polygon), probabilities, text duplicates (text_as_html, orig, words, lines, top-level content), span offsets, ids and parent links "
+          "and are re-emitted as compact JSON; the type/label/role, page and text of every element, every table cell with its row and column, and the page numbers are unchanged.",
+    loses="coordinates and polygons, confidences and detection probabilities, element ids and parent links (the document hierarchy), table HTML, word-level records, span offsets, page sizes and per-file constants (filename, filetype, languages)",
+    encode=strip_parser_json,
+    probes=probes_765,
+    fixtures=[
+        Fixture("Unstructured partition_pdf elements (27, with coordinates and probabilities)", make_unstructured(), True),
+        Fixture("Docling export (texts with prov bbox, table cells with bbox)", make_docling(), True),
+        Fixture("Azure Document Intelligence prebuilt-layout (words, lines, paragraphs, tables)", make_azure(), True),
+        Fixture("Azure result without paragraphs (older api: lines carry the text)", json.dumps({"analyzeResult": {"pages": [{"pageNumber": 1, "words": [{"content": "hi", "polygon": [1, 2, 3, 4, 5, 6, 7, 8], "confidence": 0.99}] * 30,
+                                                                                                                      "lines": [{"content": "hi hi", "polygon": [1, 2, 3, 4, 5, 6, 7, 8]}]}]}}, indent=2), True),
+        Fixture("JSON that is neither", json.dumps({"texts": "x", "body": 1, "other": [1, 2, 3]}, indent=2), False),
+        Fixture("elements that carry no geometry already (compact)", json.dumps([{"type": "Title", "text": "Hi", "metadata": {"page_number": 1}}], separators=(",", ":")), False),
+        Fixture("not JSON", "partition_pdf took 4.2s\n", False),
+    ],
+    min_gain=0.5,
+)

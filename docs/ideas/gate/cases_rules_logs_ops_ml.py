@@ -513,9 +513,9 @@ def decimate_steps(text: str) -> str:
     keep = [m is None for m in parsed]
     keep[idx[0]] = keep[idx[-1]] = True
     finite = [i for i in idx if all(math.isfinite(float(parsed[i].group(g))) for g in (2, 3, 4))]
-    for i in idx:
-        if i not in finite:
-            keep[i] = True
+    keep_nonfinite = set(idx) - set(finite)
+    for i in keep_nonfinite:
+        keep[i] = True
     for g, sign in ((2, 1), (2, -1), (4, -1)):  # 3 lowest losses, 3 highest losses, 3 highest grad_norms (earlier line wins a tie)
         vals = [sign * float(parsed[i].group(g)) for i in finite]
         for k in sorted(range(len(finite)), key=lambda k: (vals[k], k))[:3]:
@@ -3621,7 +3621,7 @@ def _tf_run() -> str:
 def _lightning_sklearn_run(crash: bool) -> str:
     out = ["GPU available: True (cuda), used: True", "TPU available: False, using: 0 TPU cores", "HPU available: False, using: 0 HPUs",
            "LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]", "💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Cloud.",
-           "Epoch 0: 100%|██████████| 12/12 [00:01<00:00, 9.1it/s, loss=0.62]", "Epoch 1: 100%|██████████| 12/12 [00:01<00:00, 9.4it/s, loss=0.41]",
+           "/work/train.py:12: UserWarning: GPU available: False for the aux model, falling back to cpu for it", "Epoch 0: 100%|██████████| 12/12 [00:01<00:00, 9.1it/s, loss=0.62]", "Epoch 1: 100%|██████████| 12/12 [00:01<00:00, 9.4it/s, loss=0.41]",
            "/usr/lib/python3/dist-packages/sklearn/linear_model/_logistic.py:460: ConvergenceWarning: lbfgs failed to converge (status=1):", "STOP: TOTAL NO. of ITERATIONS REACHED LIMIT.", "",
            "Increase the number of iterations (max_iter) or scale the data as shown in:", "    https://scikit-learn.org/stable/modules/preprocessing.html",
            "Please also refer to the documentation for alternative solver options:", "    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression", "  n_iter_i = _check_optimize_result(",
@@ -3988,7 +3988,8 @@ def _nmap_run() -> str:
             "|       TLS_RSA_WITH_3DES_EDE_CBC_SHA (rsa 2048) - C", "|     compressors: ", "|       NULL", "|     cipher preference: client", "|     warnings: ", "|       64-bit block cipher 3DES vulnerable to SWEET32 attack",
             "|   TLSv1.2: ", "|     ciphers: "]
     for name in ("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384"):
-        out.append(f"|       {name} ({'dh 1024' if 'DHE_RSA' in name else 'secp256r1'}) - {'B' if 'DHE_RSA' in name else 'A'}")
+        weak = name.startswith("TLS_DHE_")
+        out.append(f"|       {name} ({'dh 1024' if weak else 'secp256r1'}) - {'B' if weak else 'A'}")
     out += ["|     compressors: ", "|       NULL", "|     cipher preference: server", "|_  least strength: C", "8080/tcp open  http     Jetty 9.4.z-SNAPSHOT", "|_http-title: Dashboard",
             "", "Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .", "Nmap done: 1 IP address (1 host up) scanned in 12.34 seconds"]
     return "\n".join(out) + "\n"
@@ -4006,4 +4007,476 @@ case(
         Fixture("plain nmap -sV without scripts", "PORT   STATE SERVICE VERSION\n22/tcp open  ssh     OpenSSH 7.4 (protocol 2.0)\n80/tcp open  http    nginx 1.14.0\n", False),
     ],
     min_gain=0.2,
+)
+
+
+# ===============================================================================================================
+# #124 Rails, Django and Alembic log pack: one line per quiet request, collapsed migration runs, no boilerplate.
+#
+# Rails: a 'Started ...' to 'Completed ...' block whose lines are all recognised (Processing by, Parameters, SQL, Rendering,
+# Rendered, caller arrows, Redirected, CACHE), with status below 400, under 500 ms and no error word, becomes
+# 'GET /path -> 200 12ms Ctrl#action sql=N ar=1.2'. Slow, failing and unrecognised blocks stay verbatim. Django: a run of 3+
+# '  Applying app.0001_x... OK' lines becomes '  Applied N migrations OK: first .. last'; a 'Not Found: /x' line directly above
+# the access line for /x with the matching status is dropped. Alembic 'Context impl' and 'Will assume transactional DDL'
+# lines fold into '[... N fixed lines folded (alembic)]'.
+
+_RB_START = re.compile(r'^Started ([A-Z]+) "([^" ]*)" for \S+ at .+$', A)
+_RB_DONE = re.compile(r"^Completed (\d{3}) [A-Za-z ]+ in (\d+)ms(?: \((.*)\))?$", A)
+_RB_PROC = re.compile(r"^Processing by (\S+) as \S+$", A)
+_RB_SQL = re.compile(r"^  \S.* \(\d+(?:\.\d+)?ms\)  \S", A)
+_RB_SUM = re.compile(r"^([A-Z]+) (\S+) -> (\d{3}) (\d+)ms (\S+) sql=(\d+) ar=(\S+)$", A)
+_RB_INTERIOR = ("Processing by ", "  Parameters: ", "  Rendering ", "  Rendered ", "  ↳ ", "Redirected to ", "  CACHE ", "  Cannot render console")
+_DJ_OK = re.compile(r"^  Applying ([A-Za-z0-9_]+\.[A-Za-z0-9_]+)\.\.\. OK$", A)
+_DJ_ACCESS = re.compile(r'^\[\d\d/[A-Za-z]{3}/\d{4} \d\d:\d\d:\d\d\] "[A-Z]+ (\S*) HTTP/[\d.]+" (\d{3}) (?:\d+|-)$', A)
+_DJ_REASON = {"Not Found": "404", "Bad Request": "400", "Forbidden": "403", "Method Not Allowed": "405", "Unauthorized": "401", "Internal Server Error": "500"}
+_DJ_WHY = re.compile(r"^(Not Found|Bad Request|Forbidden|Method Not Allowed|Unauthorized|Internal Server Error): (\S*)$", A)
+_DJ_MARK = re.compile(r"^  Applied (\d+) migrations OK: (\S+) \.\. (\S+)$", A)
+_AL_FIXED = ("INFO  [alembic.runtime.migration] Context impl ", "INFO  [alembic.runtime.migration] Will assume transactional DDL.")
+_M124 = re.compile(r"^\[\.\.\. (\d+) fixed lines folded \(alembic\)\]$", A)
+_RB_ALARM = ("rror", "xception", "FATAL", "fail")
+
+
+def _rb_interior_ok(l: str) -> bool:
+    return l.startswith(_RB_INTERIOR) or bool(_RB_SQL.match(l)) and not l.startswith(_RB_INTERIOR)
+
+
+def _rb_block(lines: list[str], i: int):
+    """(end index, summary or None) for a Rails request block starting at i."""
+    m = _RB_START.match(lines[i])
+    if not m:
+        return None
+    j = i + 1
+    while j < len(lines) and not lines[j].startswith("Completed ") and not lines[j].startswith("Started "):
+        j += 1
+    if j >= len(lines) or not lines[j].startswith("Completed "):
+        return None
+    d = _RB_DONE.match(lines[j])
+    if not d:
+        return j, None
+    interior = lines[i + 1:j]
+    if int(d.group(1)) >= 400 or int(d.group(2)) >= 500 or not all(_rb_interior_ok(l) for l in interior) or any(k in x for x in lines[i:j + 1] for k in _RB_ALARM):
+        return j, None
+    ctrl = next((p.group(1) for p in map(_RB_PROC.match, interior) if p), "-")
+    ar = re.search(r"ActiveRecord: (\d+(?:\.\d+)?)ms", d.group(3) or "", A)
+    sql = sum(1 for l in interior if _RB_SQL.match(l) and not l.startswith(_RB_INTERIOR))
+    return j, f"{m.group(1)} {m.group(2)} -> {d.group(1)} {d.group(2)}ms {ctrl} sql={sql} ar={ar.group(1) if ar else '-'}"
+
+
+def compact_frameworks(text: str) -> str:
+    lines, nl = split_nl(text)
+    if any(_RB_SUM.match(l) or _DJ_MARK.match(l) or _M124.match(l) for l in lines):
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        l = lines[i]
+        blk = _rb_block(lines, i) if l.startswith("Started ") else None
+        if blk and blk[1]:
+            out.append(blk[1])
+            i = blk[0] + 1
+            continue
+        if _DJ_OK.match(l):
+            j = i
+            while j < len(lines) and _DJ_OK.match(lines[j]):
+                j += 1
+            if j - i >= 3:
+                out.append(f"  Applied {j - i} migrations OK: {_DJ_OK.match(l).group(1)} .. {_DJ_OK.match(lines[j - 1]).group(1)}")
+                i = j
+                continue
+        w = _DJ_WHY.match(l)
+        if w:
+            j = i + 1
+            while j < len(lines) and _DJ_WHY.match(lines[j]):  # reason lines in a run all look at the access line that ends the run
+                j += 1
+            a = _DJ_ACCESS.match(lines[j]) if j < len(lines) else None
+            if a and a.group(1) == w.group(2) and a.group(2) == _DJ_REASON[w.group(1)]:
+                i += 1
+                continue
+        if l.startswith(_AL_FIXED):
+            j = i
+            while j < len(lines) and lines[j].startswith(_AL_FIXED):
+                j += 1
+            out.append(f"[... {j - i} fixed lines folded (alembic)]")
+            i = j
+            continue
+        out.append(l)
+        i += 1
+    return gate(text, join_nl(out, nl))
+
+
+def _rb_fields(lines: list[str], i: int):
+    """Probe-side request facts for a block starting at i: (end index, tuple, foldable) or None."""
+    l = lines[i]
+    if not l.startswith('Started '):
+        return None
+    method, _, rest = l[8:].partition(' "')
+    path, q, rest2 = rest.partition('" for ')
+    if not (q and method.isascii() and method.isalpha() and method.isupper() and " " not in path and " at " in rest2 and rest2.partition(" at ")[0] and " " not in rest2.partition(" at ")[0] and rest2.partition(" at ")[2]):
+        return None
+    j = i + 1
+    while j < len(lines) and not lines[j].startswith(("Completed ", "Started ")):
+        j += 1
+    if j >= len(lines) or not lines[j].startswith("Completed "):
+        return None
+    c = lines[j][10:]
+    status, _, rest3 = c.partition(" ")
+    reason, inn, rest4 = rest3.partition(" in ")
+    if not (inn and isdigits(status) and len(status) == 3 and reason and all(ch.isascii() and (ch.isalpha() or ch == " ") for ch in reason)):
+        return j, None, False
+    ms, ms_unit, tail = rest4.partition("ms")
+    paren = None
+    if tail != "":
+        if not (tail.startswith(" (") and tail.endswith(")")):
+            return j, None, False
+        paren = tail[2:-1]
+    if not (ms_unit and isdigits(ms)):
+        return j, None, False
+    interior = lines[i + 1:j]
+    ctrl = "-"
+    for x in interior:
+        if x.startswith("Processing by "):
+            parts = x[14:].split(" ")
+            if len(parts) == 3 and parts[1] == "as" and parts[0]:
+                ctrl = parts[0]
+                break
+    ar = "-"
+    if paren and "ActiveRecord: " in paren:
+        v = paren.partition("ActiveRecord: ")[2].partition("ms")
+        a, dot, b = v[0].partition(".")
+        if v[1] and isdigits(a) and (not dot or isdigits(b)):
+            ar = v[0]
+
+    def is_sql(x: str) -> bool:
+        k = x.find("ms)  ")
+        if not x.startswith("  ") or x.startswith(_RB_INTERIOR) or k < 0 or len(x) <= k + 5 or x[k + 5].isspace():
+            return False
+        jj = x.rfind(" (", 0, k)
+        num = x[jj + 2:k] if jj > 1 else ""
+        a, dot, b = num.partition(".")
+        return isdigits(a) and (not dot or isdigits(b)) and bool(x[2:jj].strip(" ")) and x[2] != " "
+
+    sql = sum(1 for x in interior if is_sql(x))
+    ok = int(status) < 400 and int(ms) < 500 and all(x.startswith(_RB_INTERIOR) or is_sql(x) for x in interior) and not any(k in x for x in lines[i:j + 1] for k in _RB_ALARM)
+    return j, (method, path, status, ms, ctrl, str(sql), ar), ok
+
+
+def probes_124(text: str) -> dict:
+    lines, _ = split_nl(text)
+    reqs, verbatim, runs, alembic = [], [], [], 0
+    i = 0
+    while i < len(lines):
+        l = lines[i]
+        blk = _rb_fields(lines, i)
+        if blk and blk[1]:
+            reqs.append(blk[1])
+            if not blk[2]:
+                verbatim += lines[i:blk[0] + 1]
+            i = blk[0] + 1
+            continue
+        t = l.split(" ")
+        if len(t) == 8 and t[2] == "->" and t[6].startswith("sql=") and t[7].startswith("ar=") and isdigits(t[3]) and t[4].endswith("ms") and isdigits(t[4][:-2]) and isdigits(t[6][4:]) and t[0].isalpha() and t[0].isupper():
+            reqs.append((t[0], t[1], t[3], t[4][:-2], t[5], t[6][4:], t[7][3:]))
+            i += 1
+            continue
+        if l.startswith("  Applying ") and l.endswith("... OK") and "." in l[11:-6] and " " not in l[11:-6]:
+            j = i
+            while j < len(lines) and lines[j].startswith("  Applying ") and lines[j].endswith("... OK") and " " not in lines[j][11:-6] and "." in lines[j][11:-6]:
+                j += 1
+            names = [x[11:-6] for x in lines[i:j]]
+            if all(len(n.split(".")) == 2 and all(p and all(c.isascii() and (c.isalnum() or c == "_") for c in p) for p in n.split(".")) for n in names):
+                if j - i >= 3:
+                    runs.append((j - i, names[0], names[-1]))
+                else:
+                    verbatim += lines[i:j]
+                i = j
+                continue
+        if l.startswith("  Applied ") and " migrations OK: " in l and " .. " in l:
+            n, _, rest = l[10:].partition(" migrations OK: ")
+            a, _, b = rest.partition(" .. ")
+            if isdigits(n) and a and b and " " not in a + b:
+                runs.append((int(n), a, b))
+                i += 1
+                continue
+        w = l.partition(": ")
+        if w[0] in _DJ_REASON and w[1] and " " not in w[2]:
+            j = i + 1
+            while j < len(lines):
+                nx = lines[j].partition(": ")
+                if nx[0] in _DJ_REASON and nx[1] and " " not in nx[2]:
+                    j += 1
+                else:
+                    break
+            a = _DJ_ACCESS.match(lines[j]) if j < len(lines) and lines[j].startswith("[") and lines[j].count('"') == 2 else None
+            if a and a.group(1) == w[2] and a.group(2) == _DJ_REASON[w[0]]:
+                i += 1
+                continue
+        if l.startswith(_AL_FIXED):
+            alembic += 1
+            i += 1
+            continue
+        m = _M124.match(l)
+        if m:
+            alembic += int(m.group(1))
+            i += 1
+            continue
+        verbatim.append(l)
+        i += 1
+    return {
+        "requests (method, path, status, ms, controller, sql statements, ActiveRecord ms)": reqs,
+        "migration runs of 3+ (count, first, last)": runs,
+        "alembic fixed lines": alembic,
+        "lines that must stay verbatim: slow, failing and odd requests, everything outside requests, short runs, errors": verbatim,
+    }
+
+
+def _rails_log() -> str:
+    def req(method, path, status, ms, ctrl=None, sql=(), extra=(), reason="OK", ar=None):
+        out = [f'Started {method} "{path}" for 127.0.0.1 at 2024-03-05 10:15:01 +0000']
+        if ctrl:
+            out.append(f"Processing by {ctrl} as HTML")
+            out.append('  Parameters: {"id"=>"12"}')
+        for k, q in enumerate(sql):
+            out.append(f'  {q} (0.{k + 3}ms)  SELECT "posts".* FROM "posts" WHERE "posts"."id" = $1 LIMIT $2  [["id", 12], ["LIMIT", 1]]')
+            out.append("  ↳ app/controllers/posts_controller.rb:7:in `show'")
+        out += list(extra)
+        views = f"Views: {ms * 0.7:.1f}ms | " if ctrl else ""
+        out.append(f"Completed {status} {reason} in {ms}ms ({views}ActiveRecord: {ar or 0.4 * len(sql):.1f}ms | Allocations: {ms * 211})" if ctrl else f"Completed {status} {reason} in {ms}ms (Allocations: 85)")
+        out.append("")
+        return out
+    out = []
+    out += req("POST", "/orders", 500, 87, "OrdersController#create", ["Order Create"], ["ActiveRecord::StatementInvalid (PG::NotNullViolation: ERROR:  null value in column \"customer_id\"):", "  app/models/order.rb:19:in `total'"], "Internal Server Error")
+    for k in range(5):
+        out += req("GET", f"/posts/{10 + k}", 200, 11 + k, "PostsController#show", ["Post Load", "User Load"], ["  Rendering posts/show.html.erb within layouts/application", "  Rendered posts/show.html.erb within layouts/application (Duration: 3.1ms | Allocations: 1234)"])
+    out += req("GET", "/assets/application.css", 304, 1, None, [])
+    out += req("GET", "/reports/annual", 200, 1234, "ReportsController#show", ["Report Load"] * 3, [], ar=1100.5)
+    for k in range(4):
+        out += req("GET", f"/posts?page={k}", 200, 15 + k, "PostsController#index", ["Post Load"] + ["User Load"] * 2)
+    out += req("GET", "/favicon.ico", 404, 3, None, [], reason="Not Found")
+    return "\n".join(out) + "\n"
+
+
+def _django_log(fail: bool) -> str:
+    names = ["contenttypes.0001_initial", "contenttypes.0002_remove_content_type_name", "auth.0001_initial", "auth.0002_alter_permission_name_max_length", "auth.0003_alter_user_email_max_length",
+             "auth.0004_alter_user_username_opts", "auth.0005_alter_user_last_login_null", "auth.0006_require_contenttypes_0002", "auth.0007_alter_validators_add_error_messages",
+             "auth.0008_alter_user_username_max_length", "admin.0001_initial", "admin.0002_logentry_remove_auto_add", "sessions.0001_initial", "shop.0001_initial", "shop.0002_cart"]
+    out = ["Operations to perform:", "  Apply all migrations: admin, auth, contenttypes, sessions, shop", "Running migrations:"]
+    out += [f"  Applying {n}... OK" for n in names]
+    if fail:
+        out += ["  Applying shop.0003_add_sku_index...Traceback (most recent call last):", '  File "/srv/app/manage.py", line 22, in <module>', "django.db.utils.IntegrityError: could not create unique index \"shop_item_sku_key\""]
+    else:
+        out += ["  Applying shop.0003_add_sku_index... OK", "Watching for file changes with StatReloader", "Performing system checks...", "System check identified no issues (0 silenced)."]
+        out += ['[05/Mar/2024 10:15:01] "GET / HTTP/1.1" 200 1234', "Not Found: /favicon.ico", '[05/Mar/2024 10:15:01] "GET /favicon.ico HTTP/1.1" 404 179', '[05/Mar/2024 10:15:02] "GET /shop/ HTTP/1.1" 200 5120',
+                "Not Found: /robots.txt", '[05/Mar/2024 10:15:03] "GET /robots.txt HTTP/1.1" 404 179', "Internal Server Error: /shop/checkout", '[05/Mar/2024 10:15:04] "POST /shop/checkout HTTP/1.1" 500 145']
+    return "\n".join(out) + "\n"
+
+
+def _alembic_log(fail: bool) -> str:
+    out = ["INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.", "INFO  [alembic.runtime.migration] Will assume transactional DDL.", "INFO  [alembic.runtime.migration] Running upgrade  -> a1b2c3d4, create users"]
+    if fail:
+        out += ["INFO  [alembic.runtime.migration] Running upgrade a1b2c3d4 -> d4e5f6a7, add email index", "sqlalchemy.exc.ProgrammingError: (psycopg2.errors.DuplicateTable) relation \"ix_users_email\" already exists"]
+    else:
+        out += ["INFO  [alembic.runtime.migration] Running upgrade a1b2c3d4 -> d4e5f6a7, add email index"]
+    return "\n".join(out) + "\n"
+
+
+case(
+    124,
+    claim="A quiet Rails request block (status below 400, under 500 ms, only recognised lines) becomes 'METHOD /path -> status Nms Ctrl#action sql=N ar=X'; slow, failing, error-bearing and unrecognised blocks stay verbatim; Django runs of 3+ '  Applying x... OK' become one line with count, first and last migration; a 'Not Found:/Bad Request:/...' line above its access line (several reason lines in a row all look at the same access line) is dropped; Alembic 'Context impl' and 'transactional DDL' lines fold to a count.",
+    loses="the client address, timestamp, parameters, SQL text, view timings and caller arrows of quiet requests, the middle migration names of a long run, and the Django reason line that the access line repeats",
+    encode=compact_frameworks,
+    probes=probes_124,
+    fixtures=lambda: [
+        Fixture("Rails development log: a 500 first, 11 quiet requests, a 1234 ms report in the middle, a 404 last", _rails_log(), True),
+        Fixture("Django migrate (15 OK) then runserver with Not Found pairs and a 500", _django_log(False), True),
+        Fixture("failure variant: Django migrate dies on the 16th migration", _django_log(True), True),
+        Fixture("alembic upgrade (boilerplate folds, upgrades stay)", _alembic_log(False) + _alembic_log(True), True),
+        Fixture("a single Rails request that is slow", "\n".join(_rails_log().split("\n")[:1] + ["Completed 200 OK in 900ms (Allocations: 85)", ""]) + "\n", False),
+    ],
+    min_gain=0.1,
+)
+
+
+# ===============================================================================================================
+# #125 Webpack and Next.js build report digest.
+#
+# webpack: leaf module lines ('    ./src/App.js 4 KiB [built] [code generated]') in a run of 2+ fold to '    [N leaf modules folded]'
+# (the 'modules by path' group lines with their sizes stay); of all 'asset NAME SIZE UNIT ...' lines only the 5 largest stay,
+# and a run of 2+ others becomes 'asset [+N smaller assets, total BYTES bytes]'. WARNING/ERROR blocks, the compiled-with
+# line and every other line stay. Next.js: the constant legend lines ('○  (Static)  prerendered ...') fold to a count and
+# so do the 'chunks/...' lines under 'First Load JS shared by all'; route rows and the shared total stay.
+
+_WP_ASSET = re.compile(r"^asset ([^ ]+) (\d+(?:\.\d+)?) (bytes|KiB|MiB|GiB)(?: .*)?$", A)
+_WP_LEAF = re.compile(r"^( {4,})(\.{1,2}/\S*) \d+(?:\.\d+)? (?:bytes|KiB|MiB|GiB)(?: \[[a-z ]+\])*$", A)
+_NX_LEGEND = re.compile(r"^[○●λƒ◐✓]  \((?:Static|SSG|Dynamic|ISR|PPR|Partial Prerender)\) .*$")
+_NX_CHUNK = re.compile(r"^  [├└] (?:chunks/\S+|css/\S+|other shared chunks \(total\)) +\d+(?:\.\d+)? [kM]?B$")
+_M125 = re.compile(r"^(?: +\[(\d+) leaf modules folded\]|asset \[\+(\d+) smaller assets, total (\d+(?:\.\d+)?) bytes\]|\[\.\.\. (\d+) (legend|shared chunk) lines folded \(next\)\])$", A)
+_UNIT = {"bytes": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3}
+
+
+def _bytes(num: str, unit: str):
+    from decimal import Decimal
+
+    return Decimal(num) * _UNIT[unit]
+
+
+def _fmt_dec(d) -> str:
+    return format(d.normalize(), "f")
+
+
+def digest_build(text: str) -> str:
+    lines, nl = split_nl(text)
+    if any(_M125.match(l) for l in lines):
+        return text
+    assets = [(i, m) for i, m in ((i, _WP_ASSET.match(l)) for i, l in enumerate(lines)) if m]
+    top = {i for i, _ in sorted(assets, key=lambda a: (-_bytes(a[1].group(2), a[1].group(3)), a[0]))[:5]}
+    isasset = {i for i, _ in assets}
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        l = lines[i]
+        if i in isasset and i not in top:
+            j = i
+            while j < len(lines) and j in isasset and j not in top:
+                j += 1
+            if j - i >= 2:
+                total = sum(_bytes(_WP_ASSET.match(lines[k]).group(2), _WP_ASSET.match(lines[k]).group(3)) for k in range(i, j))
+                out.append(f"asset [+{j - i} smaller assets, total {_fmt_dec(total)} bytes]")
+                i = j
+                continue
+        elif _WP_LEAF.match(l):
+            j = i
+            while j < len(lines) and _WP_LEAF.match(lines[j]):
+                j += 1
+            if j - i >= 2:
+                out.append(f"{_WP_LEAF.match(l).group(1)}[{j - i} leaf modules folded]")
+                i = j
+                continue
+        elif _NX_LEGEND.match(l) or _NX_CHUNK.match(l):
+            kind, rx = ("legend", _NX_LEGEND) if _NX_LEGEND.match(l) else ("shared chunk", _NX_CHUNK)
+            j = i
+            while j < len(lines) and rx.match(lines[j]):
+                j += 1
+            if j - i >= 2:
+                out.append(f"[... {j - i} {kind} lines folded (next)]")
+                i = j
+                continue
+        out.append(l)
+        i += 1
+    return gate(text, join_nl(out, nl))
+
+
+def _wp_asset_probe(l: str):
+    t = l.split(" ")
+    if len(t) >= 4 and t[0] == "asset" and t[1] and t[3] in _UNIT:
+        a, dot, b = t[2].partition(".")
+        if isdigits(a) and (not dot or isdigits(b)):
+            return t[1], t[2], t[3]
+    return None
+
+
+def _wp_leaf_probe(l: str) -> bool:
+    body = l.lstrip(" ")
+    if len(l) - len(body) < 4:
+        return False
+    t = body.split(" ")
+    if len(t) < 3 or not t[0].startswith(("./", "../")) and t[0] not in (".", "..") or t[0] == "" or len(t) < 3:
+        return False
+    if not (t[0].startswith("./") or t[0].startswith("../")) or t[2] not in _UNIT:
+        return False
+    a, dot, b = t[1].partition(".")
+    if not (isdigits(a) and (not dot or isdigits(b))):
+        return False
+    return all(x.startswith("[") and x.endswith("]") for x in " ".join(t[3:]).replace("] [", "]\x00[").split("\x00") if x) if len(t) > 3 else True
+
+
+def probes_125(text: str) -> dict:
+    from decimal import Decimal
+
+    lines, _ = split_nl(text)
+    assets, total, n_assets, leaf, legend, chunks = [], Decimal(0), 0, 0, 0, 0
+    verbatim: list[tuple[int, str]] = []
+    v = 0
+    for l in lines:
+        m = _M125.match(l)
+        if m:
+            if m.group(1):
+                leaf += int(m.group(1))
+                v += int(m.group(1))
+            elif m.group(2):
+                n_assets += int(m.group(2))
+                total += Decimal(m.group(3))
+                v += int(m.group(2))
+            else:
+                if m.group(5) == "legend":
+                    legend += int(m.group(4))
+                else:
+                    chunks += int(m.group(4))
+                v += int(m.group(4))
+            continue
+        a = _wp_asset_probe(l)
+        if a:
+            assets.append((v, a, l))
+            n_assets += 1
+            total += _bytes(a[1], a[2])
+        elif _wp_leaf_probe(l):
+            leaf += 1
+        elif len(l) >= 4 and l[0] in "○●λƒ◐✓" and l[1:3] == "  " and l[3:].startswith("(") and ") " in l and l[4:].partition(")")[0] in ("Static", "SSG", "Dynamic", "ISR", "PPR", "Partial Prerender"):
+            legend += 1
+        elif l.startswith("  ") and l[2:3] in ("├", "└") and l[3:4] == " " and l[4:].startswith(("chunks/", "css/", "other shared chunks (total)")) and l.rstrip(" ").rsplit(" ", 2)[-1] in ("kB", "MB", "B") and isdigits(l.rstrip(" ").rsplit(" ", 2)[-2].replace(".", "", 1)):
+            chunks += 1
+        else:
+            verbatim.append((v, l))
+        v += 1
+    top5 = sorted(assets, key=lambda a: (-_bytes(a[1][1], a[1][2]), a[0]))[:5]
+    return {
+        "5 largest assets (name, size, unit)": [a[1] for a in top5],
+        "number of assets and their total size in bytes": (n_assets, str(total.normalize()) if total else "0"),
+        "leaf module lines": leaf,
+        "next legend lines and shared chunk lines": (legend, chunks),
+        "all other lines: group sizes, warnings, errors, routes, summaries (virtual line, text)": verbatim,
+    }
+
+
+def _webpack_out(errors: bool) -> str:
+    out = []
+    for name, size, unit, flags in (("main.js", "3.1", "MiB", " [emitted] [minimized] (name: main) 1 related asset"), ("vendors.js", "812", "KiB", " [emitted] [minimized] (name: vendors)"),
+                                     ("styles.css", "112", "KiB", " [emitted] (name: main)"), ("chunk-admin.js", "96.5", "KiB", " [emitted]"), ("chunk-charts.js", "64", "KiB", " [emitted]"),
+                                     ("logo.svg", "4.2", "KiB", " [emitted] [from: src/logo.svg] (auxiliary name: main)"), ("favicon.ico", "1.1", "KiB", " [emitted]"), ("index.html", "1.1", "KiB", " [emitted]"),
+                                     ("robots.txt", "98", "bytes", " [emitted]")):
+        out.append(f"asset {name} {size} {unit}{flags}")
+    out += ["runtime modules 1.25 KiB 6 modules", "orphan modules 12 KiB [orphan] 4 modules", "cacheable modules 1.5 MiB", "  modules by path ./node_modules/ 1.4 MiB", "    modules by path ./node_modules/react-dom/ 1 MiB"]
+    out += [f"      ./node_modules/react-dom/cjs/part-{k}.js {k + 3}.{k} KiB [built] [code generated]" for k in range(9)]
+    out += ["    modules by path ./node_modules/lodash/ 540 KiB"] + [f"      ./node_modules/lodash/fn{k}.js 2.{k} KiB [built] [code generated]" for k in range(12)]
+    out += ["  modules by path ./src/ 92 KiB"] + [f"    ./src/{n}.js {k + 1}.5 KiB [built] [code generated]" for k, n in enumerate(["index", "App", "api", "store", "routes", "Header"])]
+    out += ["    ./src/legacy.js 40 KiB [built] [code generated] [1 warning]"]
+    out += ["", "WARNING in ./src/legacy.js 12:4-18", "export 'bar' (imported as 'bar') was not found in './baz' (possible exports: qux)", " @ ./src/index.js 5:0-30", ""]
+    if errors:
+        out += ["ERROR in ./src/App.tsx 14:7", "Module not found: Error: Can't resolve './missing' in '/repo/src'", " @ ./src/index.tsx 3:0-28", "", "webpack 5.90.0 compiled with 1 error and 1 warning in 4321 ms"]
+    else:
+        out += ["webpack 5.90.0 compiled with 1 warning in 4321 ms"]
+    return "\n".join(out) + "\n"
+
+
+def _next_out() -> str:
+    out = ["   ▲ Next.js 14.1.0", "", "   Creating an optimized production build ...", " ✓ Compiled successfully", " ✓ Linting and checking validity of types", " ✓ Collecting page data", " ✓ Generating static pages (8/8)", "",
+           "Route (app)                              Size     First Load JS", "┌ ○ /                                    5.2 kB          92 kB", "├ ○ /_not-found                          871 B           88 kB",
+           "├ λ /api/orders                          0 B                0 B", "├ ○ /dashboard                           12.4 kB        104 kB", "├ λ /orders/[id]                         3.1 kB          95 kB", "└ ○ /settings                            2.2 kB          93 kB",
+           "+ First Load JS shared by all            87.3 kB", "  ├ chunks/23-5f9c.js                    31.5 kB", "  ├ chunks/fd9d1056-8c70.js              53.6 kB", "  ├ chunks/main-app-31c6.js              230 B", "  └ other shared chunks (total)          1.9 kB", "",
+           "○  (Static)  prerendered as static content", "λ  (Dynamic)  server-rendered on demand", ""]
+    return "\n".join(out)
+
+
+case(
+    125,
+    claim="In a webpack report only the 5 largest 'asset' lines stay (runs of smaller ones become one line with their count and exact total bytes) and runs of 2+ leaf module lines fold to a count, while the 'modules by path' group sizes, every WARNING/ERROR block and the compiled-with line stay; in a Next.js report the constant legend and the 'chunks/...' lines under the shared total fold to counts and every route row stays.",
+    loses="the names, flags and sizes of assets beyond the 5 largest (count and total remain), the path and size of each leaf module, the sizes of individual shared Next.js chunks, and the legend text",
+    encode=digest_build,
+    probes=probes_125,
+    fixtures=lambda: [
+        Fixture("webpack 5 build: biggest asset first, group sizes in the middle, one WARNING block, summary last", _webpack_out(False), True),
+        Fixture("failure variant: the same build with a Module not found ERROR block at the end", _webpack_out(True), True),
+        Fixture("Next.js 14 route table with legend and shared chunks", _next_out(), True),
+        Fixture("a tiny vite build (4 lines)", "vite v5.1.4 building for production...\n✓ 34 modules transformed.\ndist/index.html   0.46 kB │ gzip:  0.30 kB\n✓ built in 1.23s\n", False),
+    ],
+    min_gain=0.15,
 )

@@ -428,7 +428,7 @@ def unfold_bytes(text: str) -> str:
             out.append(lines[i])
             i += 1
             continue
-        ind, k, cnt, tail = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+        ind, cnt, tail = m.group(1), int(m.group(3)), m.group(4)
         body = lines[i + 1 : i + 1 + cnt]
         for t, ln in enumerate(body):
             h = ln[len(ind):]
@@ -641,7 +641,7 @@ def _secret(name: str, entries: dict[str, str], ns: str = "prod", kind: str = "S
     rows = [f"  {k}: {_b64(v)}" for k, v in entries.items()] + [f"  {k}: {v}" for k, v in (raw or {}).items()]
     rows.sort()
     return (
-        f"apiVersion: v1\ndata:\n" + "\n".join(rows) + f"\nkind: {kind}\nmetadata:\n  creationTimestamp: \"2026-10-02T09:12:44Z\"\n"
+        "apiVersion: v1\ndata:\n" + "\n".join(rows) + f"\nkind: {kind}\nmetadata:\n  creationTimestamp: \"2026-10-02T09:12:44Z\"\n"
         f"  name: {name}\n  namespace: {ns}\n  resourceVersion: \"184233\"\n  uid: 7f9c2d3e-5a1b-4c8e-9d20-3b6a1f0e4c77\ntype: Opaque\n"
     )
 
@@ -676,7 +676,11 @@ SECRET_LIST = (
 SECRET_SHORT = _secret("tiny", {"username": "admin", "password": "r3ad0nly"})
 BIN_BLOCK = _secret("keystore", {"alias": "main"}, raw={"keystore.jks": base64.b64encode(random.Random(3).randbytes(40)).decode()})
 CONFIGMAP = "apiVersion: v1\ndata:\n  LOG_LEVEL: debug\n  FEATURE_X: enabled\nkind: ConfigMap\nmetadata:\n  name: app-config\n  namespace: prod\n"
-NOT_K8S = "services:\n  web:\n    data:\n      token: dGVzdC10b2tlbi12YWx1ZQ==\n      user: YWRtaW4tdXNlcg==\n"
+_LONG = [f"service endpoint number {n} is https://svc-{n}.internal.example.com/api/v1/items?region=eu-west-{n}" for n in range(1, 5)]
+NOT_K8S = "services:\n  web:\n    data:\n" + "".join(f"      key{n}: {_b64(v)}\n" for n, v in enumerate(_LONG)) + "    image: web:1\n"
+CONFIGMAP_B64 = (
+    "apiVersion: v1\ndata:\n" + "".join(f"  key{n}: {_b64(v)}\n" for n, v in enumerate(_LONG)) + "kind: ConfigMap\nmetadata:\n  name: looks-like-base64\n"
+)
 TRICKY = _secret(
     "tricky",
     {
@@ -690,6 +694,7 @@ TRICKY = _secret(
         "quote": 'say "hi"',
         "unicode": "café 你好",
         "tab-line": "a\n\tb\n",
+        "tls.crt": CERT_PEM,  # big enough that the whole text shrinks, so every path above is exercised
     },
 )
 
@@ -706,6 +711,7 @@ case(
         Fixture("secret with one binary value keeps base64", BIN_BLOCK, False),
         Fixture("ConfigMap data is already plain text", CONFIGMAP, False),
         Fixture("data: block outside Kubernetes", NOT_K8S, False),
+        Fixture("ConfigMap whose values happen to be valid base64", CONFIGMAP_B64, False),
         Fixture("input that starts like the header", SEC_HDR + SECRET_APP, None),
         Fixture("already has stringData", SECRET_APP.replace("kind: Secret", "stringData:\n  extra: x\nkind: Secret"), None),
     ],
@@ -958,10 +964,6 @@ def _table_facts(text):
 
 def tables_equivalent(a: str, b: str) -> bool:
     return a == b or _table_facts(a) == _table_facts(b)
-
-
-def _tables_fixture(*dfs: str) -> str:
-    return "\n".join(dfs)
 
 
 HTML_WIDE = (
@@ -1616,7 +1618,7 @@ def csv_json_to_tsv(text: str) -> str:
 def tsv_equivalent(a: str, b: str) -> bool:
     if a == b:
         return True
-    if "\t" in a or a.count("\n") != b.count("\n") or a.endswith("\n") != b.endswith("\n"):
+    if "\t" in a or a.count("\n") != b.count("\n") or a.endswith("\n") != b.endswith("\n") or a.count("\r\n") != b.count("\r\n"):
         return False
     try:
         ra = list(csv.reader(io.StringIO(a, newline="")))
@@ -1723,7 +1725,8 @@ def unfold_resources(text: str) -> str:
             body = ln[len(ind):]
             nf = body.startswith("!")
             name, _, val = body[1 if nf else 0 :].partition("=")
-            out.append(f'{ind}<{tag} name="{name}"{" translatable=\"false\"" if nf else ""}>{val}</{tag}>')
+            attr = ' translatable="false"' if nf else ""
+            out.append(f'{ind}<{tag} name="{name}"{attr}>{val}</{tag}>')
         i += 1 + n
     return "\n".join(out)
 
