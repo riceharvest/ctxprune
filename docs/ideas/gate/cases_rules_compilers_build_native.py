@@ -3745,6 +3745,573 @@ case(
 
 
 # ===============================================================================================================
+# #427 Crash-report section triage: JVM hs_err, macOS crash report, Linux oops, Android tombstone. Keep the header,
+# signal/exception, crashing thread and its frames; replace register dumps, memory maps, library lists, other
+# threads and environment sections by '[ctxprune: N lines elided (Section)]'. RULE: the probe checks the signal
+# and exception lines, the crashing thread's frames, per-format identity lines, and that the line counts add up
+# (kept lines + sum of stub counts == original line count) so a stub can never hide a miscount.
+# hs_err and faulthandler are real captures (JVM 21 SIGSEGV through Unsafe.putAddress; Python faulthandler); the
+# other three formats are reconstructed from memory, with generated bulk sections.
+
+HS_ERR_CUT = (
+    '#\n'
+    '# A fatal error has been detected by the Java Runtime Environment:\n'
+    '#\n'
+    '#  SIGSEGV (0xb) at pc=0x00007f019d5c91d4, pid=9680, tid=9681\n'
+    '#\n'
+    '# JRE version: OpenJDK Runtime Environment (21.0.12.1+1) (build 21.0.12.1+1-1-24.04.4-Ubuntu)\n'
+    '# Java VM: OpenJDK 64-Bit Server VM (21.0.12.1+1-1-24.04.4-Ubuntu, mixed mode, sharing, tiered, compressed oops, compressed class ptrs, g1 gc, linux-amd64)\n'
+    '# Problematic frame:\n'
+    '# V  [libjvm.so+0xfc91d4]  Unsafe_PutLong+0xa4\n'
+    '#\n'
+    '# No core dump will be written. Core dumps have been disabled. To enable core dumping, try "ulimit -c unlimited" before starting Java again\n'
+    '#\n'
+    '# If you would like to submit a bug report, please visit:\n'
+    '#   https://bugs.launchpad.net/ubuntu/+source/openjdk-21\n'
+    '#\n'
+    '\n'
+    '---------------  S U M M A R Y ------------\n'
+    '\n'
+    'Command Line: -Djavax.net.ssl.trustStore=/etc/ssl/certs/java/cacerts -Djavax.net.ssl.trustStoreType=JKS Crash\n'
+    '\n'
+    'Host: Intel(R) Xeon(R) Processor @ 2.10GHz, 4 cores, 13G, Ubuntu 24.04.5 LTS\n'
+    'Time: Wed Nov  4 17:38:18 2026 UTC elapsed time: 0.182525 seconds (0d 0h 0m 0s)\n'
+    '\n'
+    '---------------  T H R E A D  ---------------\n'
+    '\n'
+    'Current thread (0x00007f019801a960):  JavaThread "main"             [_thread_in_vm, id=9681, stack(0x00007f019c500000,0x00007f019c600000) (1024K)]\n'
+    '\n'
+    'Stack: [0x00007f019c500000,0x00007f019c600000],  sp=0x00007f019c5fe670,  free space=1017k\n'
+    'Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)\n'
+    'V  [libjvm.so+0xfc91d4]  Unsafe_PutLong+0xa4\n'
+    'j  jdk.internal.misc.Unsafe.putLong(Ljava/lang/Object;JJ)V+0 java.base@21.0.12.1\n'
+    'j  jdk.internal.misc.Unsafe.putAddress(Ljava/lang/Object;JJ)V+24 java.base@21.0.12.1\n'
+    'j  jdk.internal.misc.Unsafe.putAddress(JJ)V+4 java.base@21.0.12.1\n'
+    'j  sun.misc.Unsafe.putAddress(JJ)V+5 jdk.unsupported@21.0.12.1\n'
+    'j  Crash.poke(Lsun/misc/Unsafe;)V+5\n'
+    'j  Crash.main([Ljava/lang/String;)V+23\n'
+    'v  ~StubRoutines::call_stub 0x00007f0187d37cc6\n'
+    'V  [libjvm.so+0x9199ea]  JavaCalls::call_helper(JavaValue*, methodHandle const&, JavaCallArguments*, JavaThread*)+0x2da\n'
+    'V  [libjvm.so+0x9be9bd]  jni_invoke_static(JNIEnv_*, JavaValue*, _jobject*, JNICallType, _jmethodID*, JNI_ArgumentPusher*, JavaThread*) [clone .constprop.1]+0x35d\n'
+    'V  [libjvm.so+0x9d1f22]  jni_CallStaticVoidMethod+0x252\n'
+    'C  [libjli.so+0x55ce]  JavaMain+0xfee\n'
+    'C  [libjli.so+0x849d]  ThreadJavaMain+0xd\n'
+    'C  [libc.so.6+0x9cb84]\n'
+    'Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)\n'
+    'j  jdk.internal.misc.Unsafe.putLong(Ljava/lang/Object;JJ)V+0 java.base@21.0.12.1\n'
+    'j  jdk.internal.misc.Unsafe.putAddress(Ljava/lang/Object;JJ)V+24 java.base@21.0.12.1\n'
+    'j  jdk.internal.misc.Unsafe.putAddress(JJ)V+4 java.base@21.0.12.1\n'
+    'j  sun.misc.Unsafe.putAddress(JJ)V+5 jdk.unsupported@21.0.12.1\n'
+    'j  Crash.poke(Lsun/misc/Unsafe;)V+5\n'
+    'j  Crash.main([Ljava/lang/String;)V+23\n'
+    'v  ~StubRoutines::call_stub 0x00007f0187d37cc6\n'
+    '\n'
+    'siginfo: si_signo: 11 (SIGSEGV), si_code: 1 (SEGV_MAPERR), si_addr: 0x0000000000000000\n'
+    '\n'
+    'Registers:\n'
+    'RAX=0x0000000000000000, RBX=0x00007f019801a960, RCX=0x0000000000000000, RDX=0x0000000000000000\n'
+    'RSP=0x00007f019c5fe670, RBP=0x00007f019c5fe690, RSI=0x00007f019c5fe760, RDI=0x00007f019801ad20\n'
+    'R8 =0x000000000000002a, R9 =0x0000000000000000, R10=0x00007f0187d43a91, R11=0x0000000000000101\n'
+    'R12=0x0000000000000000, R13=0x0000000000000000, R14=0x000000000000002a, R15=0x00007f019801a960\n'
+    'RIP=0x00007f019d5c91d4, EFLAGS=0x0000000000010246, CSGSFS=0x002b000000000033, ERR=0x0000000000000006\n'
+    '  TRAPNO=0x000000000000000e\n'
+    '\n'
+    'XMM[0]=0xffffffffffffffff 0xffffffff0000000e\n'
+    'XMM[1]=0x00007f019801b080 0x00007f019801b070\n'
+    'XMM[2]=0x00007f019801b080 0x00007f019801b070\n'
+    'XMM[3]=0x0000000000000000 0x00007f0187d3ea90\n'
+    'XMM[4]=0x00007f019c5fe7b0 0x00007f0000000000\n'
+    'XMM[5]=0x0000000000000000 0x00007f019801a960\n'
+    'XMM[6]=0x0000000000000000 0x00007f019801a960\n'
+    'XMM[7]=0xffffffffffffffff 0xffffffff0000000f\n'
+    'XMM[8]=0xcafebabecafebabe 0xcafebabecafebabe\n'
+    'XMM[9]=0x0000000000000000 0x00007f019d7c9080\n'
+    'XMM[10]=0x0000000000000000 0x00007f019d7c93e0\n'
+    'XMM[11]=0x0000000000000000 0x00007f019d7c91a0\n'
+    'XMM[12]=0x0000000000000000 0x0000000000000000\n'
+    'XMM[13]=0x0000000000000000 0x0000000000000000\n'
+    'XMM[14]=0x0000000000000000 0x0000000000000000\n'
+    'XMM[15]=0x0000000000000000 0x0000000000000000\n'
+    '  MXCSR=0x00001fa2\n'
+    '\n'
+    '\n'
+    'Register to memory mapping:\n'
+    '\n'
+    'RAX=0x0 is null\n'
+    'RBX=0x00007f019801a960 is a thread\n'
+    'RCX=0x0 is null\n'
+    'RDX=0x0 is null\n'
+    'RSP=0x00007f019c5fe670 is pointing into the stack for thread: 0x00007f019801a960\n'
+    'RBP=0x00007f019c5fe690 is pointing into the stack for thread: 0x00007f019801a960\n'
+    'RSI=0x00007f019c5fe760 is pointing into the stack for thread: 0x00007f019801a960\n'
+    'RDI=0x00007f019801ad20 points into unknown readable memory: 0x00007f019dad5060 | 60 50 ad 9d 01 7f 00 00\n'
+    'R8 =0x000000000000002a is an unknown value\n'
+    'R9 =0x0 is null\n'
+    'R10=0x00007f0187d43a91 is at code_begin+1009 in an Interpreter codelet\n'
+    'native method entry point (kind = native)  [0x00007f0187d436a0, 0x00007f0187d44210]  2928 bytes\n'
+    'R11=0x0000000000000101 is an unknown value\n'
+    'R12=0x0 is null\n'
+    'R13=0x0 is null\n'
+    'R14=0x000000000000002a is an unknown value\n'
+    'R15=0x00007f019801a960 is a thread\n'
+    '\n'
+    'Top of Stack: (sp=0x00007f019c5fe670)\n'
+    '0x00007f019c5fe670:   00007f0123442168 0000000000000000   h!D#............\n'
+    '0x00007f019c5fe680:   00007f0123be0598 00007f019c5fe760   ...#....`._.....\n'
+    '0x00007f019c5fe690:   00007f019c5fe718 00007f0187d43ac0   .._......:......\n'
+    '0x00007f019c5fe6a0:   0000000000000000 00007f0123be0598   ...........#....\n'
+    '0x00007f019c5fe6b0:   00007f019c5fe718 00007f0187d43797   .._......7......\n'
+    '0x00007f019c5fe6c0:   0000000000000000 00007f0187d4375f   ........_7......\n'
+    '0x00007f019c5fe6d0:   00007f019c5fe6d0 00007f0123be0598   .._........#....\n'
+    '0x00007f019c5fe6e0:   0000000000000009 00007f0123442fc0   ........./D#....\n'
+    '0x00007f019c5fe6f0:   0000000000000000 00000007ffe859c0   .........Y......\n'
+    '0x00007f019c5fe700:   00007f0123442168 0000000000000000   h!D#............\n'
+    '0x00007f019c5fe710:   00007f019c5fe738 00007f019c5fe7b0   8._......._.....\n'
+    '0x00007f019c5fe720:   00007f0187d3f180 0000000000000000   ................\n'
+    '0x00007f019c5fe730:   00007f0187d40fd7 000000000000002a   ........*.......\n'
+    '0x00007f019c5fe740:   0000000000000000 0000000000000000   ................\n'
+    '0x00007f019c5fe750:   0000000000000000 0000000000000000   ................\n'
+    '0x00007f019c5fe760:   00000007378028a8 00007f019c5fe768   .(.7....h._.....\n'
+    '0x00007f019c5fe770:   00007f0123bdb220 0000000000000007    ..#............\n'
+    '0x00007f019c5fe780:   00007f0123442fc0 0000000000000000   ./D#............\n'
+    '0x00007f019c5fe790:   00000007ffe859c0 00007f012343eb70   .Y......p.C#....\n'
+    '0x00007f019c5fe7a0:   00007f019c5fe738 00007f019c5fe7c0   8._......._.....\n'
+    '0x00007f019c5fe7b0:   00007f019c5fe838 00007f0187d3f180   8._.............\n'
+    '0x00007f019c5fe7c0:   000000000000002a 0000000000000000   *...............\n'
+    '0x00007f019c5fe7d0:   0000000000000000 0000000000000000   ................\n'
+    '0x00007f019c5fe7e0:   0000000000000000 00000007378028a8   .........(.7....\n'
+    '0x00007f019c5fe7f0:   00007f019c5fe7f0 00007f0123bdb184   .._........#....\n'
+    '0x00007f019c5fe800:   0000000000000006 00007f0123442fc0   ........./D#....\n'
+    '0x00007f019c5fe810:   0000000000000000 00000007ffe859c0   .........Y......\n'
+    '0x00007f019c5fe820:   00007f012343eb18 00007f019c5fe7c0   ..C#......_.....\n'
+    '0x00007f019c5fe830:   00007f019c5fe848 00007f019c5fe8b8   H._......._.....\n'
+    '0x00007f019c5fe840:   00007f0187d3f180 000000000000002a   ........*.......\n'
+    '0x00007f019c5fe850:   0000000000000000 0000000000000000   ................\n'
+    '0x00007f019c5fe860:   0000000000000000 00000007378028a8   .........(.7....\n'
+    '\n'
+    'Instructions: (pc=0x00007f019d5c91d4)\n'
+    '0x00007f019d5c90d4:   72 ff ff ff 0f 1f 84 00 00 00 00 00 48 89 df e8\n'
+    '0x00007f019d5c90e4:   e8 92 96 ff e9 2e ff ff ff 0f 1f 00 31 d2 be 01\n'
+    '0x00007f019d5c90f4:   00 00 00 48 89 df e8 b1 a4 df ff e9 09 ff ff ff\n'
+    '0x00007f019d5c9104:   0f 1f 40 00 48 89 df e8 10 83 96 ff e9 ce fe ff\n'
+    '0x00007f019d5c9114:   ff 0f 1f 00 49 8d 7c 24 fe ff 15 ed 4e 50 00 e9\n'
+    '0x00007f019d5c9124:   22 ff ff ff 0f 1f 84 00 00 00 00 00 f3 0f 1e fa\n'
+    '0x00007f019d5c9134:   55 48 89 e5 41 56 4d 89 c6 41 55 49 89 cd 41 54\n'
+    '0x00007f019d5c9144:   49 89 d4 53 48 8d 9f 40 fc ff ff 8b 83 70 04 00\n'
+    '0x00007f019d5c9154:   00 2d ad de 00 00 83 f8 01 0f 86 25 01 00 00 48\n'
+    '0x00007f019d5c9164:   8d 05 9e af 54 00 80 38 00 c7 83 4c 04 00 00 06\n'
+    '0x00007f019d5c9174:   00 00 00 75 05 f0 83 04 24 00 48 8b 83 50 04 00\n'
+    '0x00007f019d5c9184:   00 a8 01 0f 85 e3 00 00 00 8b 83 48 04 00 00 a8\n'
+    '0x00007f019d5c9194:   0c 0f 85 c5 00 00 00 c7 83 4c 04 00 00 06 00 00\n'
+    '0x00007f019d5c91a4:   00 31 c0 4d 85 e4 74 1e 4c 89 e0 83 e0 03 48 83\n'
+    '0x00007f019d5c91b4:   f8 01 0f 84 8c 00 00 00 48 83 f8 02 0f 84 d2 00\n'
+    '0x00007f019d5c91c4:   00 00 49 8b 04 24 49 01 c5 c6 83 78 04 00 00 01\n'
+    '0x00007f019d5c91d4:   4d 89 75 00 4c 8b a3 98 01 00 00 c6 83 78 04 00\n'
+    '0x00007f019d5c91e4:   00 00 49 8b 44 24 10 48 83 38 00 74 0d 4c 89 e7\n'
+    '0x00007f019d5c91f4:   e8 77 c6 8d ff 49 8b 44 24 10 49 8b 54 24 08 48\n'
+    '0x00007f019d5c9204:   8d bb a0 03 00 00 48 89 42 10 49 8b 44 24 08 49\n'
+    '0x00007f019d5c9214:   8b 54 24 18 48 89 50 18 49 8b 44 24 08 49 8b 54\n'
+    '0x00007f019d5c9224:   24 20 48 89 50 20 e8 81 99 7d ff c7 83 4c 04 00\n'
+    '0x00007f019d5c9234:   00 04 00 00 00 5b 41 5c 41 5d 41 5e 5d c3 66 0f\n'
+    '0x00007f019d5c9244:   1f 44 00 00 49 8d 7c 24 ff ff 15 dd 9a 50 00 e9\n'
+    '0x00007f019d5c9254:   72 ff ff ff 0f 1f 84 00 00 00 00 00 48 89 df e8\n'
+    '0x00007f019d5c9264:   68 91 96 ff e9 2e ff ff ff 0f 1f 00 31 d2 be 01\n'
+    '0x00007f019d5c9274:   00 00 00 48 89 df e8 31 a3 df ff e9 09 ff ff ff\n'
+    '0x00007f019d5c9284:   0f 1f 40 00 48 89 df e8 90 81 96 ff e9 ce fe ff\n'
+    '0x00007f019d5c9294:   ff 0f 1f 00 49 8d 7c 24 fe ff 15 6d 4d 50 00 e9\n'
+    '0x00007f019d5c92a4:   22 ff ff ff 0f 1f 84 00 00 00 00 00 f3 0f 1e fa\n'
+    '0x00007f019d5c92b4:   55 48 89 e5 41 56 45 89 c6 41 55 49 89 cd 41 54\n'
+    '0x00007f019d5c92c4:   49 89 d4 53 48 8d 9f 40 fc ff ff 8b 83 70 04 00\n'
+    '\n'
+    '\n'
+    'Stack slot to memory mapping:\n'
+    '\n'
+    "stack at sp + 0 slots: {method} {0x00007f0123442168} 'putLong' '(Ljava/lang/Object;JJ)V' in 'jdk/internal/misc/Unsafe'\n"
+    'stack at sp + 1 slots: 0x0 is null\n'
+    'stack at sp + 2 slots: 0x00007f0123be0598 is pointing into metadata\n'
+    'stack at sp + 3 slots: 0x00007f019c5fe760 is pointing into the stack for thread: 0x00007f019801a960\n'
+    'stack at sp + 4 slots: 0x00007f019c5fe718 is pointing into the stack for thread: 0x00007f019801a960\n'
+    'stack at sp + 5 slots: 0x00007f0187d43ac0 is at code_begin+1056 in an Interpreter codelet\n'
+    'native method entry point (kind = native)  [0x00007f0187d436a0, 0x00007f0187d44210]  2928 bytes\n'
+    'stack at sp + 6 slots: 0x0 is null\n'
+    'stack at sp + 7 slots: 0x00007f0123be0598 is pointing into metadata\n'
+    '\n'
+    '\n'
+    '---------------  P R O C E S S  ---------------\n'
+    '\n'
+    'Threads class SMR info:\n'
+    '_java_thread_list=0x00007f0198176e20, length=10, elements={\n'
+    '0x00007f019801a960, 0x00007f019812e330, 0x00007f019812f8b0, 0x00007f0198131060,\n'
+    '0x00007f01981326b0, 0x00007f0198133c60, 0x00007f01981357b0, 0x00007f0198136e80,\n'
+    '0x00007f0198172d10, 0x00007f0198175c90\n'
+    '}\n'
+    '\n'
+    'Java Threads: ( => current thread )\n'
+    '=>0x00007f019801a960 JavaThread "main"                              [_thread_in_vm, id=9681, stack(0x00007f019c500000,0x00007f019c600000) (1024K)]\n'
+    '  0x00007f019812e330 JavaThread "Reference Handler"          daemon [_thread_blocked, id=9689, stack(0x00007f01714f8000,0x00007f01715f8000) (1024K)]\n'
+    '  0x00007f019812f8b0 JavaThread "Finalizer"                  daemon [_thread_blocked, id=9690, stack(0x00007f01713f8000,0x00007f01714f8000) (1024K)]\n'
+    '  0x00007f0198131060 JavaThread "Signal Dispatcher"          daemon [_thread_blocked, id=9691, stack(0x00007f01712f8000,0x00007f01713f8000) (1024K)]\n'
+    '  0x00007f01981326b0 JavaThread "Service Thread"             daemon [_thread_blocked, id=9692, stack(0x00007f01711f8000,0x00007f01712f8000) (1024K)]\n'
+    '  0x00007f0198133c60 JavaThread "Monitor Deflation Thread"   daemon [_thread_blocked, id=9693, stack(0x00007f01710f8000,0x00007f01711f8000) (1024K)]\n'
+    '  0x00007f01981357b0 JavaThread "C2 CompilerThread0"         daemon [_thread_blocked, id=9694, stack(0x00007f0170ff8000,0x00007f01710f8000) (1024K)]\n'
+    '  0x00007f0198136e80 JavaThread "C1 CompilerThread0"         daemon [_thread_blocked, id=9695, stack(0x00007f0170ef8000,0x00007f0170ff8000) (1024K)]\n'
+    '  0x00007f0198172d10 JavaThread "Notification Thread"        daemon [_thread_blocked, id=9696, stack(0x00007f0170df8000,0x00007f0170ef8000) (1024K)]\n'
+    '  0x00007f0198175c90 JavaThread "Common-Cleaner"             daemon [_thread_blocked, id=9697, stack(0x00007f0170cf8000,0x00007f0170df8000) (1024K)]\n'
+    'Total: 10\n'
+    '\n'
+    'Other Threads:\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '---------------  S Y S T E M  ---------------\n'
+    '\n'
+    'OS:\n'
+    'DISTRIB_ID=Ubuntu\n'
+    'DISTRIB_RELEASE=24.04\n'
+    'DISTRIB_CODENAME=noble\n'
+    'DISTRIB_DESCRIPTION="Ubuntu 24.04.5 LTS"\n'
+    'uname: Linux 6.18.44-fc-v233 #1 SMP PREEMPT_DYNAMIC @0 x86_64\n'
+    'OS uptime: 0 days 0:21 hours\n'
+    'libc: glibc 2.39 NPTL 2.39 \n'
+    'rlimit (soft/hard): STACK 8192k/infinity , CORE 0k/infinity , NPROC 64276/64276 , NOFILE 20000/20000 , AS infinity/infinity , CPU infinity/infinity , DATA infinity/infinity , FSIZE infinity/infinity , MEMLOCK 8192k/8192k\n'
+    'load average: 1.51 0.87 0.42\n'
+    '\n'
+    '/proc/meminfo:\n'
+    'MemTotal:       16477348 kB\n'
+    'MemFree:        10753472 kB\n'
+    'MemAvailable:   15651816 kB\n'
+    'Buffers:          197828 kB\n'
+    'Cached:          4803428 kB\n'
+    'SwapCached:            0 kB\n'
+    'Active:          1789820 kB\n'
+    'Inactive:        3573816 kB\n'
+    'Active(anon):        112 kB\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    '\n'
+    'vm_info: OpenJDK 64-Bit Server VM (21.0.12.1+1-1-24.04.4-Ubuntu) for linux-amd64 JRE (21.0.12.1+1-1-24.04.4-Ubuntu), built on 2026-09-04T06:14:02Z by "buildd" with gcc 13.3.0\n'
+    '\n'
+    'END.\n'
+)
+FAULTHANDLER_REPORT = (
+    'Fatal Python error: Segmentation fault\n'
+    '\n'
+    'Thread 0x00007fe2d789d6c0 (most recent call first):\n'
+    '  File "/work/app/fh.py", line 5 in worker\n'
+    '  File "/usr/local/lib/python3.13/threading.py", line 995 in run\n'
+    '  File "/usr/local/lib/python3.13/threading.py", line 1044 in _bootstrap_inner\n'
+    '  File "/usr/local/lib/python3.13/threading.py", line 1015 in _bootstrap\n'
+    '\n'
+    'Current thread 0x00007fe2d7e6e740 (most recent call first):\n'
+    '  File "/usr/local/lib/python3.13/ctypes/__init__.py", line 551 in string_at\n'
+    '  File "/work/app/fh.py", line 8 in deref\n'
+    '  File "/work/app/fh.py", line 12 in process\n'
+    '  File "/work/app/fh.py", line 15 in <module>\n'
+)
+
+_C_STUB = re.compile(r"^\s*(?:\[\s*\d+\.\d+\] )?\[ctxprune: (\d+) lines elided \((.*)\)\]$")
+_HS_SEC = re.compile(r"^-{15}  ((?:[A-Z] )*[A-Z]) +-+$")
+_HS_THREAD_ELIDE = ("Registers:", "Register to memory mapping:", "Top of Stack:", "Instructions:", "Stack slot to memory mapping:")
+
+
+_KEEP_ALWAYS = re.compile(r"\b(?:SIG[A-Z]+|EXC_[A-Z_]+|EXCEPTION_[A-Z_]+|Oops:|BUG:|Kernel panic|Fatal Python error|Abort message|Problematic frame|Exception Type|Exception Codes|Termination Reason|Crashed Thread|Cause:|Call Trace:)|^(?:# JRE version|# Java VM|# Problematic|# V |# C |Process:|Identifier:|pid: |Cmdline:|vm_info:|Native frames:|Java frames:|siginfo:|Current thread|backtrace:|Thread \d+ Crashed|Thread 0x)")
+
+
+def _stub(n: int, what: str, prefix: str = "") -> str:
+    return f"{prefix}[ctxprune: {n} lines elided ({what})]"
+
+
+_FRAME_LIKE = re.compile(r"^[VvjJC]  \S|^\s+#\d+ pc |^\[\s*\d+\.\d+\]\s+(?:\? )?[\w.]+\+0x[0-9a-f]+/0x")
+
+
+def _elide(block: list[str], what: str, prefix: str = "", frames: bool = True) -> list[str]:
+    """One stub for a block, but a line that names the signal, exception or cause (or, where frames never belong, a
+    stack frame) is never swallowed: a damaged or foreign block title must not hide the cause."""
+    keep = [l for l in block if _KEEP_ALWAYS.search(l) or (frames and _FRAME_LIKE.match(l))]
+    return [_stub(len(block) - len(keep), what, prefix)] + keep if len(block) - len(keep) >= 1 else list(block)
+
+
+def _hs_err(lines):
+    out, i, n, sec = [], 0, len(lines), None
+    while i < n:
+        l = lines[i]
+        if m := _HS_SEC.match(l):
+            sec = m.group(1).replace(" ", "")
+            out.append(l)
+            i += 1
+            continue
+        if sec == "THREAD" and l.startswith(_HS_THREAD_ELIDE):
+            j = i + 1
+            while j < n and lines[j].strip() and not _HS_SEC.match(lines[j]):
+                j += 1
+            if j - i - 1 >= 2:
+                out += [l] + _elide(lines[i + 1:j], l.split(":")[0])
+            else:
+                out += lines[i:j]
+            i = j
+        elif sec in ("PROCESS", "SYSTEM"):
+            j = i
+            while j < n and not _HS_SEC.match(lines[j]) and not lines[j].startswith(("vm_info:", "END.")):
+                j += 1
+            if len([x for x in lines[i:j] if x.strip()]) >= 3:
+                out += _elide(lines[i:j], f"{sec.title()} section")
+            else:
+                out += lines[i:j]
+            if j < n and not _HS_SEC.match(lines[j]):
+                out.append(lines[j])  # the vm_info: / END. line itself
+                j += 1
+            i = j
+        else:
+            out.append(l)
+            i += 1
+    return out
+
+
+_MAC_TITLE = re.compile(r"^(Thread \d+( Crashed)?::?.*|Thread \d+ crashed with .*|Binary Images:|VM Region Summary:|External Modification Summary:|Model: .*)$")
+
+
+def _mac(lines):
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        if _MAC_TITLE.match(l) and not re.match(r"^Thread \d+ Crashed", l):
+            j = i + 1
+            while j < n and lines[j].strip():
+                j += 1
+            if j - i - 1 >= 3:
+                out += [l] + _elide(lines[i + 1:j], l.split(":")[0].split(" crashed")[0] if not l.startswith("Thread") else l.split(":")[0], frames=False)
+            else:
+                out += lines[i:j]
+            i = j
+        else:
+            out.append(l)
+            i += 1
+    return out
+
+
+_OOPS_PREFIX = re.compile(r"^(\[\s*\d+\.\d+\] )")
+_OOPS_REG = re.compile(r"^\[\s*\d+\.\d+\] (?:RSP|RAX|RDX|RBP|R10|R13|FS|CS|CR2|CR0|DR0|DR3|R08|RBX|RSI|R11|R14|ES):")
+
+
+def _oops(lines):
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        pre = (_OOPS_PREFIX.match(l) or [None, ""])[1]
+        if _OOPS_REG.match(l) or l[len(pre):].startswith("Code:") or l[len(pre):].startswith("Modules linked in:"):
+            j = i + 1
+            if _OOPS_REG.match(l):
+                while j < n and _OOPS_REG.match(lines[j]):
+                    j += 1
+            what = "registers" if _OOPS_REG.match(l) else l[len(pre):].split(":")[0]
+            if _OOPS_REG.match(l) and j - i < 3:
+                out += lines[i:j]
+            else:
+                out += _elide(lines[i:j], what, pre)
+            i = j
+        else:
+            out.append(l)
+            i += 1
+    return out
+
+
+_TOMB_REGBLOCK = re.compile(r"^    (?:x\d+|sp|pc|lr|fp)\s+[0-9a-f]{16}")
+_TOMB_SEC = re.compile(r"^(memory near .*:|memory map \(\d+ entries?\):.*|open files:|stack:|backtrace:|other threads?:|--- --- ---.*|\S.*:)$")
+
+
+def _tomb(lines):
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        l = lines[i]
+        if _TOMB_REGBLOCK.match(l):
+            j = i
+            while j < n and _TOMB_REGBLOCK.match(lines[j]):
+                j += 1
+            if j - i >= 3:
+                out += _elide(lines[i:j], "registers", "    ")
+                i = j
+            else:
+                out.append(lines[i])
+                i += 1
+        elif re.match(r"^(memory near .*:|memory map \(\d+ entries?\):.*|open files:|stack:)$", l):
+            j = i + 1
+            while j < n and lines[j].startswith(("    ", "\t")) and lines[j].strip():
+                j += 1
+            if j - i - 1 >= 3:
+                out += [l] + _elide(lines[i + 1:j], l.split(" (")[0].rstrip(":"), "    ")
+            else:
+                out += lines[i:j]
+            i = j
+        else:
+            out.append(l)
+            i += 1
+    return out
+
+
+def triage_crash(text: str) -> str:
+    lines = text.split("\n")
+    if any(_C_STUB.match(l) for l in lines):
+        return text
+    if lines[0:3] and any(l.startswith("# A fatal error has been detected by the Java Runtime Environment") for l in lines[:3]):
+        out = _hs_err(lines)
+    elif any(l == "Binary Images:" for l in lines) and any(l.startswith("Exception Type:") for l in lines):
+        out = _mac(lines)
+    elif any(re.match(r"^\[\s*\d+\.\d+\] (BUG:|Oops:)", l) for l in lines):
+        out = _oops(lines)
+    elif lines and lines[0].startswith("*** *** ***") and "backtrace:" in lines:
+        out = _tomb(lines)
+    else:
+        return text
+    return shrink_only(text, "\n".join(out))
+
+
+def probes_427(text: str) -> dict:
+    lines = text.split("\n")
+    kept = [l for l in lines if not _C_STUB.match(l)]
+    accounted = len(kept) + sum(int(m.group(1)) for l in lines if (m := _C_STUB.match(l)))
+    sig = [l.strip() for l in kept if re.search(r"\b(?:SIG[A-Z]+|EXC_[A-Z_]+|EXCEPTION_[A-Z_]+|Oops:|BUG:|Kernel panic|Fatal Python error|Abort message|Problematic frame|Exception Type|Exception Codes|Termination Reason|Crashed Thread|Cause:)", l)]
+    frames: list = []
+    starts = re.compile(r"^(Native frames:|Java frames:|backtrace:|Thread \d+ Crashed|Current thread|Thread 0x)|^\[\s*\d+\.\d+\] Call Trace:")
+    oops_frame = re.compile(r"^\[\s*\d+\.\d+\]\s+(?:</?TASK>|\??\s*[\w.]+\+0x[0-9a-f]+/0x[0-9a-f]+.*)$")
+    k = 0
+    while k < len(kept):
+        l = kept[k]
+        if starts.match(l):
+            frames.append((l.split("(")[0].strip(),))
+            is_oops = "Call Trace:" in l
+            k += 1
+            while k < len(kept) and kept[k].strip() and not starts.match(kept[k]) and (not is_oops or oops_frame.match(kept[k])):
+                if re.match(r"^(?:[VvjJC]  \S|\s+#\d+ pc |\d+\s+\S+\s+0x[0-9a-f]+ |\s+File \"|\[\s*\d+\.\d+\])", kept[k]):
+                    frames.append(kept[k].strip())
+                k += 1
+        else:
+            k += 1
+    ident = [l.strip() for l in kept if re.match(r"^(# JRE version|# Java VM|# Problematic|# V |# C |Process:|Identifier:|Version:|pid: |Cmdline:|Build fingerprint|Timestamp:|\[\s*\d+\.\d+\] (?:CPU:|RIP:|Hardware name)|vm_info:|Current thread|siginfo:)", l)]
+    return {"lines accounted for (kept + elided)": accounted, "signal / exception / cause lines": sig, "crashing-thread frames": frames, "identity lines": ident}
+
+
+def _mac_report() -> str:  # reconstructed from memory: macOS (arm64) .crash text format, EXC_BAD_ACCESS in the main thread
+    head = ["Process:               Notes [4217]", "Path:                  /Applications/Notes.app/Contents/MacOS/Notes", "Identifier:            com.example.Notes", "Version:               3.2 (320)",
+            "Code Type:             ARM-64 (Native)", "Parent Process:        launchd [1]", "", "Date/Time:             2024-01-10 12:00:01.123 +0000", "OS Version:            macOS 14.2.1 (23C71)", "",
+            "Exception Type:        EXC_BAD_ACCESS (SIGSEGV)", "Exception Codes:       KERN_INVALID_ADDRESS at 0x0000000000000010", "Termination Reason:    Namespace SIGNAL, Code 11 Segmentation fault: 11", "Triggered by Thread:   0", ""]
+    crashed = ["Thread 0 Crashed::  Dispatch queue: com.apple.main-thread", "0   Notes                         \t0x0000000102a1c3f4 -[NoteStore saveNote:] + 52", "1   Notes                         \t0x0000000102a18a10 -[EditorController commit] + 124",
+               "2   AppKit                        \t0x00000001a2b3c4d8 -[NSApplication sendAction:to:from:] + 108", "3   AppKit                        \t0x00000001a2b3c000 -[NSControl sendAction:to:] + 96", "4   dyld                          \t0x00000001a0f2d0e0 start + 2360", ""]
+    others = []
+    for t in range(1, 6):
+        others += [f"Thread {t}::  com.apple.network.worker-{t}", f"0   libsystem_kernel.dylib        \t0x00000001a0f6a{t}00 mach_msg2_trap + 8", f"1   libsystem_kernel.dylib        \t0x00000001a0f7c{t}10 mach_msg2_internal + 76",
+                   f"2   libsystem_kernel.dylib        \t0x00000001a0f7b{t}28 mach_msg_overwrite + 540", f"3   CoreFoundation                \t0x00000001a1022{t}34 __CFRunLoopServiceMachPort + 160", f"4   libsystem_pthread.dylib       \t0x00000001a0fa8{t}18 thread_start + 8", ""]
+    regs = ["Thread 0 crashed with ARM Thread State (64-bit):"] + [f"    x{i}: 0x{(i * 0x1111111) % 2**64:016x}   x{i + 1}: 0x{((i + 1) * 0x2222222) % 2**64:016x}   x{i + 2}: 0x{((i + 2) * 0x3333333) % 2**64:016x}" for i in range(0, 27, 3)] + ["     fp: 0x000000016fdff420   lr: 0x0000000102a18a10", "     sp: 0x000000016fdff3f0   pc: 0x0000000102a1c3f4 cpsr: 0x80001000", ""]
+    imgs = ["Binary Images:"] + [f"       0x{0x102a10000 + k * 0x40000:x} -        0x{0x102a10000 + k * 0x40000 + 0x3ffff:x} {'com.apple.framework' + str(k)} (1.0 - {k}) <{k:08x}-1111-2222-3333-444455556666> /System/Library/Frameworks/Framework{k}.framework/Versions/A/Framework{k}" for k in range(60)] + [""]
+    tail = ["VM Region Summary:", "ReadOnly portion of Libraries: Total=1.2G resident=0K(0%) swapped_out_or_unallocated=1.2G(100%)", "Writable regions: Total=352.6M written=1088K(0%) resident=1088K(0%) swapped_out=0K(0%) unallocated=351.6M(100%)",
+            "                                VIRTUAL   REGION ", "REGION TYPE                        SIZE    COUNT (non-coalesced) ", "===========                     =======  ======= ", "Kernel Alloc Once                   32K        1 ", "MALLOC                           176.2M       19 ", "STACK GUARD                       56.0M        7 ", ""]
+    return "\n".join(head + crashed + others + regs + imgs + tail)
+
+
+def _oops_report() -> str:  # reconstructed from memory: x86_64 kernel NULL dereference in a module init
+    t = [f"[ {1234 + k // 100}.{k % 100:02d}0000] " for k in range(60)]
+    L = ["BUG: kernel NULL pointer dereference, address: 0000000000000008", "#PF: supervisor read access in kernel mode", "#PF: error_code(0x0000) - not-present page", "PGD 0 P4D 0 ",
+         "Oops: 0000 [#1] PREEMPT SMP NOPTI", "CPU: 2 PID: 3141 Comm: insmod Tainted: G           OE      6.5.0-14-generic #14-Ubuntu", "Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 1.16.2-debian-1.16.2-1 04/01/2014",
+         "RIP: 0010:demo_init+0x1a/0x1000 [demo]", "Code: 48 8b 04 25 08 00 00 00 48 89 c7 e8 00 00 00 00 31 c0 c3 cc cc cc cc cc cc cc cc cc cc cc cc cc 55 48 89 e5 53 48 83 ec 08 <48> 8b 40 08 48 85 c0",
+         "RSP: 0018:ffffb3a2c1a3fd48 EFLAGS: 00010246", "RAX: 0000000000000000 RBX: ffffffffc0a52000 RCX: 0000000000000000", "RDX: 0000000000000000 RSI: ffffb3a2c1a3fd48 RDI: ffffffffc0a52000",
+         "RBP: ffffb3a2c1a3fd58 R08: 0000000000000000 R09: 0000000000000000", "R10: 0000000000000000 R11: 0000000000000000 R12: ffffffffc0a52000", "R13: 0000000000000000 R14: 0000000000000000 R15: ffff9c1e8a5c4000",
+         "FS:  00007f7a3b4c0740(0000) GS:ffff9c1ebbd00000(0000) knlGS:0000000000000000", "CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033", "CR2: 0000000000000008 CR3: 0000000102f3a000 CR4: 0000000000750ee0",
+         "Call Trace:", " <TASK>", " ? __die+0x23/0x70", " ? page_fault_oops+0x171/0x4e0", " ? do_user_addr_fault+0x30f/0x6c0", " ? exc_page_fault+0x7f/0x180", " ? asm_exc_page_fault+0x27/0x30",
+         " ? demo_init+0x1a/0x1000 [demo]", " do_one_initcall+0x5b/0x340", " do_init_module+0x68/0x260", " load_module+0xb8e/0xc20", " init_module_from_file+0x96/0x100", " __x64_sys_finit_module+0x18/0x30",
+         " </TASK>", "Modules linked in: demo(OE+) " + " ".join(f"mod{k}_{k * 7}" for k in range(70)), "CR2: 0000000000000008", "---[ end trace 0000000000000000 ]---"]
+    return "\n".join(t[i] + l for i, l in enumerate(L)) + "\n"
+
+
+def _tomb_report() -> str:  # reconstructed from memory: Android 13 tombstone, SIGSEGV in a native render thread
+    h = ["*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***", "Build fingerprint: 'google/raven/raven:13/TQ3A.230901.001/10750268:user/release-keys'", "Revision: 'MP1.0'", "ABI: 'arm64'",
+         "Timestamp: 2024-01-10 12:00:01.123456789+0000", "Process uptime: 12s", "Cmdline: com.example.app", "pid: 12345, tid: 12378, name: RenderThread  >>> com.example.app <<<", "uid: 10123",
+         "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0000000000000010", "Cause: null pointer dereference"]
+    regs = [f"    x{i}  {(i * 0x1010101) % 2**64:016x}  x{i + 1}  {((i + 1) * 0x2020202) % 2**64:016x}  x{i + 2}  {((i + 2) * 0x3030303) % 2**64:016x}" for i in range(0, 27, 3)] + ["    lr   0000007b2c4e1a30  sp   0000007b27af7f40  pc   0000007b2c4e19f0  pst  0000000060001000", ""]
+    bt = ["backtrace:", "      #00 pc 000000000004a1f0  /system/lib64/libhwui.so (android::uirenderer::RenderNode::prepareTree+32) (BuildId: 5a2b1c3d4e5f60718293a4b5c6d7e8f9)",
+          "      #01 pc 00000000000491a8  /system/lib64/libhwui.so (android::uirenderer::renderthread::CanvasContext::prepareTree+144) (BuildId: 5a2b1c3d4e5f60718293a4b5c6d7e8f9)",
+          "      #02 pc 000000000003d7c4  /system/lib64/libhwui.so (android::uirenderer::renderthread::DrawFrameTask::run+196) (BuildId: 5a2b1c3d4e5f60718293a4b5c6d7e8f9)",
+          "      #03 pc 00000000000b1fe4  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start+264) (BuildId: aa11bb22cc33dd44ee55ff6600778899)", ""]
+    mem = []
+    for r in ("x0", "x1", "x20"):
+        mem += [f"memory near {r}:"] + [f"    0000007b27af{k:04x}0 {k * 0x101:016x} {k * 0x202:016x}  ................" for k in range(1, 10)] + [""]
+    mmap = ["memory map (96 entries):"] + [f"    {0x12c00000 + k * 0x100000:08x}-{0x12c00000 + k * 0x100000 + 0xfffff:08x} rw-  {k * 0x1000:x}  100000  [anon:dalvik-main space {k}]" for k in range(96)] + [""]
+    files = ["open files:", "    fd 0: /dev/null (unowned)", "    fd 1: /dev/null (unowned)", "    fd 2: /dev/null (unowned)", "    fd 3: /data/app/com.example.app/base.apk (owned by FILE 0x7b2d1a2000)", "    fd 4: /dev/binder (unowned)", ""]
+    return "\n".join(h + regs + bt + mem + mmap + files)
+
+
+MAC_CRASH = _mac_report()
+LINUX_OOPS = _oops_report()
+ANDROID_TOMBSTONE = _tomb_report()
+
+case(
+    427,
+    claim="In a JVM hs_err log, macOS crash report, Linux oops or Android tombstone, register dumps, memory-to-register maps, stack dumps, the whole Process/System sections, other threads' stacks, binary-image lists, memory maps, open files, the module list and 'Code:' bytes become '[ctxprune: N lines elided (Section)]'; the header, signal/exception/cause lines, the crashing thread's frames and the identity lines are unchanged, and kept lines plus the stubs' counts add up to the original line count.",
+    loses="register values, memory contents around registers, the loaded-library, module and memory-map lists, the other threads' stacks and heap/GC/environment/OS details (all in the saved original)",
+    encode=triage_crash,
+    probes=probes_427,
+    fixtures=lambda: [
+        Fixture("JVM 21 hs_err: SIGSEGV in Unsafe_PutLong (real, long sections cut to 10-22 lines)", HS_ERR_CUT, True),
+        Fixture("macOS .crash with EXC_BAD_ACCESS, 5 other threads, 60 binary images (reconstructed from memory)", MAC_CRASH, True),
+        Fixture("Linux oops: NULL dereference in a module init, registers, Code:, 70 modules (reconstructed from memory)", LINUX_OOPS, True),
+        Fixture("Android tombstone: SIGSEGV, registers, memory near x0/x1/x20, 96-entry map (reconstructed from memory)", ANDROID_TOMBSTONE, True),
+        Fixture("Python faulthandler report: nothing to elide (real)", FAULTHANDLER_REPORT, False),
+        Fixture("an ordinary stack trace", "Exception in thread \"main\" java.lang.NullPointerException\n\tat Foo.bar(Foo.java:12)\n\tat Foo.main(Foo.java:5)\n", False),
+        Fixture("a report that already has a stub", "# A fatal error has been detected by the Java Runtime Environment:\n#\n#  SIGSEGV (0xb) at pc=0x1, pid=1, tid=1\n[ctxprune: 4 lines elided (Registers)]\n", None),
+    ],
+    min_gain=0.4,
+)
+
+
+
+# ===============================================================================================================
 # #508 strace: collapse the successful dynamic-loader preamble of each process to one line, join <unfinished ...> /
 # <... resumed> pairs. RULE: every failed call (= -1 E...), every socket/connect, every non-library open, every write,
 # fork/exec/wait, signal and exit must survive. Encoder: a line scanner with per-pid preamble state. Probe: joins

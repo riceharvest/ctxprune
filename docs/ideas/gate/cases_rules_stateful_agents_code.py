@@ -792,6 +792,11 @@ def fetch_with_retry(
     raise RetryError(url, retries, last)
 
 
+def clamp(x, lo=0, hi=100): return max(lo, min(hi, (x
+    if x is not None
+    else lo)))
+
+
 def parse_link_header(value: str) -> dict[str, str]:
     """Parse an RFC 8288 Link header into {rel: url}."""
     out: dict[str, str] = {}
@@ -930,8 +935,11 @@ def _source_fixtures(ranked: bool) -> list[Fixture]:
     q = queries["start"]
     short = "\n".join(big.splitlines()[:150]).rsplit("\ndef ", 1)[0] + "\n"
     add("short module (under 300 lines): read it whole", short, q, False)
-    fx.append(Fixture("ranged read starting at line 41 (the agent follows a marker and will edit)", (f"@query {q}\n" if ranked else "") + _numbered("\n".join(big.splitlines()[40:]) + "\n", start=41), False))
-    fx.append(Fixture("ranged read starting at line 2 of a numbered file", (f"@query {q}\n" if ranked else "") + _numbered("\n".join(big.splitlines()[1:]) + "\n", start=2), False))
+    big_lines = big.splitlines()
+    at = next(i for i, l in enumerate(big_lines) if l.startswith("def parse_link_header"))  # a line where the rest of the file is still valid Python
+    at2 = next(i for i, l in enumerate(big_lines) if l.startswith("log = logging"))
+    fx.append(Fixture(f"ranged read starting at line {at + 1} (the agent follows a marker and will edit)", (f"@query {q}\n" if ranked else "") + _numbered("\n".join(big_lines[at:]) + "\n", start=at + 1), False))
+    fx.append(Fixture(f"ranged read starting at line {at2 + 1} of a numbered file", (f"@query {q}\n" if ranked else "") + _numbered("\n".join(big_lines[at2:]) + "\n", start=at2 + 1), False))
     add("Python 2 module (print statement): does not parse", big.replace("print(fetch_with_retry(sys.argv[1]).status_code)", "print fetch_with_retry(sys.argv[1]).status_code"), q, False)
     js = "\n".join(f"function handler{i}(req, res) {{\n  const body = req.body;\n  if (!body) {{ return res.status(400).end(); }}\n  res.json({{ ok: true, id: {i} }});\n}}" for i in range(80)) + "\n"
     add("a 400-line JavaScript file", js, q, False)
@@ -1169,6 +1177,7 @@ def _bm25_fixtures() -> list[Fixture]:
         Fixture("pytest -v: the failing assertions are near the END", q("pytest -v | which test fails and what does the assertion say", py), True),
         Fixture("journalctl: the cause is near the START and shares no word with the question", q("journalctl -u nginx | why did nginx fail to start", jr), True),
         Fixture("under 5,000 characters: not worth ranking", q("kubectl get pods | why does the api pod keep restarting", small), False),
+        Fixture("under 5,000 characters but 40 chunks: still not worth ranking", q("kubectl get events | why does the api pod keep restarting", "\n\n".join(f"event {i}: pod api restarting probe failed {i}\nreason {i}" for i in range(40))), False),
         Fixture("no @query line: nothing to rank against", k8s, False),
         Fixture("long but one chunk of 5 lines per blank-line group, too few chunks", q("seq | anything", "\n\n".join("\n".join(f"line {i}.{k} xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" for k in range(5)) for i in range(4))), False),
         Fixture("a query-looking first line inside normal output", "@query is a decorator name here\n" + small, None),
@@ -2741,13 +2750,14 @@ def sim_142() -> dict:
         fam = Baseline.family("/work/shop", ["pytest", "tests/test_shop.py", "-k", "cart", "-q"])
         assert fam == Baseline.family("/work/shop", ["pytest", "tests/other.py", "-q"]) != Baseline.family("/work/shop", ["pytest", "-v"]) != Baseline.family("/work/other", ["pytest", "-q"])
         # five runs of pytest with small edits: pass, pass, one new test, a failure, the same failure again, then a fix
-        runs = [_pytest_run(10, {}, 0.02), _pytest_run(10, {}, 0.03), _pytest_run(11, {}, 0.02), _pytest_run(11, {"7": "280"}, 0.03), _pytest_run(11, {"7": "280"}, 0.02), _pytest_run(11, {}, 0.03)]
+        runs = [_pytest_run(10, {}, 0.02), _pytest_run(10, {}, 0.03), _pytest_run(11, {}, 0.02), _pytest_run(11, {"7": "280"}, 0.03), _pytest_run(11, {"7": "280"}, 0.02), _pytest_run(11, {"7": "280"}, 0.04),
+                _pytest_run(11, {"7": "280"}, 0.03), _pytest_run(11, {}, 0.03)]
         shown = [bl.show(fam, r) for r in runs]
         assert shown[:3] == runs[:3], "no hiding before three prior runs exist"
         assert shown[3] != runs[3] and "lines identical in each of the last 3 runs" in shown[3], "from the fourth run the invariant lines are hidden"
         # --- the safety checks, on every run: failure lines visible, count honest, nothing unaccounted for
         tot_before = tot_after = 0
-        for k in range(3, 6):
+        for k in range(3, 8):
             vis, orig = shown[k], runs[k]
             m = re.match(r"\[ctxprune: (\d+) lines identical.*full output: (\S+)\]\n", vis)
             if not m:
@@ -2762,11 +2772,12 @@ def sim_142() -> dict:
             missing = Counter(orig.split("\n")) - Counter(body)
             assert sum(missing.values()) == hidden_n and all(c > 0 for c in missing.values()), "visible + hidden == original, as multisets"
             tot_before, tot_after = tot_before + len(orig), tot_after + len(vis)
-        assert "FAILED tests/test_shop.py::test_case_7 - assert 300 == 280" in shown[4], "the failing test that fails in all prior runs too is still shown"
-        assert "1 failed, 10 passed" in shown[4]
+        assert "FAILED tests/test_shop.py::test_case_7 - assert 300 == 280" in shown[6] and "E       assert 300 == 280" in shown[6], "a test that has failed in each of the last three runs is still shown in full"
+        assert "1 failed, 10 passed" in shown[6] and "lines identical in each of the last 3 runs" in shown[6]
+        assert _PROTECT.search("FAILED tests/test_shop.py::test_case_7 - assert 300 == 280") and "FAILED tests/test_shop.py::test_case_7" in runs[4] and "FAILED tests/test_shop.py::test_case_7" in runs[5] and "FAILED tests/test_shop.py::test_case_7" in runs[3], "fixture check: the failure really is in all three prior runs"
         # --- invalidation by construction
         # a tool upgrade changes the banner line: it is visible again immediately and is not baseline until three runs carry it
-        up = bl.show(fam, _pytest_run(11, {}, 0.03, version="9.2.0"))
+        up = bl.show(fam, _pytest_run(11, {}, 0.03, version="9.2.0"))  # (this also becomes the next run of the family)
         assert "pytest-9.2.0" in up and "pytest-9.1.1" not in up
         # a line missing from ONE of the last three runs is not baseline
         bl2 = Baseline(os.path.join(d, "b2"))
@@ -2790,7 +2801,7 @@ def sim_142() -> dict:
         assert "Tests:       41 passed, 41 total" in nshown[4], "the result line is visible"
         py_saving = 1 - tot_after / tot_before
         assert py_saving > 0.15
-    return {"pytest_chars_saved_runs_4_to_6": f"{py_saving:.0%}", "npm_test_chars_saved_run_5": f"{saving:.0%}", "lines_hidden_pytest_run_4": int(re.match(r"\[ctxprune: (\d+)", shown[3]).group(1)),
+    return {"pytest_chars_saved_runs_4_to_8": f"{py_saving:.0%}", "npm_test_chars_saved_run_5": f"{saving:.0%}", "lines_hidden_pytest_run_4": int(re.match(r"\[ctxprune: (\d+)", shown[3]).group(1)),
             "failure_lines_hidden": 0}
 
 
@@ -2876,8 +2887,9 @@ def _transcript_288(n: int = 44, seed: int = 288):
             call("Read", {"file_path": p}, disk.get(p, "File does not exist."), error=p not in disk)
         elif k == 7:  # a Write that fails: the content is NOT on disk
             c = _code(g, "readonly", 60)
-            truth.append(("write", "/etc/protected.py", c, "error", t))
-            call("Write", {"file_path": "/etc/protected.py", "content": c}, "EACCES: permission denied, open '/etc/protected.py'", error=True)
+            fp = p if p in disk else "/etc/protected.py"  # the path exists on disk (an older version) but this content never reached it
+            truth.append(("write", fp, c, "error", t))
+            call("Write", {"file_path": fp, "content": c}, f"EACCES: permission denied, open '{fp}'", error=True)
         elif k == 8:  # Write a file and later delete it (scratch)
             c = _code(g, "scratch", 50)
             sp = f"scratch/s{t}.py"
@@ -3651,7 +3663,7 @@ def sim_485() -> dict:
     two.jobs[2]["conclusion"] = "failure"
     two.jobs[2]["steps"][4]["conclusion"] = "failure"
     two.jobs[2]["log"] = _job_log("x", _STEPS, 4, ["src/app.py:3:1: F401 `os` imported but unused", "Found 1 error."], 99)
-    two.jobs[2]["ann"] = [{"path": "src/app.py", "start_line": 3, "annotation_level": "failure", "message": "F401 `os` imported but unused"}]
+    two.jobs[2]["ann"] = [{"path": "src/app.py", "start_line": 3, "annotation_level": "failure", "message": "unused import"}]
     multi = ci_failure(two)
     assert multi.count("failing step:") == 2 and "F401" in multi and "FAILED tests/test_tax.py" in multi
     return {"tokens_four_calls": tokens(raw), "tokens_digest": tokens(digest), "saving": f"{1 - tokens(digest) / tokens(raw):.1%}", "agent_turns": "4 -> 1", "api_calls_inside_the_tool": n_api,

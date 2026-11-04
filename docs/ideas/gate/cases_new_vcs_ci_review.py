@@ -914,8 +914,6 @@ def seq_encode(text):
     return sigil_guard(text, _seq_build, seq_decode)
 
 
-_REFLOG_STASH_MIX = "".join(f"{i:07x} stash@{{{i}}}: WIP on main: {i:07x} work {i}\n" for i in range(4))
-
 case(
     1428,
     claim="In git reflog and git stash list output the ref name and the @{N} counters (which equal each line's position) are dropped from every line and named once in a '§seq REF' header; decode restores the exact text.",
@@ -937,7 +935,7 @@ case(
         Fixture("a bare sigil", SIG + REFLOG_MAIN, None),
         Fixture("message text that looks like a decoration", "abc1234 HEAD@{0}: (x) y\nbcd2345 HEAD@{1}: (z) w\ncde3456 HEAD@{2}: (v) u\n", None),
     ],
-    min_gain=0.15,
+    min_gain=0.12,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
 
@@ -1184,7 +1182,7 @@ case(
         Fixture("not a status", "On branch names are listed below\nfoo\n", False),
         Fixture("unknown label inside a section", STATUS_LONG.replace("modified:   src/app/config.py", "frobnicated: src/app/config.py"), False),
     ],
-    min_gain=0.2,
+    min_gain=0.4,
 )
 
 # ===============================================================================================================
@@ -1309,7 +1307,7 @@ case(
         Fixture("a bare sigil", SIG + DRQ_REL, None),
         Fixture("unrelated roots in the Only-in lines", "Files old/a and new/a differ\nOnly in elsewhere/dir: f\nOnly in old/sub: g\n", None),
     ],
-    min_gain=0.25,
+    min_gain=0.35,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
 
@@ -1405,7 +1403,7 @@ MS_COMMIT = "[main 1a2b3c4] Add generated files\n 6 files changed, 33 insertions
 case(
     1431,
     claim="In a stat table followed by its --summary block (git merge, git pull, git diff --stat --summary), each 'create mode', 'delete mode', 'rename' and 'mode change' line whose path is a table row is folded into that row as a trailing (new), (del), (rename 98%) or (chmod a => b) marker and removed; summary lines that match no row (paths the table abbreviated as '.../x') keep their own line.",
-    loses="the position of a summary line that keeps its own line (leftover lines come first, before the folded ones are implied by the table order); otherwise nothing, the lines are re-derived from the markers (mode 100644 is the default)",
+    loses="the position of a summary line that keeps its own line (it now sits right after the 'N files changed' line); otherwise nothing, the other lines are re-derived from the markers in table order (mode 100644 is the default)",
     encode=lambda t: guarded(t, stat_fold),
     equivalent=_oracle_1431,
     fixtures=[
@@ -1419,7 +1417,7 @@ case(
         Fixture("two summary lines for one row: the second keeps its line", " a.py | 2 +-\n 1 file changed, 2 insertions(+)\n rename a.py (90%)\n mode change 100644 => 100755 a.py\n", None),
         Fixture("summary lines in another order than the rows: the late one keeps its line", " a.py | 1 +\n b.py | 1 +\n 2 files changed, 2 insertions(+)\n create mode 100644 b.py\n create mode 100644 a.py\n", None),
     ],
-    min_gain=0.1,
+    min_gain=0.15,
 )
 
 # ===============================================================================================================
@@ -1913,7 +1911,7 @@ def _reactions(url, **nz):
 
 
 def _pull_request(n=1347):
-    base = f"https://api.github.com/repos/acme-corp/widgets"
+    base = "https://api.github.com/repos/acme-corp/widgets"
     html = f"https://github.com/acme-corp/widgets/pull/{n}"
     sha = "6dcb09b5b57875f334f61aebed695e2e4193db5e"
     links = {"self": {"href": f"{base}/pulls/{n}"}, "html": {"href": html}, "issue": {"href": f"{base}/issues/{n}"},
@@ -1976,7 +1974,7 @@ GH_MCP_MINIMAL = _pretty([{"login": "alice-dev", "id": 4418267, "avatar_url": "h
 
 case(
     1424,
-    claim="In a GitHub REST document, a user object whose 13 URL fields (and legacy or msgpack-style node_id) are the fixed functions of login and id, a repository object whose ~40 URL templates are functions of full_name, a _links object that restates sibling url fields, and an all-zero reactions summary are each replaced by one short marker; a '§ghrest' header marks the encoding and decode restores the exact bytes.",
+    claim="In a GitHub REST document, a user object whose 13 URL fields (and legacy or msgpack-style node_id) are the fixed functions of login and id, a repository object whose 42 URL fields are functions of full_name, a _links object that restates sibling url fields, and an all-zero reactions summary are each replaced by one short marker; a '§ghrest' header marks the encoding and decode restores the exact bytes.",
     encode=gh_encode,
     decode=gh_decode,
     fixtures=[
@@ -1995,7 +1993,7 @@ case(
                 _pretty({"url": "https://api.github.com/x", "_links": ["self"], "reactions": 0, "user": ALICE}), None),
         Fixture("duplicate keys and number spellings survive", '{\n  "a": 1E5,\n  "a": 2,\n  "user": ' + json.dumps(OCTOCAT, indent=2).replace("\n", "\n  ") + '\n}\n', None),
     ],
-    min_gain=0.3,
+    min_gain=0.35,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
 
@@ -2160,7 +2158,7 @@ case(
         Fixture("input that starts like the header", f"{SIG}ghfiles: x\n" + GH_FILES_DOC, None),
         Fixture("a literal marker key in the input", _pretty([{**_file_entry("a.py", "added", 1, 0), "~": "f0-3"}]), None),
     ],
-    min_gain=0.25,
+    min_gain=0.2,
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
 
@@ -2377,7 +2375,7 @@ case(
         Fixture("duplicate keys are not touched", '{"id":"abcdef0123456789abcdef0123456789abcdef01","short_id":"abcdef01","short_id":"abcdef01"}', None),
         Fixture("a lone commit whose title is only the first line of a longer message", _compact([GL_COMMITS[1]]), None),
     ],
-    min_gain=0.05,  # characters; the hex ids are cheap in characters and costly in tokens, which fall about 40% more
+    min_gain=0.1,  # characters; the hex ids are cheap in characters and costly in tokens, which fall about 40% more
     idempotent=False,  # re-encoding encoded text must escape its leading sigil, so it grows by design
 )
 

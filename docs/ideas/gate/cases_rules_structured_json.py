@@ -355,7 +355,7 @@ _TEXTAREA = re.compile(r"<textarea\b([^>]*)>(.*?)</textarea>", re.S)
 def extract_traceback(text: str) -> str:
     if text.startswith(TB_HEAD) or "<textarea" not in text:
         return text
-    for tag in ("script", "style", "textarea"):  # raw-text elements must open and close in turn, or a real HTML parser swallows the textarea
+    for tag in ("script", "style", "textarea", "title"):  # raw-text elements must open and close in turn, or a real HTML parser swallows the textarea
         depth = 0
         for m in re.finditer(r"<(/?)" + tag + r"\b", text):
             depth += -1 if m.group(1) else 1
@@ -1446,7 +1446,7 @@ case(
     probes=safe_probes(probes_135),
     fixtures=lambda: [
         Fixture("Petstore-style spec, 3 resources (first op at the start, user ops last)", _OAS_PET, True),
-        Fixture("12-resource spec, 74 operations", _OAS_BIG, True),
+        Fixture("12-resource spec, 49 operations", _OAS_BIG, True),
         Fixture("Swagger 2.0 JSON is another dialect: left alone", _SWAGGER2, False),
         Fixture("spec with a whitespace operationId and parameter name is refused", _OAS_BAD_NAME, False),
         Fixture("not an OpenAPI document", jp({"name": "app", "paths": ["a", "b"]}), False),
@@ -5148,4 +5148,233 @@ case(
         Fixture("input that starts like the output", "# otlp logs records=1\nts=2025-01-01T00:00:00.000Z level=INFO service=a body=\"x\"\n", None),
     ],
     min_gain=0.5,
+)
+
+
+# ===============================================================================================================
+# #1168 Flame graph SVG to folded stacks via rect nesting (flamegraph.pl / inferno layout, normal or inverted).
+# Each frame is a <g><title>name (N samples, P%)</title><rect x y width/></g>. The encoder rebuilds the tree from y-depth and
+# x-extent (a frame's parent is the frame one row below whose extent holds its midpoint), takes self samples as N minus the children,
+# and emits 'a;b;c N' lines in drawing order. The probes read the SVG with ElementTree and derive stacks as the chain of all
+# enclosing frames, a different construction, then answer hottest leaf, its callers, per-function totals and the stack table.
+
+FRAME_RE = re.compile(r"<g\b[^>]*>\s*<title>(.*?)</title>\s*<rect x=\"([\d.]+)\" y=\"([\d.]+)\" width=\"([\d.]+)\"", re.S)
+TITLE_RE = re.compile(r"(.*) \(([\d,]+) samples?, [\d.]+%(?:;[^)]*)?\)\Z", re.S)
+FOLDED_HEAD = "# folded stacks from a flame graph SVG; total "
+
+
+@total
+def flame_svg_to_folded(text: str) -> str:
+    if "http://www.w3.org/2000/svg" not in text or "<svg" not in text:
+        return text
+    ET.fromstring(text)  # well-formed XML only (raises ParseError otherwise, which the wrapper turns into 'unchanged')
+    frames = []
+    for m in FRAME_RE.finditer(text):
+        t = TITLE_RE.match(html.unescape(m.group(1)))
+        if not t or ";" in t.group(1) or "\n" in t.group(1):
+            return text
+        frames.append({"name": t.group(1), "n": int(t.group(2).replace(",", "")), "x": float(m.group(2)), "y": float(m.group(3)), "w": float(m.group(4))})
+    if len(frames) < 2 or text.count("<title") != len(frames):  # a <title> the frame pattern did not read would silently lose a frame
+        return text
+    ys = sorted({f["y"] for f in frames})
+    widest = max(f["w"] for f in frames)
+    full = lambda y: [f for f in frames if f["y"] == y] and len([f for f in frames if f["y"] == y]) == 1 and [f for f in frames if f["y"] == y][0]["w"] >= 0.99 * widest  # noqa: E731
+    if full(ys[-1]):
+        rank = {y: i for i, y in enumerate(reversed(ys))}
+    elif full(ys[0]):
+        rank = {y: i for i, y in enumerate(ys)}
+    else:
+        return text
+    by_row: dict[int, list[dict]] = defaultdict(list)
+    for f in frames:
+        f["d"] = rank[f["y"]]
+        by_row[f["d"]].append(f)
+    for d, row in by_row.items():
+        row.sort(key=lambda f: f["x"])
+        if d not in (0,) and set(range(d)) - set(by_row):
+            return text
+    kids: dict[int, list[dict]] = defaultdict(list)
+    for d in range(1, max(by_row) + 1):
+        for f in by_row[d]:
+            mid = f["x"] + f["w"] / 2
+            ps = [p for p in by_row[d - 1] if p["x"] - 0.02 <= mid <= p["x"] + p["w"] + 0.02]
+            if len(ps) != 1:
+                return text
+            kids[id(ps[0])].append(f)
+    if len(by_row[0]) != 1:
+        return text
+    root_all = by_row[0][0]["name"] == "all"  # flamegraph.pl and inferno add this root; it is not part of any real stack
+    out, stack = [], [(by_row[0][0], [by_row[0][0]["name"]])]
+    while stack:
+        f, path = stack.pop()
+        self_n = f["n"] - sum(c["n"] for c in kids[id(f)])
+        if self_n < 0:
+            return text
+        if self_n:
+            out.append((";".join(path[1:] if root_all and len(path) > 1 else path), self_n))
+        stack += [(c, path + [c["name"]]) for c in reversed(kids[id(f)])]
+    total = by_row[0][0]["n"]
+    return gate(text, f"{FOLDED_HEAD}{total} samples\n" + "".join(f"{s} {n}\n" for s, n in out))
+
+
+def _flame_facts(folded: dict) -> dict:
+    total = sum(folded.values())
+    if not folded:
+        return {"flame": None}
+    best = max(sorted(folded), key=lambda s: folded[s])
+    leaf = best.split(";")[-1]
+    self_by_fn, incl = Counter(), Counter()
+    for stack, n in folded.items():
+        fns = stack.split(";")
+        self_by_fn[fns[-1]] += n
+        for fn in set(fns):
+            incl[fn] += n
+    return {"total samples": total, "stack table": folded, "hottest leaf stack": (best, folded[best]), "hottest leaf and its callers": (leaf, best.split(";")[:-1]),
+            "top self time by function": sorted(self_by_fn.items(), key=lambda kv: (-kv[1], kv[0]))[:3], "inclusive samples per function": dict(sorted(incl.items()))}
+
+
+def probes_1168(text: str) -> dict:
+    if text.startswith(FOLDED_HEAD):
+        folded = {}
+        for ln in text.split("\n")[1:]:
+            if ln:
+                s, _, n = ln.rpartition(" ")
+                folded[s] = folded.get(s, 0) + int(n)
+        return _flame_facts(folded)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return {"flame": None}
+    ns = "{http://www.w3.org/2000/svg}"
+    frames = []
+    for g in root.iter(ns + "g"):
+        t, r = g.find(ns + "title"), g.find(ns + "rect")
+        if t is None or r is None or t.text is None:
+            continue
+        m = TITLE_RE.match(t.text)
+        if not m:
+            return {"flame": None}
+        frames.append((m.group(1), int(m.group(2).replace(",", "")), float(r.get("x")), float(r.get("y")), float(r.get("width"))))
+    if len(frames) < 2:
+        return {"flame": None}
+    ys = sorted({f[3] for f in frames})
+    widest = max(f[4] for f in frames)
+    only = lambda y: [f for f in frames if f[3] == y]  # noqa: E731
+    if len(only(ys[-1])) == 1 and only(ys[-1])[0][4] >= 0.99 * widest:
+        depth = {y: ys[::-1].index(y) for y in ys}
+    elif len(only(ys[0])) == 1 and only(ys[0])[0][4] >= 0.99 * widest:
+        depth = {y: ys.index(y) for y in ys}
+    else:
+        return {"flame": None}
+    idx = list(range(len(frames)))
+    chains, parent = {}, {}
+    for i in idx:
+        name, n, x, y, w = frames[i]
+        mid = x + w / 2
+        anc = sorted((j for j in idx if depth[frames[j][3]] < depth[y] and frames[j][2] - 0.02 <= mid <= frames[j][2] + frames[j][4] + 0.02), key=lambda j: depth[frames[j][3]])
+        if [depth[frames[j][3]] for j in anc] != list(range(depth[y])):
+            return {"flame": None}
+        chains[i] = [frames[j][0] for j in anc] + [name]
+        parent[i] = anc[-1] if anc else None
+    folded = {}
+    root_named_all = any(depth[f[3]] == 0 and f[0] == "all" for f in frames)
+    for i in idx:
+        self_n = frames[i][1] - sum(frames[c][1] for c in idx if parent[c] == i)
+        if self_n < 0:
+            return {"flame": None}
+        if self_n:
+            key = ";".join(chains[i][1:] if root_named_all and len(chains[i]) > 1 else chains[i])
+            folded[key] = folded.get(key, 0) + self_n
+    return _flame_facts(folded)
+
+
+_FLAME_STACKS = [
+    ("main;serve;handle_request;parse_http;memcpy", 640), ("main;serve;handle_request;parse_http;strchr", 210), ("main;serve;handle_request;route;lookup_route", 180),
+    ("main;serve;handle_request;auth;verify_jwt;ed25519_verify", 520), ("main;serve;handle_request;auth;verify_jwt;base64_decode", 150), ("main;serve;handle_request;auth;session_lookup", 90),
+    ("main;serve;handle_request;render;json_encode;write_string", 330), ("main;serve;handle_request;render;json_encode;format_double", 275), ("main;serve;handle_request;render;template;std::vector<int>::push_back(int const&)", 120),
+    ("main;serve;handle_request;db;pg_query;PQexec;poll", 2410), ("main;serve;handle_request;db;pg_query;PQexec;recv", 380), ("main;serve;handle_request;db;pg_query;serialize", 140), ("main;serve;handle_request;db;row_to_struct", 260),
+    ("main;serve;handle_request;cache;redis_get;recv", 310), ("main;serve;handle_request;cache;redis_get", 45), ("main;serve;epoll_wait", 1550), ("main;serve;accept4", 95), ("main;gc;mark;walk;walk;walk;visit", 205),
+    ("main;gc;mark;walk;visit", 160), ("main;gc;sweep", 130), ("main;log_flush;write", 340), ("main;log_flush;fsync", 60), ("main;init_tls;SSL_CTX_new", 20), ("main;tail;a;b;c;d;e;f;g;h;i;j;deepest_leaf", 140),
+]
+_JS = "".join(f"\tfunction handler_{i}(evt, target) {{ var e = target.firstChild; if (e && e.nodeName == 'title') {{ details.nodeValue = e.textContent; }} var r = target.getElementsByTagName('rect')[0]; r.attributes.x.value = parseFloat(r.attributes.x.value); }}\n" for i in range(34))
+
+
+def _flame_svg(stacks, inverted: bool = False, title: str = "Flame Graph") -> str:
+    tree: dict = {}
+    for stack, n in stacks:
+        node = tree
+        node.setdefault("_n", 0)
+        node["_n"] += n
+        for fn in stack.split(";"):
+            node = node.setdefault(fn, {"_n": 0})
+            node["_n"] += n
+    total = tree["_n"]
+    width = 1200
+    scale = (width - 20) / total
+    depth_max = max(len(s.split(";")) for s, _n in stacks) + 1
+    height = depth_max * 16 + 70
+    r = rng(5)
+    frames = []
+
+    def lay(name: str, node: dict, x: float, d: int) -> None:
+        y = (height - 34 - (d + 1) * 16 + 1) if not inverted else 36 + d * 16
+        frames.append((name, node["_n"], x, y, node["_n"] * scale, d))
+        cx = x
+        for k in sorted(k for k in node if k != "_n"):
+            lay(k, node[k], cx, d + 1)
+            cx += node[k]["_n"] * scale
+
+    lay("all", tree, 10.0, 0)
+    g = ""
+    for name, n, x, y, w, d in frames:
+        pct = 100 * n / total
+        e = html.escape(name, quote=False)
+        txt = f'<text x="{x + 3:.2f}" y="{y + 10.5:.2f}" >{e}</text>' if w > 6 * len(name) else '<text x="%.2f" y="%.2f" ></text>' % (x + 3, y + 10.5)
+        g += f'<g>\n<title>{e} ({n:,} samples, {pct:.2f}%)</title><rect x="{x:.2f}" y="{y:.2f}" width="{w:.2f}" height="15.0" fill="rgb({r.randrange(200, 255)},{r.randrange(60, 220)},{r.randrange(0, 60)})" rx="2" ry="2" />\n{txt}\n</g>\n'
+    return ('<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n'
+            f'<svg version="1.1" width="{width}" height="{height}" onload="init(evt)" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">\n'
+            "<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version. -->\n<defs>\n\t<linearGradient id=\"background\" y1=\"0\" y2=\"1\" x1=\"0\" x2=\"0\" >\n"
+            "\t\t<stop stop-color=\"#eeeeee\" offset=\"5%\" />\n\t\t<stop stop-color=\"#eeeeb0\" offset=\"95%\" />\n\t</linearGradient>\n</defs>\n<style type=\"text/css\">\n\ttext { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }\n"
+            "\t#search, #ignorecase { opacity:0.1; cursor:pointer; }\n\t#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }\n\t#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }\n\t#title { text-anchor:middle; font-size:17px}\n"
+            "\t#unzoom { cursor:pointer; }\n\t#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }\n\t.hide { display:none; }\n\t.parent { opacity:0.5; }\n</style>\n"
+            "<script type=\"text/ecmascript\">\n<![CDATA[\n\t\"use strict\";\n\tvar details, searchbtn, unzoombtn, matchedtxt, svg = document.getElementsByTagName(\"svg\")[0];\n" + _JS + "]]>\n</script>\n"
+            f'<rect x="0" y="0" width="{width}" height="{height}" fill="url(#background)"  />\n<text id="title" x="{width // 2}" y="24" >{title}</text>\n<text id="details" x="10" y="{height - 17}" > </text>\n<text id="unzoom" x="10" y="24" class="hide">Reset Zoom</text>\n'
+            f'<text id="search" x="{width - 110}" y="24" >Search</text>\n<text id="matched" x="{width - 110}" y="{height - 17}" > </text>\n<g id="frames">\n' + g + "</g>\n</svg>\n")
+
+
+def _folded_dict(stacks) -> dict:
+    out: dict = {}
+    for s, n in stacks:
+        out[s] = out.get(s, 0) + n
+    return out
+
+
+def _flame_fixtures():
+    up, down = _flame_svg(_FLAME_STACKS), _flame_svg(_FLAME_STACKS, inverted=True, title="Icicle Graph")
+    for svg in (up, down):  # the conversion must reproduce the folded input this SVG was drawn from
+        got = {}
+        for ln in flame_svg_to_folded(svg).split("\n")[1:]:
+            if ln:
+                s, _, n = ln.rpartition(" ")
+                got[s] = int(n)
+        assert got == _folded_dict(_FLAME_STACKS), "SVG to folded does not reproduce the folded input"
+    chart = ('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g><title>Q1 (10 samples, 50.00%)</title><rect x="10" y="10" width="30" height="80"/></g></svg>\n')
+    return [
+        Fixture("flame graph of a perf profile: 24 stacks, hottest leaf (poll) in the middle, deepest stack and recursion last", up, True),
+        Fixture("inverted (icicle) graph of the same profile", down, True),
+        Fixture("small graph", _flame_svg(_FLAME_STACKS[:4]), True),
+        Fixture("a chart SVG whose titles are not sample counts", chart, False),
+        Fixture("SVG that is not well-formed XML", up[: len(up) // 2], False),
+        Fixture("input that starts like the output", FOLDED_HEAD + "5 samples\na;b 5\n", None),
+    ]
+
+
+case(
+    1168,
+    claim="A flamegraph.pl/inferno SVG (normal or inverted) becomes folded stacks 'a;b;c N' rebuilt from the rect nesting (parent = the frame one row down whose x-extent holds the midpoint, self = samples minus children); the stack table reproduces the folded input the SVG was drawn from, and the total, hottest leaf, its callers, per-function self and inclusive samples are unchanged.",
+    loses="colours, pixel geometry, the script, search and zoom machinery, percentages, the exact frame order inside a row beyond drawing order, and frames narrower than the generator's minimum width (their samples were already folded into the parent when the SVG was drawn); SVGs that are not well-formed XML, have titles that are not 'name (N samples, P%)', or names containing ';' are left unchanged",
+    encode=flame_svg_to_folded,
+    probes=safe_probes(probes_1168),
+    fixtures=_flame_fixtures,
+    min_gain=0.8,
 )

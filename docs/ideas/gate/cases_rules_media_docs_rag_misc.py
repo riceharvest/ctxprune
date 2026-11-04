@@ -5649,3 +5649,532 @@ case(
     ],
     min_gain=0.5,
 )
+
+# ===============================================================================================================
+# #770 Collapse near-duplicate chunks across document versions at ingest. Corpus-level: the 'input' is a list of chunks
+# serialised as '=== chunk id=ID path=PATH ===' blocks. Chunks of 12+ words whose word 3-shingle Jaccard similarity to the
+# canonical chunk is >= 0.9 (exact Jaccard stands in for MinHash/SimHash, which estimate it) are merged: the newest version
+# (highest v<N> in the path, else the first in file order) is kept and its header gains 'also=ID|PATH,...' for every
+# merged chunk; the others are deleted. Canonicals are compared against canonicals only, so the merged corpus is a fixed point.
+
+_CHUNK_HDR = re.compile(r"^=== chunk id=(\S+) path=(\S+)(?: also=(\S+))? ===$")
+JACCARD_NUM, JACCARD_DEN = 9, 10
+MIN_WORDS = 12
+
+
+def _shingles(text: str) -> frozenset:
+    w = re.findall(r"\w+", text.lower())
+    return frozenset(zip(w, w[1:], w[2:])) if len(w) >= MIN_WORDS else frozenset()
+
+
+def _version(path: str) -> tuple:
+    m = re.search(r"(?<![A-Za-z0-9])v(\d+(?:\.\d+)*)(?![A-Za-z0-9])", path)
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
+
+
+def _parse_chunks(text: str):
+    pre, chunks = [], []
+    for l in text.split("\n"):
+        if (m := _CHUNK_HDR.match(l)):
+            chunks.append([m.group(1), m.group(2), m.group(3), []])
+        elif chunks:
+            chunks[-1][3].append(l)
+        else:
+            pre.append(l)
+    return pre, chunks
+
+
+def dedupe_chunks(text: str) -> str:
+    pre, chunks = _parse_chunks(text)
+    if len(chunks) < 2 or any(c[2] is not None for c in chunks) or any(("," in c[0] or "|" in c[0] or "|" in c[1] or "," in c[1]) for c in chunks):
+        return text
+    sh = [_shingles("\n".join(c[3])) for c in chunks]
+    order = sorted(range(len(chunks)), key=lambda i: (tuple(-x for x in _version(chunks[i][1])) if _version(chunks[i][1]) else (1,), i))
+    # newest version first; unversioned chunks (version ()) come after versioned ones, in file order
+    order = sorted(range(len(chunks)), key=lambda i: (not _version(chunks[i][1]), tuple(-x for x in _version(chunks[i][1])), i))
+    reps: list[int] = []
+    members: dict[int, list[int]] = {}
+    for i in order:
+        home = None
+        if sh[i]:
+            for r in reps:
+                inter, union = len(sh[i] & sh[r]), len(sh[i] | sh[r])
+                if inter * JACCARD_DEN >= JACCARD_NUM * union:
+                    home = r
+                    break
+        if home is None:
+            reps.append(i)
+            members[i] = []
+        else:
+            members[home].append(i)
+    if all(not m for m in members.values()):
+        return text
+    out = list(pre)
+    for i, c in enumerate(chunks):
+        if i not in members:
+            continue
+        also = ",".join(f"{chunks[j][0]}|{chunks[j][1]}" for j in sorted(members[i]))
+        out.append(f"=== chunk id={c[0]} path={c[1]}" + (f" also={also}" if also else "") + " ===")
+        out += c[3]
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def probes_770(text: str) -> dict:
+    """Reader view: the inventory of every chunk id and path (merged ones through 'also='), and the versions each section (file#chunk) exists in.
+    Which surviving text is the right one cannot be a probe: a mutated corpus may merge chunks of different sections, so the case
+    pins that on its fixtures through the claim instead (the canonical is always the highest version)."""
+    lines = text.split("\n")
+    heads = [(m.group(1), m.group(2), m.group(3), i) for i, l in enumerate(lines) if (m := _CHUNK_HDR.match(l))]
+    pairs: list[tuple[str, str]] = []
+    for cid, path, also, _ in heads:
+        pairs.append((cid, path))
+        if also:
+            pairs += [tuple(p.split("|", 1)) for p in also.split(",") if "|" in p]
+    versions: dict[str, set] = {}
+    for _, path in pairs:
+        versions.setdefault(path.rsplit("/", 1)[-1], set()).add(_version(path))
+    never_older = all(_version(path) >= _version(p.split("|", 1)[1]) for _, path, also, _ in heads if also for p in also.split(",") if "|" in p)
+    return {
+        "a kept chunk is never older than a chunk merged into it": never_older,
+        "inventory of (chunk id, path)": sorted(pairs),
+        "versions per section (file#chunk)": sorted((k, sorted(v)) for k, v in versions.items()),
+        "preamble": lines[: heads[0][3]] if heads else lines,
+    }
+
+
+def make_chunks() -> str:
+    rnd = random.Random(31)
+    vocab = ("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda sigma omega tau upsilon phi chi psi ember harbor lantern meadow quartz ribbon saddle timber velvet willow zephyr amber basalt cobalt dune "
+             "fjord glacier hollow island jasper kelp lagoon marsh nebula orchid pebble quill reef summit tundra vortex").split()
+    topics = {
+        "guide.md#0": "install the cli and deploy your first app; run the installer then log in",
+        "auth.md#1": "access tokens expire after fifteen minutes and the refresh token rotates on every use of the refresh endpoint",
+        "webhooks.md#2": "every webhook delivery carries a signature header computed with hmac over the raw body",
+        "limits.md#3": "the rate limit is six hundred requests per minute per key and clients should retry after the delay",
+        "paging.md#4": "list endpoints return an opaque cursor for pagination and a page size parameter",
+        "orders.md#5": "send an idempotency key so a retried order never creates a duplicate",
+        "sandbox.md#6": "the sandbox mirrors production and the data reset runs every night",
+        "secrets.md#7": "store each secret in the secret manager and grant the service a read only role",
+    }
+    docs = []
+    chunks = []
+    for key, lead in topics.items():
+        words = [rnd.choice(vocab) for _ in range(150)]
+        base = lead + ". " + " ".join(words)
+        wl = base.split(" ")
+        v1 = base
+        v2w = list(wl)
+        v2w[40] = "revised"
+        v2 = " ".join(v2w)
+        v3w = list(v2w)
+        v3w[110] = "updated"
+        v3 = " ".join(v3w)
+        chunks += [(f"docs/v1/{key}", v1), (f"docs/v2/{key}", v2), (f"docs/v3/{key}", v3)]
+    # mirrored READMEs: identical copies in three packages plus one with a one-word difference, unversioned
+    readme = "this package is part of the monorepo and is built with the shared toolchain " + " ".join(rnd.choice(vocab) for _ in range(120))
+    chunks += [("packages/a/README.md#0", readme), ("packages/b/README.md#0", readme), ("packages/c/README.md#0", readme.replace("shared", "common", 1))]
+    # distinct short chunks and one unrelated long chunk
+    chunks += [("docs/v3/tiny.md#0", "see the guide."), ("docs/v2/tiny.md#0", "see the guide."), ("docs/v3/changelog.md#9", "release notes " + " ".join(rnd.choice(vocab) for _ in range(90)))]
+    rnd.shuffle(chunks)
+    out = ["# chunks of docs-repo @ 4f1c8a2"]
+    for i, (path, body) in enumerate(chunks):
+        out.append(f"=== chunk id=c{i:04d} path={path} ===")
+        out.append(body)
+    return "\n".join(out) + "\n"
+
+
+_CHUNKS = make_chunks()
+case(
+    770,
+    claim="In a serialised chunk list, chunks of 12+ words with word 3-shingle Jaccard >= 0.9 to the canonical (newest version, else first) are merged into it: the canonical keeps its text and gains 'also=ID|PATH,...' for each merged chunk, the others are deleted; "
+          "every chunk id and path stays listed and the versions each section exists in are unchanged.",
+    loses="the text of every merged non-canonical chunk (its differing words, e.g. an old default), and chunks that drift beyond Jaccard 0.9 of the newest are not merged at all",
+    encode=dedupe_chunks,
+    probes=probes_770,
+    fixtures=[
+        Fixture("24 versioned chunks (v1-v3 of 8 sections), 4 mirrored README copies, tiny and unrelated chunks", _CHUNKS, True),
+        Fixture("same, as if truncated mid-corpus", _CHUNKS[: len(_CHUNKS) // 2], True),
+        Fixture("chunks with nothing similar", "\n".join(f"=== chunk id=c{i} path=docs/v1/s{i}.md#0 ===\n" + " ".join(f"word{i}x{j}" for j in range(40)) for i in range(5)) + "\n", False),
+        Fixture("one chunk", "=== chunk id=c1 path=docs/v1/a.md#0 ===\n" + "the same words repeated here for twenty words at least okay " * 3 + "\n", False),
+        Fixture("already merged corpus", _CHUNKS.replace("=== chunk id=c0001 path=", "=== chunk id=c0001 also=c9|x/y path=", 1).replace(" also=c9|x/y path=", " path=", 1).replace("=== chunk id=c0001 path=docs", "=== chunk id=c0001 path=docs", 1), None),
+        Fixture("header with a comma in the id (refused)", "=== chunk id=a,b path=docs/v1/a.md#0 ===\n" + "same text for a dozen words or more here ok now " * 2 + "\n=== chunk id=c path=docs/v2/a.md#0 ===\n" + "same text for a dozen words or more here ok now " * 2 + "\n", False),
+    ],
+    min_gain=0.3,
+)
+
+# ===============================================================================================================
+# #1020 Fold identical token substitutions across git diff hunks. A hunk is a pure substitution when every changed line
+# pairs one-to-one (n removed lines, then n added lines) with an added line that differs only at word tokens equal to the
+# same OLD -> NEW. A substitution found in 3+ hunks is emitted once as 's/OLD/NEW/ path:line,line ...' (new-side line numbers of
+# the changed lines) and those hunks (with their context lines) are removed; a file whose hunks all fold disappears from the
+# diff. Exceptions stay as ordinary hunks, byte for byte. The old line is the tree line with NEW replaced by OLD, the new line
+# is the tree line, so `git diff` / the working tree recovers anything dropped.
+
+_TOK = re.compile(r"\w+|[^\w\s]|\s+")
+_SUBST_HEAD = re.compile(r"^folded substitutions \((\d+) changed lines in (\d+) files; `git diff` shows the original hunks\):$")
+_SUBST_LINE = re.compile(r"^s/(\w+)/(\w+)/ (\S.*)$")
+MIN_HUNKS = 3
+
+
+def _hunks_of(sec: list[str]):
+    """-> (header lines, [(hunk lines)]) if the section is well-formed (counts match each @@ header), else None."""
+    i = 1
+    while i < len(sec) and not sec[i].startswith("@@"):
+        if not sec[i].startswith(("index ", "new file mode ", "deleted file mode ", "old mode ", "new mode ", "--- ", "+++ ", "similarity index ", "rename from ", "rename to ", "Binary files ")):
+            return None
+        i += 1
+    head, hunks = sec[:i], []
+    while i < len(sec):
+        h = _HUNK.match(sec[i])
+        if not h:
+            return None
+        old_n, new_n = int(h.group(2) if h.group(2) is not None else 1), int(h.group(4) if h.group(4) is not None else 1)
+        j = i + 1
+        while old_n > 0 or new_n > 0:
+            if j >= len(sec) or sec[j][:1] not in (" ", "-", "+"):
+                return None
+            c = sec[j][0]
+            old_n -= c in " -"
+            new_n -= c in " +"
+            if old_n < 0 or new_n < 0:
+                return None
+            j += 1
+        if j < len(sec) and sec[j].startswith("\\"):
+            return None
+        hunks.append(sec[i:j])
+        i = j
+    return head, hunks
+
+
+def _pure_subst(hunk: list[str]):
+    """-> ((old, new), [new-side line numbers of changed lines]) when the hunk is a pure token substitution, else None."""
+    h = _HUNK.match(hunk[0])
+    new_ln = int(h.group(3))
+    pair: tuple[str, str] | None = None
+    lines_changed: list[int] = []
+    i = 1
+    while i < len(hunk):
+        if hunk[i][0] == " ":
+            new_ln += 1
+            i += 1
+            continue
+        rem, add = [], []
+        while i < len(hunk) and hunk[i][0] == "-":
+            rem.append(hunk[i][1:])
+            i += 1
+        while i < len(hunk) and hunk[i][0] == "+":
+            add.append(hunk[i][1:])
+            i += 1
+        if not rem or len(rem) != len(add):
+            return None
+        for a, b in zip(rem, add):
+            ta, tb = _TOK.findall(a), _TOK.findall(b)
+            if len(ta) != len(tb) or "".join(ta) != a or "".join(tb) != b:
+                return None
+            diffs = {(x, y) for x, y in zip(ta, tb) if x != y}
+            if not diffs or len(diffs) != 1:
+                return None
+            (o, n), = diffs
+            if not (re.fullmatch(r"\w+", o) and re.fullmatch(r"\w+", n)) or (pair is not None and pair != (o, n)):
+                return None
+            pair = (o, n)
+        lines_changed += list(range(new_ln, new_ln + len(add)))
+        new_ln += len(add)
+    return (pair, lines_changed) if pair else None
+
+
+def _section_path(sec: list[str]) -> str | None:
+    m = _DIFF_HDR.match(sec[0])
+    return m.group(2) if m and m.group(1) == m.group(2) and " " not in m.group(2) and ":" not in m.group(2) else None
+
+
+def fold_substitutions(text: str) -> str:
+    trail = text.endswith("\n")
+    body = text[:-1] if trail else text
+    if not body.startswith("diff --git ") or any(l.startswith("folded substitutions (") for l in body.split("\n")):
+        return text
+    secs = _split_sections(body)
+    parsed = []
+    groups: dict[tuple, list] = defaultdict(list)
+    for si, sec in enumerate(secs):
+        p = _hunks_of(sec) if _section_path(sec) else None
+        parsed.append(p)
+        if p:
+            for hi, hk in enumerate(p[1]):
+                r = _pure_subst(hk)
+                if r:
+                    groups[r[0]].append((si, hi, r[1]))
+    fold = {k: v for k, v in groups.items() if len(v) >= MIN_HUNKS}
+    if not fold:
+        return text
+    folded_at = {(si, hi) for v in fold.values() for si, hi, _ in v}
+    out: list[str] = []
+    for si, sec in enumerate(secs):
+        p = parsed[si]
+        if p is None or not any((si, hi) in folded_at for hi in range(len(p[1]))):
+            out += sec
+            continue
+        kept = [hk for hi, hk in enumerate(p[1]) if (si, hi) not in folded_at]
+        if kept:
+            out += p[0] + [l for hk in kept for l in hk]
+    summary = []
+    nlines = nfiles = 0
+    for (o, n), occ in fold.items():
+        per_file: dict[str, list[int]] = {}
+        for si, hi, lns in occ:
+            per_file.setdefault(_section_path(secs[si]), []).extend(lns)
+        nlines += sum(len(v) for v in per_file.values())
+        nfiles += len(per_file)
+        summary.append(f"s/{o}/{n}/ " + " ".join(f"{pth}:{','.join(map(str, lns))}" for pth, lns in per_file.items()))
+    out += [f"folded substitutions ({nlines} changed lines in {nfiles} files; `git diff` shows the original hunks):"] + summary
+    res = "\n".join(out) + ("\n" if trail else "")
+    return res if len(res) < len(text) else text
+
+
+def probes_1020(text: str) -> dict:
+    """Reader view: per file the hunks that were not folded (verbatim), and every substitution with its (path, new-side line) locations."""
+    lines = text.split("\n")
+    trail_empty = lines and lines[-1] == ""
+    if trail_empty:
+        lines = lines[:-1]
+    cut = next((i for i, l in enumerate(lines) if _SUBST_HEAD.match(l)), None)
+    diff_lines, summary_lines = (lines[:cut], lines[cut + 1:]) if cut is not None else (lines, [])
+    secs = _split_sections("\n".join(diff_lines)) if diff_lines else []
+    substs: dict[tuple, list] = defaultdict(list)
+    kept_sections = []
+    parsed = [(_hunks_of(sec) if sec and sec[0].startswith("diff --git ") and _section_path(sec) else None, sec) for sec in secs]
+    pure_counts: Counter = Counter()
+    for p, sec in parsed:
+        if p:
+            for hk in p[1]:
+                r = _pure_subst(hk)
+                if r:
+                    pure_counts[r[0]] += 1
+    for p, sec in parsed:
+        if p is None:
+            kept_sections.append((tuple(sec), ()))
+            continue
+        keep = []
+        for hk in p[1]:
+            r = _pure_subst(hk) if cut is None else None
+            if r and pure_counts[r[0]] >= MIN_HUNKS:
+                path = _section_path(sec)
+                substs[r[0]] += [(path, n) for n in r[1]]
+            else:
+                keep.append(tuple(hk))
+        if keep or not p[1]:
+            kept_sections.append((tuple(p[0]), tuple(keep)))
+    for l in summary_lines:
+        m = _SUBST_LINE.match(l)
+        if not m:
+            continue
+        for tok in m.group(3).split(" "):
+            path, _, nums = tok.rpartition(":")
+            substs[(m.group(1), m.group(2))] += [(path, int(n)) for n in nums.split(",") if n]
+    return {
+        "sections with the hunks that remain (headers, hunks)": kept_sections,
+        "substitutions with (path, line) locations": sorted((k, sorted(v)) for k, v in substs.items()),
+    }
+
+
+_RS = _split_sections(RENAME_DIFF.rstrip("\n"))
+_RS_BY = {s[0].split(" b/")[-1]: "\n".join(s) for s in _RS}
+case(
+    1020,
+    claim="Hunks that are a pure OLD -> NEW word substitution (every changed line pairs with one that differs only there) and occur in 3+ hunks become 's/OLD/NEW/ path:line,...' (new-side line numbers) with the hunks and their context removed; "
+          "hunks that do anything else stay byte for byte, files whose hunks all fold vanish, and the exact set of (path, line) locations per substitution is unchanged.",
+    loses="the text of the changed lines and the context lines of folded hunks (the working tree has them: the new line is the tree line, the old line is the tree line with NEW replaced by OLD), blob ids and file headers of fully folded files",
+    encode=fold_substitutions,
+    probes=probes_1020,
+    fixtures=[
+        Fixture("real rename: Response -> HTTPResponse over 17 files, two non-pure hunks among 50 changed lines", RENAME_DIFF, True),
+        Fixture("the exception hunks first (_models.py, _api.py) then the rest", "\n".join([_RS_BY["httpcore2/_models.py"], _RS_BY["httpcore2/_api.py"]] + [v for k, v in _RS_BY.items() if k not in ("httpcore2/_models.py", "httpcore2/_api.py")]) + "\n", True),
+        Fixture("six files of the rename only", "\n".join(list(_RS_BY.values())[2:8]) + "\n", True),
+        Fixture("two pure hunks only (below the threshold)", _RS_BY["httpcore2/__init__.py"] + "\n", False),
+        Fixture("generated-files diff with no substitution", GEN_DIFF, False),
+        Fixture("not a diff", "Compiling core v0.4.2\n", False),
+        Fixture("diff that already has a folded block", RENAME_DIFF + "folded substitutions (2 changed lines in 1 files; `git diff` shows the original hunks):\ns/a/b/ x.py:1,2\n", None),
+    ],
+    min_gain=0.5,
+)
+
+# ===============================================================================================================
+# #1104 Transcript chaptering: segment a long timestamped transcript by lexical shift (a TextTiling-style cosine score between
+# the windows either side of each line, depth-scored, minimum 8 lines per chapter) and emit '[mm:ss] Speaker: lead sentence, N
+# words elided' per chapter under a one-line header (chapters, words, time span, speakers). The original stays on disk to grep.
+# Transcripts under 40 lines or 500 words are left alone. The probes pin that the outline is a faithful rendering of the
+# segmentation (stamps, lead sentences, word accounting, span, speakers); the segmentation itself is reused by the probe for the
+# original text, so the case does NOT test that the chapter boundaries are good; that is the idea's 'ask 10 questions' study.
+
+_T_LINE = re.compile(r"^\[(?:(\d+):)?(\d{2}):(\d{2})\] (.*)$")
+_T_SPEAKER = re.compile(r"^([A-Z][A-Za-z.' -]{0,30}): (.*)$")
+_T_OUT = re.compile(r"^\[(?:(\d+):)?(\d{2}):(\d{2})\] (.*), (\d+) words elided$")
+_T_HEAD = re.compile(r"^outline: (\d+) chapters, (\d+) words, (\S+)-(\S+), speakers (\[.*\])$")
+_STOP = set("this that with have from they their there which would about these those then than also just like some what when will your more very into only over such been were them being because while where after before could should other really going actually".split())
+TT_WINDOW, TT_MIN_LINES = 4, 8
+
+
+def _parse_transcript(text: str):
+    entries: list[list] = []  # [seconds, speaker, text]
+    for l in text.split("\n"):
+        m = _T_LINE.match(l)
+        if m:
+            body = m.group(4)
+            sp = _T_SPEAKER.match(body)
+            entries.append([_secs(m.group(1), m.group(2), m.group(3)), sp.group(1) if sp else None, sp.group(2) if sp else body])
+        elif entries and l.strip():
+            entries[-1][2] += " " + l.strip()
+    return entries
+
+
+def _bag(t: str) -> Counter:
+    return Counter(w for w in re.findall(r"[a-z]{4,}", t.lower()) if w not in _STOP)
+
+
+def _cos(a: Counter, b: Counter) -> float:
+    num = sum(v * b.get(k, 0) for k, v in a.items())
+    den = math.sqrt(sum(v * v for v in a.values())) * math.sqrt(sum(v * v for v in b.values()))
+    return num / den if den else 0.0
+
+
+def _segment(entries) -> list[int]:
+    """Start indexes of chapters (always including 0)."""
+    n, w = len(entries), TT_WINDOW
+    bags = [_bag(e[2]) for e in entries]
+    gaps = list(range(w, n - w + 1))
+    sims = []
+    for g in gaps:
+        left, right = Counter(), Counter()
+        for b in bags[g - w:g]:
+            left.update(b)
+        for b in bags[g:g + w]:
+            right.update(b)
+        sims.append(round(_cos(left, right), 6))
+    depth = []
+    for k, s in enumerate(sims):
+        lo, hi = max(0, k - 6), min(len(sims), k + 7)
+        depth.append(round(max(sims[lo:k + 1]) - s + max(sims[k:hi]) - s, 6))
+    if not depth:
+        return [0]
+    mean = sum(depth) / len(depth)
+    sd = math.sqrt(sum((d - mean) ** 2 for d in depth) / len(depth))
+    cut = mean + 0.5 * sd
+    bounds = [0]
+    for k, g in enumerate(gaps):
+        if depth[k] >= cut and depth[k] == max(depth[max(0, k - 4):k + 5]) and g - bounds[-1] >= TT_MIN_LINES and n - g >= TT_MIN_LINES:
+            bounds.append(g)
+    return bounds
+
+
+def _lead(text: str) -> str:
+    m = re.search(r"[.!?](?:\s|$)", text)
+    return (text[: m.end()].strip() if m else text.strip())[:160]
+
+
+def _chapters(entries):
+    starts = _segment(entries)
+    out = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(entries)
+        text = " ".join(x[2] for x in entries[s:e])
+        lead = _lead(entries[s][2])
+        out.append((entries[s][0], entries[s][1], lead, len(text.split()) - len(lead.split()), len(text.split())))
+    return out
+
+
+def chapter_transcript(text: str) -> str:
+    entries = _parse_transcript(text)
+    if len(entries) < 40 or sum(len(e[2].split()) for e in entries) < 500 or any(_T_OUT.match(l) or _T_HEAD.match(l) for l in text.split("\n")):
+        return text
+    if any('"' in (e[1] or "") or "\\" in (e[1] or "") for e in entries):
+        return text
+    chs = _chapters(entries)
+    speakers = sorted({e[1] for e in entries if e[1]})
+    total = sum(e[2].split().__len__() for e in entries)
+    out = [f"outline: {len(chs)} chapters, {total} words, {_stamp(entries[0][0])[1:-1]}-{_stamp(max(e[0] for e in entries))[1:-1]}, speakers {json.dumps(speakers)}"]
+    for st, sp, lead, elided, _ in chs:
+        out.append(f"{_stamp(st)} " + (f"{sp}: " if sp else "") + f"{lead}, {elided} words elided")
+    res = "\n".join(out) + ("\n" if text.endswith("\n") else "")
+    return res if len(res) < len(text) else text
+
+
+def probes_1104(text: str) -> dict:
+    lines = text.split("\n")
+    head = next((m for l in lines if (m := _T_HEAD.match(l))), None)
+    if head is not None and all(_T_LINE.match(l) is None or _T_OUT.match(l) for l in lines if l):
+        speakers = json.loads(head.group(5))
+        chs = []
+        for l in lines:
+            m = _T_OUT.match(l)
+            if not m:
+                continue
+            rest, sp = m.group(4), None
+            for name in speakers:
+                if rest.startswith(name + ": "):
+                    sp, rest = name, rest[len(name) + 2:]
+                    break
+            chs.append((_secs(m.group(1), m.group(2), m.group(3)), sp, rest, int(m.group(5)), len(rest.split()) + int(m.group(5))))
+        span = (head.group(3), head.group(4))
+        total = int(head.group(2))
+        accounted = sum(c[4] for c in chs)
+    else:
+        entries = _parse_transcript(text)
+        if len(entries) < 40 or sum(len(e[2].split()) for e in entries) < 500 or any(_T_OUT.match(l) or _T_HEAD.match(l) for l in lines):
+            return {"outline": None, "text": text if not entries else None, "entries": len(entries)}
+        chs = _chapters(entries)
+        speakers = sorted({e[1] for e in entries if e[1]})
+        span = (_stamp(entries[0][0])[1:-1], _stamp(max(e[0] for e in entries))[1:-1])
+        total = sum(len(e[2].split()) for e in entries)
+        accounted = sum(c[4] for c in chs)
+    return {
+        "chapters (start, speaker, lead sentence, words elided)": [c[:4] for c in chs],
+        "words in the transcript and words accounted for by the chapters": (total, accounted),
+        "time span": span,
+        "speakers": speakers,
+    }
+
+
+def make_lecture(lines_per_topic: int = 30, with_speakers: bool = True, seed: int = 17, t0: int = 0) -> str:
+    rnd = random.Random(seed)
+    topics = {
+        "indexing": "index btree leaf page scan query planner selectivity cardinality composite prefix covering".split(),
+        "caching": "cache header expiry revalidate etag proxy origin invalidation stale browser directive freshness".split(),
+        "scheduling": "scheduler pod node taint toleration affinity kubelet replica deployment resource limit eviction".split(),
+        "gradient": "gradient descent learning rate loss minibatch momentum epoch weights backward activation overfitting".split(),
+    }
+    filler = "so now what we want to see here is that the idea is quite simple and we will come back to it in a moment".split()
+    out = []
+    t = t0
+    for ti, (name, vocab) in enumerate(topics.items()):
+        for k in range(lines_per_topic):
+            sents = []
+            for _ in range(rnd.randint(2, 3)):
+                a, b, c = rnd.sample(vocab, 3)
+                sents.append(f"The {a} of a {b} depends mostly on the {c} and {rnd.choice(filler)} {rnd.choice(filler)}.")
+            if k == 0:
+                sents[0] = f"Now let's move on to {name}, which is the next big topic."
+            sp = ("Maria" if (k // 5) % 2 == 0 else "Joel") + ": " if with_speakers else ""
+            out.append(f"{_stamp(t)} {sp}{' '.join(sents)}")
+            t += rnd.randint(22, 38)
+    return "\n".join(out) + "\n"
+
+
+_LECTURE = make_lecture()
+case(
+    1104,
+    claim="A timestamped transcript of 40+ lines is segmented by lexical shift (TextTiling-style, 8+ lines per chapter) and replaced by a one-line header plus '[mm:ss] Speaker: lead sentence, N words elided' per chapter; the chapter starts and leads, "
+          "the word count (lead words plus elided words equal the transcript's), the time span and the speaker list are those of the segmentation of the original. Short transcripts are left alone.",
+    loses="everything except each chapter's first sentence and word count (the original must be grepped or re-read for details), the stamps of lines inside a chapter, and any chapter boundary the lexical shift misses",
+    encode=chapter_transcript,
+    probes=probes_1104,
+    fixtures=[
+        Fixture("4-topic lecture, 120 lines (about 3,800 words) with two speakers", _LECTURE, True),
+        Fixture("same without speaker labels, starting at 1:02:05", make_lecture(30, False, t0=3725), True),
+        Fixture("longer lecture, 4 x 45 lines", make_lecture(45, True, seed=3), True),
+        Fixture("short meeting transcript (12 lines)", "\n".join(_LECTURE.split("\n")[:12]) + "\n", False),
+        Fixture("long text without stamps", "plain paragraph of words " * 400 + "\n", False),
+        Fixture("input that already is an outline", "outline: 1 chapters, 600 words, 00:00-01:00, speakers []\n[00:00] intro sentence here., 590 words elided\n" + _LECTURE, None),
+    ],
+    min_gain=0.5,
+)

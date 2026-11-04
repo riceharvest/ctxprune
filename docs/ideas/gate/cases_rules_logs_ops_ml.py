@@ -523,7 +523,8 @@ def decimate_steps(text: str) -> str:
     for i in finite:
         loss = float(parsed[i].group(2))
         if len(window) >= 8:
-            mu, sd = statistics.fmean(window), statistics.pstdev(window)
+            mu = sum(window) / len(window)
+            sd = 0.0 if max(window) == min(window) else math.sqrt(sum((x - mu) ** 2 for x in window) / len(window))
             if (sd > 0 and (loss - mu) > 3 * sd) or (sd == 0 and loss != mu):
                 keep[i] = True
         window = (window + [loss])[-16:]
@@ -649,9 +650,10 @@ case(
 # Everything else (WARN, ERROR, stack frames, DAGScheduler stage/job lines, SparkContext, ...) is verbatim.
 
 _SPARK = re.compile(r"^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d) INFO (TaskSetManager|Executor|MemoryStore|BlockManagerInfo|BlockManagerMasterEndpoint|ResourceUtils): (.*)$", A)
-_TSM_START = re.compile(r"^Starting task \S+ in stage (\S+) \(TID (\d+)\)", A)
-_TSM_DONE = re.compile(r"^Finished task \S+ in stage (\S+) \(TID (\d+)\) in (\d+) ms on ", A)
-_EXE = re.compile(r"^(?:Running|Finished) task ", A)
+_TSM_START = re.compile(r"^Starting task \S+ in stage (\S+) \(TID (\d+)\) \([^()]*\)$", A)
+_TSM_DONE = re.compile(r"^Finished task \S+ in stage (\S+) \(TID (\d+)\) in (\d+) ms on \S+ \([^()]*\) \(\d+/\d+\)$", A)
+_EXE = re.compile(r"^(?:Running task \S+ in stage \S+ \(TID \d+\)|Finished task \S+ in stage \S+ \(TID \d+\)\. \d+ bytes result sent to driver)$", A)
+_SPARK_TS = re.compile(r"\d\d/\d\d/\d\d \d\d:\d\d:\d\d ", A)
 _M413 = re.compile(r"^\[\.\.\. (\d+) lines folded \(([^()]*?) \.\. ([^()]*?)\): (.*)\]$", A)
 _M413_STAGE = re.compile(r"^stage (\S+) started (\d+) finished (\d+) slowest TID (\d+) (\d+)ms$", A)
 _M413_OTHER = re.compile(r"^other (\d+)$", A)
@@ -665,6 +667,8 @@ def _spark_chatter(line: str):
     if not m:
         return None
     ts, logger, msg = m.groups()
+    if _SPARK_TS.search(msg):  # a second record on the same line (two writers): not chatter
+        return None
     if logger == "TaskSetManager":
         s = _TSM_START.match(msg)
         if s:
@@ -736,6 +740,7 @@ def probes_413(text: str) -> dict:
     stages: dict = defaultdict(lambda: [0, 0, None])
     vlines = 0
     alarms: list[tuple[int, str]] = []
+    sched: list[tuple[int, str]] = []
     first_err = None
 
     def add(kind, stage, tid, ms, n=1):
@@ -765,9 +770,12 @@ def probes_413(text: str) -> dict:
             alarms.append((vlines, line))
             if first_err is None and any(k in line for k in ("ERROR", "Exception", "FATAL")):
                 first_err = vlines
+        if any(k in line for k in ("DAGScheduler:", "TaskSchedulerImpl:", "SparkContext:")):
+            sched.append((vlines, line))
         vlines += 1
     return {
         "alarm lines (virtual line number, text)": alarms,
+        "scheduler and context lines: DAGScheduler, TaskSchedulerImpl, SparkContext (virtual line number, text)": sched,
         "virtual line count": vlines,
         "per stage: tasks started, tasks finished, slowest (tid, ms)": sorted((k, v[0], v[1], v[2]) for k, v in stages.items()),
         "lines before the first error": first_err,
@@ -1034,7 +1042,7 @@ _DBT_START = re.compile(rf"^(?:{_DBT_PFX})?(\d+) of (\d+) START (.+?) \.{{2,}} \
 _DBT_DEBUG = re.compile(r"^\d\d:\d\d:\d\d\.\d+ \[debug\] ", A)
 _DBT_CLOCK = re.compile(r"^\d\d:\d\d:\d\d", A)
 _M885 = re.compile(r"^\[\.\.\. (\d+) debug lines dropped\]$", A)
-_DBT_ALARM = ("rror", "ERROR", "FAIL", "Fail", "fail", "xception", "Traceback", "WARN", "arning")
+_DBT_ALARM = ("rror", "ERROR", "FAIL", "Fail", "fail", "xception", "Traceback", "WARN", "arning", "[OK", "[PASS", "[SKIP", "[INSERT")
 
 
 def compact_dbt(text: str) -> str:
@@ -1146,6 +1154,7 @@ def probes_885(text: str) -> dict:
         "other lines kept: header, failure details, summary (results before, text)": other,
         "debug lines in all (dropped or kept)": dbg_total,
         "debug lines naming an error or failure": dbg_alarm,
+        "result brackets [OK ..] [PASS ..] [WARN ..] [FAIL ..] [ERROR ..] [SKIP] anywhere in the text": sum(text.count(k) for k in ("[OK ", "[PASS ", "[WARN ", "[FAIL ", "[ERROR ", "[SKIP]", "[INSERT ")),
     }
 
 
@@ -3041,10 +3050,12 @@ case(
 # and anything not in the table are verbatim.
 
 _WB_FIXED = re.compile(
-    r"^wandb: (?:Currently logged in as: .*|Tracking run with wandb version .*|Run data is saved locally in .*|Run `wandb offline` to turn off syncing\.|Syncing run .*"
-    r"|⭐️ View project at .*|Waiting for W&B process to finish.*|Synced \d+ W&B file\(s\), .*|Find logs at: .*)$", A)
+    r"^wandb: (?:Currently logged in as: \S+(?: \([^()]*\))?\. Use `wandb login --relogin` to force relogin|Tracking run with wandb version \S+|Run data is saved locally in \S+"
+    r"|Run `wandb offline` to turn off syncing\.|Syncing run \S+|⭐️ View project at \S+|Waiting for W&B process to finish\.\.\. \((?:success|failed)\)\.(?: Press Control-C to abort syncing\.)?"
+    r"|Synced \d+ W&B file\(s\), \d+ media file\(s\), \d+ artifact file\(s\) and \d+ other file\(s\)|Find logs at: \S+)$", A)
 _AF = re.compile(r"^\[\d{4}-\d\d-\d\d[T,] ?\d\d:\d\d:\d\d(?:\.\d+)?(?:[+-]\d{4}| UTC)\] \{[A-Za-z_.]+:\d+\} (?:INFO|WARNING|ERROR|CRITICAL) - (.*)$", A)
 _AF_FIXED = re.compile(r"^(?:Dependencies all met for .*|Executing <Task\(.*|Started process \d+ to run task|Running: \[.*|Job \d+: Subtask .*|Running <TaskInstance: .*|\d+ downstream tasks scheduled from follow-on schedule check|Task exited with return code 0)$", A)
+_AF_INNER = re.compile(r"\[\d{4}-\d\d-\d\d[T,] ?\d\d:\d\d:\d\d", A)
 _AF_CTX = re.compile(r"^Exporting env vars: AIRFLOW_CTX_DAG_OWNER='[^']*' AIRFLOW_CTX_DAG_ID='([^']*)' AIRFLOW_CTX_TASK_ID='([^']*)' AIRFLOW_CTX_EXECUTION_DATE='[^']*' AIRFLOW_CTX_TRY_NUMBER='(\d+)' AIRFLOW_CTX_DAG_RUN_ID='([^']*)'$", A)
 _M1328 = re.compile(r"^\[\.\.\. (\d+) fixed lines folded \((wandb|airflow)\)\]$", A)
 _M1328_CTX = re.compile(r"^\[airflow ctx dag_id=(\S*) task_id=(\S*) try=(\d+) run_id=(\S*)\]$", A)
@@ -3070,7 +3081,7 @@ def pack_ml_logs(text: str) -> str:
                 k = "wandb"
             else:
                 m = _AF.match(l)
-                if m:
+                if m and not _AF_INNER.search(m.group(1)):  # a second record on the line (two writers) is not boilerplate
                     c = _AF_CTX.match(m.group(1))
                     if c:
                         k = ("ctx", f"[airflow ctx dag_id={c.group(1)} task_id={c.group(2)} try={c.group(3)} run_id={c.group(4)}]")
@@ -3508,37 +3519,38 @@ case(
 # #416 ML framework startup and warning boilerplate pack: a table of fixed lines (TensorFlow cpu_feature_guard / cuDNN / TensorRT
 # notices, the HF 'You should probably TRAIN' advice, the tokenizers fork warning, Lightning hardware lines, sklearn
 # ConvergenceWarning advice and doc URLs) folds into '[... N fixed lines folded: pack xK, ...]'. A line is in the table when
-# it contains every needle of one entry. Warnings that name user code, the HF 'Some weights ... newly initialized' line, the
+# it is, in full, one of the constant lines of the table (anchored: a line that carries other text too stays). Warnings that name user code, the HF 'Some weights ... newly initialized' line, the
 # sklearn warning's first line and STOP reason, tracebacks and everything else are verbatim.
 
-_ML_PACK: list[tuple[str, tuple[str, ...]]] = [
-    ("tf_cpu_feature_guard", ("cpu_feature_guard.cc", "This TensorFlow binary is optimized")),
-    ("tf_cpu_feature_guard", ("To enable the following instructions: ", "rebuild TensorFlow with the appropriate compiler flags.")),
-    ("tf_onednn", ("oneDNN custom operations are on",)),
-    ("cuda_factory", ("Unable to register cu", "factory: Attempting to register factory for plugin")),
-    ("tensorrt", ("TF-TRT Warning: Could not find TensorRT",)),
-    ("hf_init_advice", ("You should probably TRAIN this model on a down-stream task",)),
-    ("tokenizers_fork", ("huggingface/tokenizers: The current process just got forked",)),
-    ("tokenizers_fork", ("To disable this warning, you can either:",)),
-    ("tokenizers_fork", ("- Avoid using `tokenizers` before the fork if possible",)),
-    ("tokenizers_fork", ("- Explicitly set the environment variable TOKENIZERS_PARALLELISM=",)),
-    ("lightning_hw", ("GPU available: ", ", used: ")),
-    ("lightning_hw", ("TPU available: ", ", using: ")),
-    ("lightning_hw", ("HPU available: ", ", using: ")),
-    ("lightning_hw", ("LOCAL_RANK: ", "CUDA_VISIBLE_DEVICES: [")),
-    ("lightning_hw", ("Tip: For seamless cloud logging",)),
-    ("sklearn_advice", ("Increase the number of iterations (max_iter) or scale the data as shown in:",)),
-    ("sklearn_advice", ("https://scikit-learn.org/stable/modules/preprocessing.html",)),
-    ("sklearn_advice", ("Please also refer to the documentation for alternative solver options:",)),
-    ("sklearn_advice", ("https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression",)),
-    ("sklearn_advice", ("n_iter_i = _check_optimize_result(",)),
-]
+_TF_TS = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+: "
+_ML_PACK: list[tuple[str, "re.Pattern[str]"]] = [(name, re.compile(rx, A)) for name, rx in [
+    ("tf_cpu_feature_guard", _TF_TS + r"I tensorflow/core/platform/cpu_feature_guard\.cc:\d+\] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations\."),
+    ("tf_cpu_feature_guard", r"To enable the following instructions: [A-Z0-9_ ,]+, in other operations, rebuild TensorFlow with the appropriate compiler flags\."),
+    ("tf_onednn", _TF_TS + r"I tensorflow/core/util/port\.cc:\d+\] oneDNN custom operations are on\. You may see slightly different numerical results due to floating-point round-off errors from different computation orders\.(?: To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`\.)?"),
+    ("cuda_factory", _TF_TS + r"E external/local_xla/xla/stream_executor/cuda/cuda_(?:dnn|fft|blas)\.cc:\d+\] Unable to register cu(?:DNN|FFT|BLAS) factory: Attempting to register factory for plugin cu(?:DNN|FFT|BLAS) when one has already been registered"),
+    ("tensorrt", _TF_TS + r"W tensorflow/compiler/tf2tensorrt/utils/py_utils\.cc:\d+\] TF-TRT Warning: Could not find TensorRT"),
+    ("hf_init_advice", r"You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference\."),
+    ("tokenizers_fork", r"huggingface/tokenizers: The current process just got forked, after parallelism has already been used\. Disabling parallelism to avoid deadlocks\.\.\."),
+    ("tokenizers_fork", r"To disable this warning, you can either:"),
+    ("tokenizers_fork", r"\t- Avoid using `tokenizers` before the fork if possible"),
+    ("tokenizers_fork", r"\t- Explicitly set the environment variable TOKENIZERS_PARALLELISM=\(true \| false\)"),
+    ("lightning_hw", r"GPU available: (?:True|False) \([a-z]+\), used: (?:True|False)"),
+    ("lightning_hw", r"TPU available: (?:True|False), using: \d+ TPU cores"),
+    ("lightning_hw", r"HPU available: (?:True|False), using: \d+ HPUs"),
+    ("lightning_hw", r"LOCAL_RANK: \d+ - CUDA_VISIBLE_DEVICES: \[[0-9,]*\]"),
+    ("lightning_hw", r"💡 Tip: For seamless cloud logging and experiment tracking, try installing \[litlogger\]\(https://pypi\.org/project/litlogger/\) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Cloud\."),
+    ("sklearn_advice", r"Increase the number of iterations \(max_iter\) or scale the data as shown in:"),
+    ("sklearn_advice", r" {4}https://scikit-learn\.org/stable/modules/preprocessing\.html"),
+    ("sklearn_advice", r"Please also refer to the documentation for alternative solver options:"),
+    ("sklearn_advice", r" {4}https://scikit-learn\.org/stable/modules/linear_model\.html#logistic-regression"),
+    ("sklearn_advice", r"  n_iter_i = _check_optimize_result\("),
+]]
 _M416 = re.compile(r"^\[\.\.\. (\d+) fixed lines folded: (.*)\]$", A)
 
 
 def _ml_pack_of(line: str):
-    for name, needles in _ML_PACK:
-        if all(n in line for n in needles):
+    for name, rx in _ML_PACK:
+        if rx.fullmatch(line):  # the whole line: two writers sharing a line must not fold the other writer's text away
             return name
     return None
 
@@ -3587,7 +3599,7 @@ def probes_416(text: str) -> dict:
         else:
             kept.append((v, l))
         # independent of the table: any line that names user code, a failure or a traceback must have survived
-        if "/work/" in l or "Traceback" in l or "Error" in l or l.startswith("  File ") or "Warning:" in l and "tensorflow/" not in l and "TF-TRT" not in l and "sklearn/" not in l:
+        if "/work/" in l or ".py:" in l or "Traceback" in l or "Error" in l or l.startswith("  File ") or "Warning:" in l and "tensorflow/" not in l and "TF-TRT" not in l and "sklearn/" not in l:
             user.append((v, l))
         v += 1
     return {
@@ -3600,7 +3612,7 @@ def probes_416(text: str) -> dict:
 
 def _tf_run() -> str:
     return "\n".join([
-        "2024-03-05 10:15:01.101010: I tensorflow/core util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.",
+        "2024-03-05 10:15:01.101010: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.",
         "2024-03-05 10:15:01.402020: E external/local_xla/xla/stream_executor/cuda/cuda_dnn.cc:9261] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered",
         "2024-03-05 10:15:01.403030: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:607] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered",
         "2024-03-05 10:15:01.404040: E external/local_xla/xla/stream_executor/cuda/cuda_blas.cc:1515] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered",
@@ -3620,7 +3632,7 @@ def _tf_run() -> str:
 def _lightning_sklearn_run(crash: bool) -> str:
     out = ["GPU available: True (cuda), used: True", "TPU available: False, using: 0 TPU cores", "HPU available: False, using: 0 HPUs",
            "LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]", "💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Cloud.",
-           "/work/train.py:12: UserWarning: GPU available: False for the aux model, falling back to cpu for it", "Epoch 0: 100%|██████████| 12/12 [00:01<00:00, 9.1it/s, loss=0.62]", "Epoch 1: 100%|██████████| 12/12 [00:01<00:00, 9.4it/s, loss=0.41]",
+           "[train] warning (see /work/NOTES): GPU available: False for the aux model, falling back to cpu for it", "Epoch 0: 100%|██████████| 12/12 [00:01<00:00, 9.1it/s, loss=0.62]", "Epoch 1: 100%|██████████| 12/12 [00:01<00:00, 9.4it/s, loss=0.41]",
            "/usr/lib/python3/dist-packages/sklearn/linear_model/_logistic.py:460: ConvergenceWarning: lbfgs failed to converge (status=1):", "STOP: TOTAL NO. of ITERATIONS REACHED LIMIT.", "",
            "Increase the number of iterations (max_iter) or scale the data as shown in:", "    https://scikit-learn.org/stable/modules/preprocessing.html",
            "Please also refer to the documentation for alternative solver options:", "    https://scikit-learn.org/stable/modules/linear_model.html#logistic-regression", "  n_iter_i = _check_optimize_result(",
@@ -3640,7 +3652,7 @@ case(
         Fixture("TensorFlow and transformers startup: notices at the top, a user warning in the middle, fork warnings at the end", _tf_run(), True),
         Fixture("Lightning start lines and a sklearn ConvergenceWarning in the middle", _lightning_sklearn_run(False), True),
         Fixture("failure variant: same run ending in a user-code traceback", _lightning_sklearn_run(True), True),
-        Fixture("clean script output", "epoch 1 done\nepoch 2 done\nTo enable the following instructions, run make install\n", False),
+        Fixture("clean script output", "epoch 1 done\nepoch 2 done\nTo enable the following instructions: run make install\n", False),
     ],
     min_gain=0.2,
 )
@@ -4304,7 +4316,7 @@ case(
 # line and every other line stay. Next.js: the constant legend lines ('○  (Static)  prerendered ...') fold to a count and
 # so do the 'chunks/...' lines under 'First Load JS shared by all'; route rows and the shared total stay.
 
-_WP_ASSET = re.compile(r"^asset ([^ ]+) (\d+(?:\.\d+)?) (bytes|KiB|MiB|GiB)(?: .*)?$", A)
+_WP_ASSET = re.compile(r"^asset ([^ ]+) (\d+(?:\.\d+)?) (bytes|KiB|MiB|GiB)(?: \[[^\[\]]*\]| \([^()]*\)| \d+ related assets?)*$", A)
 _WP_LEAF = re.compile(r"^( {4,})(\.{1,2}/\S*) \d+(?:\.\d+)? (?:bytes|KiB|MiB|GiB)(?: \[[a-z ]+\])*$", A)
 _NX_LEGEND = re.compile(r"^[○●λƒ◐✓]  \((?:Static|SSG|Dynamic|ISR|PPR|Partial Prerender)\) .*$")
 _NX_CHUNK = re.compile(r"^  [├└] (?:chunks/\S+|css/\S+|other shared chunks \(total\)) +\d+(?:\.\d+)? [kM]?B$")
@@ -4364,11 +4376,41 @@ def digest_build(text: str) -> str:
     return gate(text, join_nl(out, nl))
 
 
+def _wp_tail_ok(rest: str) -> bool:
+    """Probe-side scan of what follows 'asset NAME SIZE UNIT': ' [flag]', ' (note)' or ' N related asset(s)', repeated."""
+    i = 0
+    while i < len(rest):
+        if rest[i] != " ":
+            return False
+        i += 1
+        if rest[i:i + 1] == "[":
+            j = rest.find("]", i)
+            if j < 0 or "[" in rest[i + 1:j]:
+                return False
+            i = j + 1
+        elif rest[i:i + 1] == "(":
+            j = rest.find(")", i)
+            if j < 0 or "(" in rest[i + 1:j]:
+                return False
+            i = j + 1
+        else:
+            num, sp, after = rest[i:].partition(" ")
+            if not (isdigits(num) and sp and after.startswith("related asset")):
+                return False
+            after = after[len("related asset"):]
+            if after.startswith("s"):
+                after = after[1:]
+            if after and not after.startswith(" "):
+                return False
+            i = len(rest) - len(after)
+    return True
+
+
 def _wp_asset_probe(l: str):
     t = l.split(" ")
     if len(t) >= 4 and t[0] == "asset" and t[1] and t[3] in _UNIT:
         a, dot, b = t[2].partition(".")
-        if isdigits(a) and (not dot or isdigits(b)):
+        if isdigits(a) and (not dot or isdigits(b)) and _wp_tail_ok(l[len(f"asset {t[1]} {t[2]} {t[3]}"):]):
             return t[1], t[2], t[3]
     return None
 
@@ -4432,6 +4474,7 @@ def probes_125(text: str) -> dict:
         "number of assets and their total size in bytes": (n_assets, str(total.normalize()) if total else "0"),
         "leaf module lines": leaf,
         "next legend lines and shared chunk lines": (legend, chunks),
+        "lines naming a warning, an error or the compiled-with summary": [(i, l) for i, l in verbatim if "WARNING in" in l or "ERROR in" in l or "Module not found" in l or "compiled " in l],
         "all other lines: group sizes, warnings, errors, routes, summaries (virtual line, text)": verbatim,
     }
 

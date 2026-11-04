@@ -581,7 +581,7 @@ def _scan_yaml(lines: list[str]):
         if skip_gt >= 0:
             continue
         s = line[n:]
-        item = next((e[2] for e in reversed(stack) if e[1] == "[]"), -1)
+        item = -1
         if s.startswith("- ") or s == "-":
             while stack and (stack[-1][0] > n or (stack[-1][0] == n and stack[-1][1] == "[]")):
                 stack.pop()
@@ -604,6 +604,7 @@ def _scan_yaml(lines: list[str]):
             continue
         while stack and stack[-1][0] >= n:
             stack.pop()
+        item = next((e[2] for e in reversed(stack) if e[1] == "[]"), -1)  # after the pops: the list item this key belongs to
         m = _KEYLINE.match(s)
         if not m:
             continue
@@ -1312,6 +1313,19 @@ def fold_matrix_legs(text: str) -> str:
     return res if len(res) < len(text) else text
 
 
+# The probe's own statement of what 'identical' may ignore (kept apart from _NORMS so a looser encoder, e.g. one that also blurs numbers, is caught).
+_PROBE_NORMS = [(r"/opt/hostedtoolcache/(\w+)/[\d.]+/(\w+)", r"/opt/hostedtoolcache/\1/V/\2"), (r"\bPython 3\.\d+(?:\.\d+)?", "Python V"), (r"\bpython3\.\d+", "python3.V"),
+                (r"\bcp3\d+\b", "cp3V"), (r"\bin \d+(?:\.\d+)?s\b", "in Ds"), (r"CPython \(3\.\d+\.\d+\)", "CPython (V)")]
+
+
+def _pnorm(text: str, job: str) -> str:
+    if job:
+        text = text.replace(job, "LEG")
+    for pat, rep in _PROBE_NORMS:
+        text = re.sub(pat, rep, text)
+    return text
+
+
 def probes_478(text: str) -> dict:
     content: dict = defaultdict(list)  # (leg, step) -> normalised lines, concatenated over however many blocks the step was split into
     seen_legs: set = set()
@@ -1320,7 +1334,7 @@ def probes_478(text: str) -> dict:
     def close():
         nonlocal cur, buf
         if cur is not None:
-            content[cur].extend(_norm(t, cur[0]) for t in buf)
+            content[cur].extend(_pnorm(t, cur[0]) for t in buf)
             seen_legs.add(cur[0])
         cur, buf = None, []
 
@@ -4705,6 +4719,37 @@ def _unq(v: str) -> str:
     return v
 
 
+def _probe_event(chunk: str):
+    """Independent reading of one event (walks every element by local name instead of using _event_fields)."""
+    root = ET.fromstring(chunk)
+    loc = lambda el: el.tag.rsplit("}", 1)[-1]  # noqa: E731
+    sysel = next((e for e in root if loc(e) == "System"), None)
+    if sysel is None or loc(root) != "Event":
+        return None
+    f = {loc(e): e for e in sysel}
+    need = [t for t in ("EventID", "Channel", "Computer", "TimeCreated", "Provider") if t not in f]
+    if need:
+        return None
+    eid, ch, comp = (f[t].text or "" for t in ("EventID", "Channel", "Computer"))
+    if not (eid and ch and comp):
+        return None
+    kids = [e for e in root if loc(e) not in ("System", "EventData", "RenderingInfo")]
+    data, n = [], 0
+    for ed in (e for e in root if loc(e) == "EventData"):
+        for el in ed:
+            if loc(el) == "Data":
+                n += 1
+                if (el.text or "") not in ("", "-"):
+                    data.append((el.attrib.get("Name") or "#%d" % n, el.text))
+            elif loc(el) == "Binary":
+                data.append(("Binary", el.text or ""))
+            else:
+                return None
+    if kids:
+        return None
+    return (f["TimeCreated"].attrib.get("SystemTime"), ch, eid, comp, f["Provider"].attrib.get("Name") or "", (f["Level"].text if "Level" in f else "") or "", sorted(data))
+
+
 def probes_1170(text: str) -> dict:
     evs, other = [], []
 
@@ -4724,10 +4769,10 @@ def probes_1170(text: str) -> dict:
         gap(text[pos:m.start()])
         pos = m.end()
         try:
-            f = _event_fields(m.group(0))
+            f = _probe_event(m.group(0))
         except ET.ParseError:
             f = None
-        evs.append(("raw", m.group(0)) if f is None else (f[0], f[1], f[2], f[3], f[4], f[5] if f[5] not in ("0", "4", "") else "", sorted(f[6])))
+        evs.append(("raw", m.group(0)) if f is None else (f[0], f[1], f[2], f[3], f[4], f[5] if f[5] not in ("0", "4", "") else "", f[6]))
     gap(text[pos:])
     return {"events (time, channel, id, computer, provider, level, non-dash data)": sorted(evs, key=repr), "other lines": other,
             "failed logons (user, domain, ip)": sorted((dict(e[6]).get("TargetUserName"), dict(e[6]).get("TargetDomainName"), dict(e[6]).get("IpAddress"))
@@ -5334,7 +5379,8 @@ def probes_1158(text: str) -> dict:
     devices, unavailable, counts, runtimes_unavail, dests, inelig = [], Counter(), {}, 0, [], 0
     services, svc_in, sections, cur = [], False, [], None
     other = []
-    for l in lines:
+    for idx, l in enumerate(lines):
+        nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
         if not l.strip() and top in ("Device Types", "Device Pairs"):
             top = None
             continue
@@ -5389,7 +5435,7 @@ def probes_1158(text: str) -> dict:
         if svc_in and l.startswith("  ") and l.strip():
             services.append(l.strip())
             continue
-        m = _DUMPSYS.match(l)
+        m = _DUMPSYS.match(l) if idx > 0 and lines[idx - 1] == _DSEP else None
         if m:
             svc_in = False
             cur = None
@@ -5398,14 +5444,13 @@ def probes_1158(text: str) -> dict:
         if (o := _OMIT_DUMP.match(l)) and sections:
             sections[-1][2] += int(o.group(1))
             continue
-        if sections and l != _DSEP:
+        if sections and not (l == _DSEP and _DUMPSYS.match(nxt)):
             if len(sections[-1][1]) < 3 and l.strip():
                 sections[-1][1].append(l)
             elif l.strip():
                 sections[-1][2] += 1
             continue
-        if l.strip() or True:
-            other.append(l)
+        other.append(l)
     return {"available devices (runtime, name, udid, state)": devices, "devices omitted per unavailable runtime": sorted(unavailable.items()),
             "device types and pairs line counts": sorted(counts.items()), "unavailable runtimes": runtimes_unavail, "eligible destinations": dests, "ineligible destination count": inelig,
             "dumpsys services": services, "dumpsys sections (name, first lines, lines beyond them)": [(a, b, c) for a, b, c in sections],
@@ -5468,10 +5513,10 @@ case(
 # exports RUST_BACKTRACE=1). The table of variables beyond RUST_BACKTRACE is from memory.
 
 _QUIET = {
-    "RUST_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest)|rustc|cargo build|cargo run)\b")),
-    "RUST_LIB_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest))\b")),
-    "GOTRACEBACK": (lambda v: v in ("all", "system", "crash"), "single", re.compile(r"^\s*(?:cd \S+ && )?(go test)\b")),
-    "RUST_LOG": (lambda v: v in ("debug", "trace"), "warn", re.compile(r"^\s*(?:cd \S+ && )?(cargo (?:test|nextest))\b")),
+    "RUST_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(?:[A-Za-z_]\w*=\S+ )*(cargo (?:test|nextest)|rustc|cargo build|cargo run)\b")),
+    "RUST_LIB_BACKTRACE": (lambda v: v in ("1", "full"), "0", re.compile(r"^\s*(?:cd \S+ && )?(?:[A-Za-z_]\w*=\S+ )*(cargo (?:test|nextest))\b")),
+    "GOTRACEBACK": (lambda v: v in ("all", "system", "crash"), "single", re.compile(r"^\s*(?:cd \S+ && )?(?:[A-Za-z_]\w*=\S+ )*(go test)\b")),
+    "RUST_LOG": (lambda v: v in ("debug", "trace"), "warn", re.compile(r"^\s*(?:cd \S+ && )?(?:[A-Za-z_]\w*=\S+ )*(cargo (?:test|nextest))\b")),
 }
 
 
@@ -5535,6 +5580,9 @@ def sim_1153() -> dict:
     assert "run with `RUST_BACKTRACE=1`" in quiet, "the quiet output must still tell the agent how to get the backtrace for one test"
     # (c) must NOT apply
     assert rewrite_command(env, "RUST_BACKTRACE=full cargo test") == "RUST_BACKTRACE=full cargo test", "the command's own setting wins"
+    assert rewrite_command(env, "env RUST_BACKTRACE=full cargo test") == "env RUST_BACKTRACE=full cargo test"
+    assert rewrite_command(env, "FOO=1 RUST_BACKTRACE=full cargo test") == "FOO=1 RUST_BACKTRACE=full cargo test", "an assignment earlier in the command is the command's own setting"
+    assert rewrite_command(env, "FOO=1 cargo test") == "RUST_BACKTRACE=0 FOO=1 cargo test"
     assert rewrite_command(env, "cargo clippy") == "cargo clippy" and rewrite_command(env, "pytest -x") == "pytest -x"
     assert rewrite_command({"RUST_BACKTRACE": "0"}, cmd) == cmd and rewrite_command({}, cmd) == cmd
     assert rewrite_command({"GOTRACEBACK": "all"}, cmd) == cmd, "a Go variable does not touch a cargo command"
