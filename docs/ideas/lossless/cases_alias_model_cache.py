@@ -864,11 +864,9 @@ def sim_glossary() -> dict:
 
         # negative control: if the compaction hook is missed, the reader detects an alias with no definition
         state3 = os.path.join(d, "glossary3.json")
-        ctx = []
         for tool, raw in events[:6]:
-            out, note = Glossary(state3).post(tool, raw)
-            ctx += ([("hook", note)] if note else []) + [("tool", out)]
-        out, note = Glossary(state3).post("Bash", paths(P1, 3))  # context was compacted but on_compact never ran
+            Glossary(state3).post(tool, raw)
+        out, _note = Glossary(state3).post("Bash", paths(P1, 3))  # the context was compacted but on_compact never ran
         try:
             _reader([("summary", "x"), ("tool", out)])
         except AssertionError:
@@ -1865,14 +1863,14 @@ def strip_billing_header(raw, upstream: str):
         body = json.loads(raw)
         system = body["system"]
         if isinstance(system, str):
-            head, nl, rest = system.partition("\n")
+            head, _nl, rest = system.partition("\n")
             if not _BILLING.match(head):
                 return raw
             body["system"] = rest
         else:
             first = system[0]
             assert first["type"] == "text" and "cache_control" not in first
-            head, nl, rest = first["text"].partition("\n")
+            head, _nl, rest = first["text"].partition("\n")
             if not _BILLING.match(head):
                 return raw
             if rest.strip():
@@ -2004,7 +2002,7 @@ def _retrievals(corpus, n: int = 30, k: int = 8) -> list[list[tuple[str, int]]]:
     keys = sorted(corpus)
     focus = set(rng.sample(keys, 14))
     out = []
-    for q in range(n):
+    for _q in range(n):
         for _ in range(4):
             focus.discard(rng.choice(sorted(focus)))
             focus.add(rng.choice(keys))
@@ -2163,7 +2161,7 @@ class ReplayProxy:
 
     def __call__(self, body: dict) -> dict:
         try:
-            key, canon, c = _canon_request(body)
+            key, _canon, c = _canon_request(body)
         except Exception:  # noqa: BLE001
             self.misses += 1
             return self.upstream(body)

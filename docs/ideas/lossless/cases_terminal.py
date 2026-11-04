@@ -920,7 +920,7 @@ _SPINNER = "installing " + "".join(f"{f}\b" for f in "-\\|/-\\|/") + "done\n" + 
 
 case(
     616,
-    claim="Backspaces are applied like a terminal (col -b): per line, each character overwrites the one in its column, so X\\bX bold, _\\bX underline and -\\b\\\\b|\\b/ spinners reduce to the final visible character.",
+    claim="Backspaces are applied like a terminal (col -b): per line each character overwrites the one in its column, so man/nroff bold (X, backspace, X), underline (_, backspace, X) and spinner frames reduce to the last character written.",
     loses="the bold/underline emphasis itself, intermediate spinner frames, and display-column semantics (a tab or wide character counts as one cell)",
     encode=apply_backspaces,
     equivalent=_oracle_616,
@@ -1425,7 +1425,7 @@ _BAD_TREE = "src\n├── a.rs\n└── b.rs\n├── c.rs\n└── d.rs
 
 case(
     517,
-    claim="A run of 3+ `tree` entry lines whose rails match what the depths imply becomes two-space indentation (parent-of, depth and last-child stay derivable); non-canonical trees are left alone; in perf call graphs only decoration lines ('#', '# ......', '|') are dropped.",
+    claim="A run of 3+ `tree` entry lines whose rails are exactly what the depths imply becomes two-space indentation (non-canonical trees stay as they are); in perf call graphs only decoration lines ('#', '# ......', '|') are dropped.",
     loses="the rail glyphs themselves (re-derivable from depth order, including the NBSP padding variant, which must be restored by the reader), and perf's decoration-only lines; perf's Samples/Event-count/column-title header lines are kept on purpose",
     encode=tree_rails_to_indent,
     equivalent=_oracle_517,
@@ -1758,7 +1758,7 @@ def sim_whitespace_study() -> dict:
 
 case(
     14,
-    claim="Seven whitespace transforms (strip trailing blanks, collapse table gaps to 1 space / 2 spaces / a tab, halve indentation, spaces to tabs, tabs to spaces) are measured on built-in samples with harness.tokens, the measurement is deterministic and order-independent, every transform is checked by an independent oracle, and each declines the samples where it would be unsafe.",
+    claim="Seven whitespace transforms are measured with harness.tokens on built-in samples; the measurement is deterministic and order-independent, each transform passes an independent fidelity oracle, and each leaves unsafe samples (empty table cells, TSV, Makefile recipes) untouched.",
     sim=sim_whitespace_study,
 )
 
@@ -1866,6 +1866,7 @@ def sim_stream_dedupe() -> dict:
 case(
     16,
     claim="In a Bash tool_response whose stderr equals stdout or a block of whole lines of it, stderr becomes '[stderr = stdout lines i-j]'; a reader resolves the pointer to the exact original, and mismatching, tiny, other-tool or malformed responses pass through untouched.",
+    loses="stderr as a separate stream: the model sees stdout lines i-j once instead of a second copy",
     sim=sim_stream_dedupe,
 )
 
@@ -1980,6 +1981,7 @@ def sim_ascii_bars() -> dict:
 case(
     614,
     claim="Runs of 3+ block glyphs and braille cells become same-length ASCII (bar # . : =, sparkline levels 1-8, braille dot count 0-8 as . 1-7 #); the level of every glyph is kept, short runs, spinners and invisible padding are left alone, and the size saving is in bytes and tokens.",
+    loses="glyph shape (block vs shade vs braille), which braille dots were set (only their count), and the difference between a level digit and an ordinary digit",
     sim=sim_ascii_bars,
 )
 
@@ -2071,13 +2073,16 @@ def sim_digit_fold() -> dict:
     stats["protected_numbers_checked"] = n_prot
     stats["tokens_before"] = harness.tokens(_NUMBERS_989)
     stats["tokens_after"] = harness.tokens(fold_digits(_NUMBERS_989))
-    assert stats["tokens_after"] < stats["tokens_before"], "folding should lower the token count"
+    assert stats["tokens_after"] <= stats["tokens_before"], "folding must not raise the token count"
+    if harness.TOKENIZER == "o200k":  # the proxy tokenizer matches Unicode digits with \d, so it cannot see this saving
+        assert stats["tokens_after"] < 0.8 * stats["tokens_before"], "folding should clearly lower the o200k token count"
     return stats
 
 
 case(
     989,
     claim="Every non-ASCII decimal digit (Arabic-Indic, Persian, Devanagari, Thai, fullwidth, math) in a token without ASCII letters becomes the ASCII digit with the same int() value, one character for one character; identifier-like tokens are untouched and is_protected still flags the folded numbers.",
+    loses="the script of the digits (the value of every number is unchanged)",
     sim=sim_digit_fold,
 )
 
@@ -2242,6 +2247,7 @@ def sim_merge_text_blocks() -> dict:
 
 case(
     1035,
-    claim="Adjacent plain text blocks in one message are joined with a newline unless a cache_control breakpoint sits between them, the reader sees the same segments and tool ids, blocks with other keys, other block types and malformed payloads are left alone, and the merged prefix is byte-identical across turns while the breakpoint sits on a message's last block.",
+    claim="Adjacent plain text blocks in a message are joined with a newline unless a cache breakpoint sits between them; the reader sees the same segments and tool ids, other block types and malformed payloads are untouched, and the prefix stays byte-identical across 30 turns when the breakpoint is on a message's last block.",
+    loses="the block boundary between merged texts (it becomes one newline)",
     sim=sim_merge_text_blocks,
 )

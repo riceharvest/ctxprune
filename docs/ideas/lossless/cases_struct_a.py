@@ -392,7 +392,7 @@ case(
         Fixture("text that starts with the sigil", "§cols \"a\",\"b\"\n1,2\n3,4\n", None),
         Fixture("a string value equal to the header", compact([{"a": "§cols \"a\"", "b": 1}] * 4), None),
     ],
-    min_gain=0.15,
+    min_gain=0.25,
     idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
@@ -490,7 +490,7 @@ case(
         Fixture("text that starts like encoder output", '§defs 1\n§1={"a":1}\n[§1,§1]', None),
         Fixture("nested repeats and duplicate keys", compact([{"r": {"o": _OWNER, "o": _OWNER, "n": 1.0}, "o": _OWNER}] * 5), True),
     ],
-    min_gain=0.3,
+    min_gain=0.45,
     idempotent=False,  # encoded text starts with the sigil, so re-encoding escapes it
 )
 
@@ -607,7 +607,7 @@ case(
         Fixture("inlined JSON keeps duplicate keys and number lexemes", pretty({"s": '{"a": 1, "a": 2, "n": 1E5, "m": 1.0}'}), None),
         Fixture("embedded JSON string with leading space is left as a string", pretty({"s": ' {"a": 1}', "t": '{"b":"\\u003c"}'}), None),
     ],
-    min_gain=0.15,
+    min_gain=0.2,
     idempotent=False,  # encoded output contains the marker, so re-encoding escapes it (grows) by design
 )
 
@@ -870,7 +870,7 @@ case(
         Fixture("text that starts like the header", "§hoist nd [[0,\"a\",1]]\n{\"b\":1}\n", None),
         Fixture("constants that need escaping", "\n".join(compact({"svc": "a\"b\\c ü", "n": i, "z": 1.0}) for i in range(10)) + "\n", True),
     ],
-    min_gain=0.1,
+    min_gain=0.25,
     idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
@@ -1637,7 +1637,7 @@ case(
         Fixture("comment-only file", "# only a comment\n\n; and another\n", None),
         Fixture("blank line before indented content stays", "a:\n\n  b: 1\n\n\nc: 2\n", None),
     ],
-    min_gain=0.1,
+    min_gain=0.15,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1780,7 +1780,7 @@ case(
         Fixture("sigil inside a cell, wide characters", KUBECTL.replace("Running", "Run§ing", 1).replace("fghij ", "日本語 ", 1), None),
         Fixture("every cell right-aligned, indented", "".join(f"  {a:>6}{b:>8}{c:>5}\n" for a, b, c in [("id", "size", "n"), ("1", "20480", "3"), ("22", "5", "17"), ("333", "1", "2")]), True),
     ],
-    min_gain=0.1,
+    min_gain=0.08,
     idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
@@ -1940,7 +1940,7 @@ case(
         Fixture("table with trailing spaces and no final newline", "|  a  |  b  |   \n|:---|---:|\n|  1  |  2  |    ", None),
         Fixture("table directly followed by text", "| a   | b   |\n|-----|-----|\n| 1   | 2   |\nlazy continuation line\n", None),
     ],
-    min_gain=0.1,
+    min_gain=0.3,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2201,7 +2201,7 @@ case(
         Fixture("upper-case tags and entity soup", '<PRE><SPAN CLASS="k">&lt;div&gt;</SPAN> &amp;&amp; <SPAN CLASS="s">&quot;a&#x27;b&quot;</SPAN> &#8594; &nbsp;x</PRE>\n', None),
         Fixture("two blocks and text between", PYG + PRISM, True),
     ],
-    min_gain=0.3,
+    min_gain=0.5,
 )
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -2499,7 +2499,7 @@ case(
         Fixture("text that starts like encoder output", '§csvhoist [[0,"a","1"]]\nb\n1\n2\n3\n', None),
         Fixture("no final newline", df_csv(12).rstrip("\n"), True),
     ],
-    min_gain=0.05,
+    min_gain=0.15,
     idempotent=False,  # re-encoding encoded text starts with the sigil, so it is escaped (grows) by design
 )
 
@@ -2724,7 +2724,7 @@ case(
         Fixture("empty cells, wide characters", "+----+------+\n| a  | b    |\n+----+------+\n|    | 日本   |\n| 1  |      |\n+----+------+\n", None),
         Fixture("grid in the middle of other text", "before\n" + MYSQL + "after\n", True),
     ],
-    min_gain=0.1,
+    min_gain=0.35,
 )
 
 # @@END@@

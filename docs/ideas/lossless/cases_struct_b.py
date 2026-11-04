@@ -1,10 +1,12 @@
 """Structured-data ideas, batch B: #420 #519 #520 #522 #525 #526 #528 #534 #619 #639 #766 #778 #792 #879 #881 #882 #895.
 
-Everything here is a reference prototype: stdlib only, written to be tested, not shipped. Conventions used below:
+Everything here is a reference prototype: stdlib only (PyYAML is used as an optional second opinion in #528/#792), written
+to be tested, not shipped. Conventions used below:
   * encoders are total and self-gating (they hand the input back unless the result is strictly shorter);
   * where the encoding is signalled in-band (a `§...` header or sigil) the escape path is explicit and the case sets
     idempotent=False, because re-encoding an encoded text must escape it and so grows it by design;
-  * oracles parse (json, csv, xml, plistlib, a small YAML-subset loader) instead of re-running the encoder's logic.
+  * oracles parse (json, csv, xml, plistlib, ast.literal_eval, a small YAML-subset loader) instead of re-running the
+    encoder's logic; #522 and #895 additionally refuse to emit anything their own decoder does not reproduce exactly.
 """
 import ast
 import base64
