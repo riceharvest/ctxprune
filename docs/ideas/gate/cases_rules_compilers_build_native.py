@@ -565,8 +565,14 @@ _TX_BOX = re.compile(r"^(Overfull|Underfull) \\[hv]box")
 _TX_STUB = re.compile(r"^\[ctxprune: (?:(\d+) Overfull and (\d+) Underfull box warnings elided|(\d+) log lines elided)\]$")
 
 
+def _tx_start(l: str) -> bool:
+    return bool(l.startswith("!") or _TX_WARN.match(l) or _TX_BOX.match(l) or _TX_KEEP_START.match(l) or _TX_STUB.match(l))
+
+
 def pack_latex_log(text: str) -> str:
-    lines = text.split("\n")
+    if not re.search(r"(?m)^(?:This is (?:pdfTeX|XeTeX|LuaTeX)|LaTeX2e <|Output written on |No pages of output|Transcript written on )", text):
+        return text
+    lines = _unwrap(text.split("\n"))
     n = len(lines)
     out, dropped, over, under, i = [], 0, 0, 0, 0
 
@@ -580,36 +586,25 @@ def pack_latex_log(text: str) -> str:
         l = lines[i]
         if l.startswith("!"):
             flush()
-            j = i + 1
-            while j < n and j < i + 14 and not re.match(r"^l\.\d+ ", lines[j]):
-                j += 1
-            j = j + 2 if j < n and j < i + 14 and re.match(r"^l\.\d+ ", lines[j]) else i + 1
-            while j < n and j < i + 14 and lines[j].strip() and not lines[j].startswith("!") and j == i + 1:
-                j += 1
-            out += lines[i:min(j, n)]
-            i = min(j, n)
+            k = next((j for j in range(i + 1, min(i + 14, n)) if re.match(r"^l\.\d+ ", lines[j])), None)
+            end = min(k + 2, n) if k is not None else i + 1
+            out += lines[i:end]
+            i = end
         elif _TX_WARN.match(l):
             flush()
             j = i + 1
-            while j < n and lines[j].strip():
+            while j < n and lines[j].strip() and not _tx_start(lines[j]):
                 j += 1
             out += lines[i:j]
             i = j
-        elif _TX_BOX.match(l):
-            if _TX_BOX.match(l).group(1) == "Overfull":
-                over += 1
-            else:
-                under += 1
+        elif m := _TX_BOX.match(l):
+            over += m.group(1) == "Overfull"
+            under += m.group(1) == "Underfull"
             j = i + 1
-            while j < n and lines[j].strip():
+            while j < n and j < i + 4 and lines[j].strip() and not _tx_start(lines[j]):
                 j += 1
-            dropped += 0
-            i = j + 1 if j < n else j
-        elif _TX_KEEP_START.match(l):
-            flush()
-            out.append(l)
-            i += 1
-        elif _TX_STUB.match(l):
+            i = j
+        elif _TX_KEEP_START.match(l) or _TX_STUB.match(l):
             flush()
             out.append(l)
             i += 1
@@ -666,7 +661,7 @@ def probes_1085(text: str) -> dict:
 case(
     1085,
     claim="Keeps the TeX version line, every '!' error with its 'l.NN' line and continuation, every LaTeX/Package/Class warning block (undefined citations and references, rerun hints, including a key hard-wrapped at column 79) and the 'Output written' / 'No pages of output' lines; the nested '(file' lines, font and package Info lines, memory statistics and page markers become '[ctxprune: N log lines elided]', and Overfull/Underfull boxes become one count line.",
-    loses="the names and order of loaded packages and files, the line numbers and text of each Overfull/Underfull box (only the counts survive), font and package Info lines, page markers, and TeX's memory statistics",
+    loses="the 79-column hard wrap of the lines it keeps (they are joined), the names and order of loaded packages and files, the line numbers and text of each Overfull/Underfull box (only the counts survive), font and package Info lines, page markers, and TeX's memory statistics",
     encode=pack_latex_log,
     probes=probes_1085,
     fixtures=lambda: [

@@ -11,6 +11,11 @@ one side is not mirrored in the other. Conventions used throughout:
   the input does not parse the way the rule needs (so truncated or mutated inputs are left alone rather than half-rewritten).
 * Where the encoded form uses an in-band marker (a group header, a stub line) the encoder refuses (returns the input) if the
   input already contains something that looks like the marker; those inputs are `shrinks=None` fixtures.
+* #729, #760 and #765 (formats a regex and a real parser read differently) re-read their own output with the probe before
+  replacing the input and keep the input when the two disagree; #1104 reuses its segmentation in the probe for the original, so it
+  pins the faithfulness of the outline, not the quality of the chapters; #770 cannot probe which surviving text is right (a
+  mutated corpus may legitimately merge chunks of different sections), so it pins the chunk inventory, the versions per section
+  and that the kept chunk is never older than a merged one.
 * Real captures (jstack, go, gdb, git diff, cProfile, jmap, node --cpu-prof, lsof, pyarrow, qrcode, pyfiglet) were taken in
   this container and are inlined; the long ones are shortened only where a comment says so. Formats of tools that are not
   installed here are reconstructed from memory and marked `# reconstructed from memory`.
@@ -2468,9 +2473,10 @@ case(
 
 # ===============================================================================================================
 # #347 Clean YouTube-style VTT and SRT: merge rolling cues, drop inline tags and positioning, keep a [mm:ss] stamp per 30 s.
+# (yt-dlp is not installed and there is no network: the VTT shape, with its [previous line, tagged new line] rolling cues and 10 ms static cues, is reconstructed from memory.)
 # Semantics shared by encoder and probes: a cue's text lines are tag-stripped and whitespace-normalised; leading lines that
 # repeat the previous cue's trailing lines (line-level suffix/prefix overlap, as in rolling auto-captions) are not new.
-# The probe reads cues with a block state machine; the encoder splits on blank lines and recurses over overlap sizes.
+# The probe takes the maximum overlap over all sizes; the encoder takes the first match scanning down from the largest.
 
 _TAG = re.compile(r"</?(?:c|v|i|b|u|font|ruby|rt|lang)(?:[. ][^>]*)?>|<\d{2}:\d{2}:\d{2}\.\d{3}>|<\d{1,2}:\d{2}\.\d{3}>")
 _TIMING = re.compile(r"^\s*(?:(\d+):)?(\d{2}):(\d{2})[.,](\d{3})\s+-->\s+\S+")
@@ -2661,6 +2667,7 @@ case(
 
 # ===============================================================================================================
 # #348 Whisper / ASR JSON -> '[mm:ss] speaker: text', merging same-speaker segments, flagging only low-confidence segments.
+# (whisper is not installed: the JSON shape of whisper CLI and WhisperX-style diarized output is reconstructed from memory.)
 # Lines break on a speaker change, on a flagged segment (it keeps its own stamp and its three confidence numbers), and when a
 # line would span 30 s. Token-id arrays, per-word records and the duplicated top-level 'text' are dropped (the top-level text
 # must equal the joined segments, otherwise nothing is rewritten). Whisper CLI output is a single JSON line.
@@ -3430,6 +3437,7 @@ case(
 
 # ===============================================================================================================
 # #384 Strip corpus-wide boilerplate: a line present in more than 20% of the documents of a crawled / PDF corpus is removed
+# (synthetic corpus, reconstructed from memory of crawled documentation pages and PDF running headers.)
 # at ingestion. Corpus-level, so the 'input' is a list of documents serialised as '=== doc: ID ===' blocks. A document's title
 # (its first non-blank line) is protected, lines under 8 characters are never counted, and running headers that differ only
 # in a page number share one key.
@@ -3826,6 +3834,7 @@ case(
 
 # ===============================================================================================================
 # #396 Strip quoted replies and signatures from an email thread rendered as '--- Message N ---' blocks (header lines, blank
+# (no mail MCP here: the thread rendering and Gmail-style quoting are reconstructed from memory.)
 # line, body). A '>'-quoted block (with the 'On ... wrote:' line above it) is replaced by '[quote omitted: N lines]' when it
 # has 2+ content lines and every one of them already appeared in an earlier message (own text, or a quote that was kept);
 # the quoted signature inside it does not count. The '-- ' signature (up to the next quote or attribution) and
@@ -5650,6 +5659,7 @@ case(
 
 # ===============================================================================================================
 # #770 Collapse near-duplicate chunks across document versions at ingest. Corpus-level: the 'input' is a list of chunks
+# (synthetic corpus of v1-v3 documentation chunks and mirrored READMEs, reconstructed from memory.)
 # serialised as '=== chunk id=ID path=PATH ===' blocks. Chunks of 12+ words whose word 3-shingle Jaccard similarity to the
 # canonical chunk is >= 0.9 (exact Jaccard stands in for MinHash/SimHash, which estimate it) are merged: the newest version
 # (highest v<N> in the path, else the first in file order) is kept and its header gains 'also=ID|PATH,...' for every
@@ -6003,6 +6013,7 @@ case(
 
 # ===============================================================================================================
 # #1104 Transcript chaptering: segment a long timestamped transcript by lexical shift (a TextTiling-style cosine score between
+# (synthetic four-topic lecture, reconstructed from memory.)
 # the windows either side of each line, depth-scored, minimum 8 lines per chapter) and emit '[mm:ss] Speaker: lead sentence, N
 # words elided' per chapter under a one-line header (chapters, words, time span, speakers). The original stays on disk to grep.
 # Transcripts under 40 lines or 500 words are left alone. The probes pin that the outline is a faithful rendering of the
