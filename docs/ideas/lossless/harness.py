@@ -162,6 +162,7 @@ class Case:
     mutations: int = 40
     manual: str = ""
     title: str = ""
+    timeout: float | None = None  # seconds for the whole case; default CTXPRUNE_IDEAS_CASE_TIMEOUT or 30
 
     @property
     def kind(self) -> str:
@@ -246,7 +247,37 @@ def _check_one(c: Case, x: str, strict: bool) -> tuple[str | None, str | None]:
     return None, e
 
 
+class CaseTimeout(BaseException):
+    """Raised by the watchdog; a BaseException so a broad `except Exception` in a prototype cannot swallow it."""
+
+
+def _timeout_for(c: Case) -> float:
+    return c.timeout or float(os.environ.get("CTXPRUNE_IDEAS_CASE_TIMEOUT", "30"))
+
+
 def run_case(c: Case) -> Result:
+    """Run one case under a watchdog (SIGALRM, main thread, POSIX; best effort: it cannot interrupt a single long
+    C call such as a catastrophic regex backtrack). A hung prototype fails its case instead of hanging the run."""
+    import signal
+    import threading
+
+    can_alarm = hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread()
+    if not can_alarm:
+        return _run_case(c)
+
+    def on_alarm(signum, frame):
+        raise CaseTimeout
+
+    old = signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, _timeout_for(c))
+    try:
+        return _run_case(c)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def _run_case(c: Case) -> Result:
     t0 = time.perf_counter()
     r = Result(c.id, c.kind, "pass")
     try:
@@ -263,6 +294,8 @@ def run_case(c: Case) -> Result:
                 r.errors.append(f"sim raised {type(ex).__name__}: {ex}")
         else:
             _run_transform(c, r)
+    except CaseTimeout:
+        r.errors.append(f"timed out after {_timeout_for(c):g}s (a prototype or fixture is hanging)")
     finally:
         r.seconds = time.perf_counter() - t0
     if r.errors:
@@ -271,7 +304,11 @@ def run_case(c: Case) -> Result:
 
 
 def _run_transform(c: Case, r: Result) -> None:
-    fx = c.fixtures() if callable(c.fixtures) else c.fixtures
+    try:
+        fx = c.fixtures() if callable(c.fixtures) else c.fixtures
+    except Exception as ex:  # noqa: BLE001
+        r.errors.append(f"fixtures() raised {type(ex).__name__}: {ex}")
+        return
     if not fx:
         r.errors.append("no fixtures")
         return
@@ -360,6 +397,11 @@ def coverage() -> tuple[list[int], list[int]]:
 # ---------------------------------------------------------------------------------------------------------------
 # self-test: the gate must reject known-bad transforms, or a pass means nothing
 
+def _hang():
+    while True:
+        pass
+
+
 def selftest() -> list[str]:
     """Return a list of problems; empty means the gate rejects every defect planted below and accepts a good one."""
     sample = [Fixture("pos", "alpha  \n\n\n\n\nbeta  \n" * 6, True), Fixture("neg", "plain text", False)]
@@ -378,8 +420,12 @@ def selftest() -> list[str]:
         "non-idempotent transform": dict(encode=lambda t: t[:-1] if len(t) > 9 else t, equivalent=always, loses="x", min_gain=0.0),
         "transform that raises on odd input": dict(encode=lambda t: 1 / 0 if "\x1b" in t else squeeze(t), equivalent=ok_oracle, loses="x"),
         "transform that never saves anything": dict(encode=lambda t: t, equivalent=always, loses="x"),
+        "transform that hangs on odd input": dict(encode=lambda t: squeeze(t) if "\x1b" not in t else _hang(), equivalent=ok_oracle, loses="x", timeout=1.0),
     }
     problems = [f"gate did not reject: {name}" for name, kw in planted.items() if run(**kw).status != "fail"]
+    broken = run_case(Case(id=-1, claim="selftest", encode=squeeze, equivalent=ok_oracle, loses="x", fixtures=lambda: 1 / 0))
+    if broken.status != "fail":
+        problems.append("gate did not reject: fixtures() that raises")
     good = run(encode=squeeze, equivalent=ok_oracle, loses="blank-line count above two")
     if good.status != "pass":
         problems.append(f"gate rejected a good transform: {good.errors[:2]}")
