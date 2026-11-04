@@ -197,3 +197,81 @@ case(
     claim="After one call slower than the threshold the model path is skipped for the backoff window (lossless rules only, zero model time), then retried; a stamp shared by new processes persists the state and a corrupt stamp fails open.",
     sim=sim_breaker,
 )
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# #218 go test -v: drop '=== RUN/PAUSE/CONT' lines that attribute nothing. A RULE: the markers are information (which
+# test is running), so the case says what is lost and pins what must survive with probes: every test's result, the
+# summary lines, and which test each streamed log line belongs to. The probes are a different algorithm (a state machine
+# that tracks the current test) from the encoder (a look-ahead), so a bug in one is not mirrored in the other.
+
+_MARK = re.compile(r"^\s*=== (RUN|PAUSE|CONT|NAME)\s+(\S+)")
+_STATUS = re.compile(r"^\s*--- (PASS|FAIL|SKIP): (\S+) \(")
+_SUMMARY = re.compile(r"^(PASS|FAIL|ok\s+\S+\s+[\d.]+s|FAIL\s+\S+\s+[\d.]+s|exit status \d+)$")
+
+
+def _is_output(line: str) -> bool:
+    return bool(line.strip()) and not _MARK.match(line) and not _STATUS.match(line) and not _SUMMARY.match(line)
+
+
+def drop_idle_markers(text: str) -> str:
+    lines = text.split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        if _MARK.match(line):
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or _SUMMARY.match(lines[j])):  # these never change the current test
+                j += 1
+            if j >= len(lines) or _MARK.match(lines[j]) or _STATUS.match(lines[j]):
+                continue  # the next thing that matters replaces this marker before any output uses it
+        out.append(line)
+    res = "\n".join(out)
+    return res if len(res) < len(text) else text
+
+
+def probes_218(text: str) -> dict:
+    cur, logs, status, summary = None, [], {}, []
+    for line in text.split("\n"):
+        if m := _MARK.match(line):
+            cur = m.group(2)
+        elif m := _STATUS.match(line):
+            status[m.group(2)] = m.group(1)
+            cur = m.group(2)
+        elif _SUMMARY.match(line):
+            summary.append(line)
+        elif _is_output(line):
+            logs.append((cur, line.strip()))
+    return {"result per test": sorted(status.items()), "summary lines": summary, "log line -> test": logs}
+
+
+def _gotest(n_sub: int, noisy: dict[int, str] | None = None) -> str:
+    noisy = noisy or {}
+    names = [f"TestX/case{i}" for i in range(n_sub)]
+    out = ["=== RUN   TestX"]
+    for n in names:
+        out += [f"=== RUN   {n}", f"=== PAUSE {n}"]
+    for i, n in enumerate(names):
+        out.append(f"=== CONT  {n}")
+        if i in noisy:
+            out.append(f"    x_test.go:{10 + i}: {noisy[i]}")
+    fail = bool(noisy)
+    out.append(f"--- {'FAIL' if fail else 'PASS'}: TestX (0.00s)")
+    out += [f"    --- {'FAIL' if i in noisy else 'PASS'}: {n} (0.00s)" for i, n in enumerate(names)]
+    out += ["FAIL" if fail else "PASS", f"{'FAIL' if fail else 'ok  '}\texample.com/pkg\t0.004s", ""]
+    return "\n".join(out)
+
+
+case(
+    218,
+    claim="Drops '=== RUN/PAUSE/CONT/NAME' lines that have no streamed output under them; every test result, every summary line and the test each log line is attributed to are unchanged.",
+    loses="the order in which parallel subtests started, paused and resumed",
+    encode=drop_idle_markers,
+    probes=probes_218,
+    fixtures=[
+        Fixture("12 parallel subtests, all pass", _gotest(12), True),
+        Fixture("4 subtests, two with t.Log output", _gotest(4, {1: "got 3, want 4", 3: "timeout after 5s"}), True),
+        Fixture("sequential test: every marker has output under it", "=== RUN   TestA\n    a_test.go:5: setup\n--- PASS: TestA (0.00s)\nPASS\nok  \texample.com/pkg\t0.001s\n", False),
+        Fixture("go test without -v", "ok  \texample.com/pkg\t0.004s\n", False),
+    ],
+    min_gain=0.3,
+)

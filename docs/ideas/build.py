@@ -4,7 +4,7 @@
 
 ideas.jsonl is the source of truth: edit a record's status/est/text there and re-run.
 status: scope | eval | conditional | dropped.
-check, check_kind, check_loses: written by `python docs/ideas/lossless/run.py --sync` from the registered fidelity-gate
+check, check_kind, check_loses: written by `python docs/ideas/gate/run.py --sync` from the registered fidelity-gate
 case of each [L] idea; rendered below as a "Run:" line. Do not hand-edit them.
 """
 import collections
@@ -20,7 +20,7 @@ LEGEND = (
     "Tags: **L** lossless, **R** deterministic rule that drops information, **M** model-based, **X** measurement/infra. "
     "`MCP` = applies to MCP tool traffic only. `busts-cache` = rewrites already-sent messages, so provider prefix caches miss "
     "from that point. Every estimate is an unverified hypothesis; 'Measured'/'Verified here' means a finder ran a quick check "
-    "that was not reproduced. `Run:` = a runnable fidelity gate (docs/ideas/lossless): it checks that the idea can be "
+    "that was not reproduced. `Run:` = a runnable fidelity gate (docs/ideas/gate): it checks that the idea can be "
     "lossless on synthetic fixtures and their mutations; it does not measure real-world savings (the `Test:` line does)."
 )
 
@@ -41,7 +41,7 @@ def item(r, star=True):
     if r["test"]:
         line += f"\n  - Test: {r['test']}"
     if r.get("check"):
-        line += f"\n  - Run: `python docs/ideas/lossless/run.py {r['id']}` ({r['check_kind']}): {r['check']}"
+        line += f"\n  - Run: `python docs/ideas/gate/run.py {r['id']}` ({r['check_kind']}): {r['check']}"
         if r.get("check_loses"):
             line += f" Not preserved: {r['check_loses']}."
     return line
