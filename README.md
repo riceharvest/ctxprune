@@ -93,6 +93,24 @@ Python 3.9+ on the machine:
 
 Use either the plugin or `ctxprune install claude-code`, not both. `ctxprune doctor` warns if both are on.
 
+## MCP server (Claude Desktop, Cursor, Cline and other MCP clients)
+
+For clients without tool-output hooks, `ctxprune mcp` is a local stdio MCP server with two read tools:
+
+- `read_compact(path, start_line?, end_line?)`: the lossless `safe` pipeline, for big logs, JSON/MCP dumps, CSV and
+  test output. Nothing is dropped.
+- `read_pruned(path, keep=0.5, protect=true)`: token pruning with the model below (lossy). Identifiers, numbers and
+  paths are kept unless `protect=false`.
+
+```json
+{ "mcpServers": { "ctxprune": { "command": "uvx", "args": ["ctxprune", "mcp"] } } }
+```
+
+It reads only the files the client asks for, makes no network calls (`read_pruned` downloads the model once on first
+use), and needs no MCP SDK.
+
+<!-- mcp-name: io.github.riceharvest/ctxprune -->
+
 ## Token pruning: the 0.2 API (Python, LangChain, LlamaIndex)
 
 This is lossy compression for prompts, retrieved documents and logs: a 140M-parameter token classifier

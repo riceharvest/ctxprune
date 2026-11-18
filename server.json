@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.riceharvest/ctxprune",
+  "title": "ctxprune",
+  "description": "Read big logs, JSON dumps and test output compacted: lossless, or token-pruned keeping IDs.",
+  "repository": {
+    "url": "https://github.com/riceharvest/ctxprune",
+    "source": "github"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "ctxprune",
+      "version": "0.3.2",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

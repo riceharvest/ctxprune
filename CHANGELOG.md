@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2 (2026-11-18)
+
+- **`ctxprune mcp`**: a stdio MCP server for clients without tool-output hooks (Claude Desktop, Cursor, Cline, ...).
+  `read_compact` reads a file through the lossless `safe` pipeline; `read_pruned` token-prunes it with the 0.2 model,
+  identifiers kept by default. Stdlib JSON-RPC, no MCP SDK. Listed as `io.github.riceharvest/ctxprune` in the MCP
+  Registry (`server.json`).
+- README / model card: use `protect=True` for token pruning of tool output and logs. Measured on 120 held-out chunks
+  against LLMLingua-2 in [docs/bench/llmlingua_facts.md](docs/bench/llmlingua_facts.md).
+- Note: `ctxprune mcp` is now a subcommand, so a 0.2-style `ctxprune mcp` on a file literally named `mcp` needs
+  `ctxprune ./mcp`.
+
 ## 0.3.1 (2026-11-18)
 
 Docs only; the code and every output are the same as 0.3.0.

@@ -8,7 +8,7 @@ API (`ctxprune.prune`, `Compressor`, `DEFAULT_MODEL`) is still here and loads it
     ctxprune.prune(text, keep=0.33, protect=True)  # never drop identifiers, numbers or paths
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __all__ = ["Compressor", "prune", "DEFAULT_MODEL"]
 
 _default = None
