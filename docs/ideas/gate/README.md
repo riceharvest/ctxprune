@@ -10,6 +10,10 @@ python docs/ideas/gate/run.py --list     # id, kind, what each case claims
 python -m pytest tests/test_ideas_gate.py
 ```
 
+The gate was written against the 0.2.1 repository layout (the `ctxprune/` package and its `hook.py` at the repo root).
+From 0.3.0 the package lives in `src/ctxprune/` and the 0.2.1 hook is gone, so the 10 cases that read or run those
+files fail on `main`. Run the full gate at commit `04b5b92` (the last 0.2.1-layout `main`), where 351 of 352 pass.
+
 Each gated idea in [`ideas.md`](../ideas.md) and [`shortlist.md`](../shortlist.md) has a `Run:` line with the command, the case
 kind, what the test asserts, and what it does *not* preserve.
 
