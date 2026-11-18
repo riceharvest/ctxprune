@@ -468,3 +468,12 @@ model card when they are. See
 [THIRD_PARTY_NOTICES](https://github.com/riceharvest/ctxprune/blob/main/THIRD_PARTY_NOTICES).
 
 Changes from 0.2.1: [CHANGELOG.md](https://github.com/riceharvest/ctxprune/blob/main/CHANGELOG.md).
+
+## Credits
+
+Made by [@imdariotoo](https://x.com/imdariotoo). I post my releases on X, so follow there for the next ones.
+
+The GPU work behind this release ran on RTX 5090s from [CloudRift](https://www.cloudrift.ai), provided through their
+AI Builder Grant: the comprehension and long-context probes on open models, the next-action replay against other
+compactors, and the agent-session runs behind the presets. Thanks to CloudRift for the compute. The savings numbers
+and the latency were measured locally on CPU, and the 0.2 token-pruning model was trained on a local GPU.

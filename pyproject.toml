@@ -1,6 +1,6 @@
 [project]
 name = "ctxprune"
-version = "0.3.0"
+version = "0.3.1"
 description = "Shrink what your LLM reads: lossless tool-output compression for coding agents (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) and token pruning for prompts and RAG (LangChain, LlamaIndex)"
 readme = "README.md"
 # 0BSD from 0.3.0 (0.2.1 was Apache-2.0). The optional model weights are not part of the package; see THIRD_PARTY_NOTICES

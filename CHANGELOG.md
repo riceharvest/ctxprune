@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-18)
+
+Docs only; the code and every output are the same as 0.3.0.
+- README: a Credits section. The GPU runs behind this release's benchmarks ran on CloudRift RTX 5090s through their
+  AI Builder Grant.
+- docs/BENCHMARKS.md: says which sections ran on CloudRift GPUs and which ran locally.
+
 ## 0.3.0 (2026-11-18)
 
 0.3.0 is a rewrite of the agent integrations. 0.2.1's Claude Code hook deleted words with a token model. 0.3.0's hooks

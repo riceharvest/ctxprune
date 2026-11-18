@@ -3,6 +3,11 @@
 Every number in the README comes from this page. For each one I give the script, the code it ran against, and the
 file the number is in.
 
+**Compute.** The GPU runs here (the open-model comprehension and long-context probes in §4, the `balanced` replay and
+agent-session runs in §6, and the competitor replay in §8) ran on rented RTX 5090s from
+[CloudRift](https://www.cloudrift.ai), provided through their AI Builder Grant; §5 is computed from those probe
+answers. §1–3 and §7 ran locally, and the Claude Opus probes ran through Claude.
+
 **Runtime.** Unless noted, numbers are for the ctxprune runtime at research-repo `main` **12c7b79** (2026-10-18).
 This packaging branch is rebased onto that commit, and its wheel vendors `scripts/` unchanged. The re-runs used a
 clean `git archive 12c7b79` export, not a working tree.
