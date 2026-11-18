@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-18)
 
 0.3.0 is a rewrite of the agent integrations. 0.2.1's Claude Code hook deleted words with a token model. 0.3.0's hooks
 by default rewrite tool outputs into a shorter form that keeps the content, and they run inside more agents. The
