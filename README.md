@@ -1,28 +1,71 @@
 # ctxprune
 
-ctxprune rewrites agent tool outputs into a shorter form before the model reads them. The default `safe` preset
-drops no content. It counts runs of identical lines, writes JSON record lists (MCP results) as rows, shows
-`\uXXXX`-escaped JSON as text, and removes terminal colour codes and progress-bar redraws. Each byte-exact rule is applied only if its decoder
-gives back the original bytes, checked on each output; the section below says which rules are byte-exact and which
-aren't.
+Shrink what your LLM reads, locally. ctxprune has two parts:
 
-It runs locally:
-- as a hook or plugin in Claude Code, Hermes, Pi, OpenCode and dsh;
-- as a local proxy for Codex.
+| you want to... | use | drops content? | what you get |
+|---|---|---|---|
+| shrink tool outputs inside a coding agent (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) | `ctxprune install --all` | **no**: every value stays | ~9% fewer tool-output tokens on MCP-heavy work (12% on Claude Opus), 0.3–4% on coding |
+| shrink prompts, retrieved documents or logs you control (Python, LangChain, LlamaIndex, shell) | `ctxprune.prune(text, keep=0.5)` | **yes**: deletes low-value words | you pick the size; at 50% kept, +15 points of QA accuracy over LLMLingua-2-large |
+
+Both run on your machine with no API key, and nothing leaves it.
+
+## What it's good for
+
+- **MCP-heavy agents** (Linear, Notion, GitHub, databases, Playwright): JSON record lists become rows and
+  Playwright snapshots lose their YAML noise. This is where the agent hooks save the most: 8.7% of tool-output
+  tokens on an MCP-heavy mix, 12.0% on Claude Opus.
+- **Claude Code on Windows**: PowerShell output loses its colour codes, saving 4.1% of tool-output tokens (6.5% on
+  Opus) in real sessions.
+- **Long Claude Opus sessions**: cross-turn dedup turns a repeat of an output that is still in context into a
+  reference. Opus reads those references as well as the originals (−0.2 points [−1.8, +1.3]). Open models don't,
+  so dedup is on for Opus only.
+- **Agents that must not lose a detail**: unlike lossy compactors, the `safe` preset never drops content, leaves file
+  views and code the agent may edit alone, and caused no re-fetches in next-action replay.
+- **RAG and prompt pipelines**: `CtxpruneDocumentCompressor` (LangChain) and `CtxpruneNodePostprocessor`
+  (LlamaIndex) cut retrieved documents to a set share of tokens and keep IDs, paths and numbers unsplit.
+- **Logs and CI output before you paste them into a chat**: `some_command | ctxprune --keep 0.33 --protect`.
+
+Not for: shrinking source files you'll edit (left alone by design), or coding sessions that are mostly file reads
+(Claude Code's `Read` is 58% of tool tokens in the sessions measured, and the hooks don't touch it, which is why the
+coding number is small).
+
+**What the agent hook does to one MCP result** (a Linear `list_issues` reply, 521 → 285 o200k tokens; produced by
+`ctxprune compress`):
+
+```
+[cp:rows #1 TSV id, title, state, assignee(json), labels(json), updated_at; compact]
+PRJ-140	Checkout times out on slow 3G	open	{"login":"mila"}	[{"name":"bug"}]	2026-11-10T09:00:00Z
+PRJ-141	Add Dutch translations for invoices	open	{"login":"joost"}	[{"name":"i18n"}]	2026-11-11T09:07:00Z
+...
+```
+
+Every key and value is still there: decoding gives JSON equal to the original (only the pretty-print whitespace
+isn't restored). Rules that are byte-exact are checked against the original on every output and skipped if the
+check fails. [What is exact and what isn't](#what-is-exact-and-what-isnt) has the details per rule.
+
+## Numbers at a glance
+
+| | result | source |
+|---|---|---|
+| tool-output tokens saved, `safe`, MCP-heavy mix | **8.7%** [8.2, 9.3]; **12.0%** on Opus | 2,225 public agent trajectories, o200k |
+| ... coder plus MCP mix | 3.7% [3.0, 4.6]; 7.6% on Opus | same |
+| ... real Claude Code sessions, Linux/macOS | 0.3% [0.0, 0.6]; 1.8% on Opus | 37 sessions |
+| ... real Claude Code sessions, Windows | 4.1% [2.0, 6.9]; 6.5% on Opus | 18 sessions |
+| exactness checks on changed outputs | **0 failures**: 1,205 byte-exact, 5,463 JSON-equal | same traces |
+| next-action replay (does the agent do something different?) | `safe`: 0 re-fetches (it changed 7 of 400 items); other compactors at their defaults: +13 to +45 points of changed next actions | 400 items, Qwen3.6 + Qwen3.8 ([BENCHMARKS §8](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#8-compared-with-other-compactors)) |
+| reading accuracy, Claude Opus 5.5 | `jsonrows`, `a11y` and 4 opt-in rules: −3 to +1 points vs the raw output; dedup −0.2 [−1.8, +1.3] | 100 questions per rule, 450 for dedup |
+| hook latency (Claude Code, fresh process per call) | p50 39 ms, p95 47 ms (runtime 106bcea) | 300 replayed events |
+| token pruning, QA at 50% kept (uncompressed 91.8%) | **68.8%** vs LLMLingua-2-large 53.4%, -base 41.0% | 378 held-out questions, DeepSeek V4 Flash reader |
+
+Brackets are 95% CIs. The agent-hook numbers trace back to scripts and result files in
+[docs/BENCHMARKS.md](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md), and the token-pruning ones to the
+[model card](https://huggingface.co/darioooooo0o/ctxprune-small).
+The savings are small on purpose: lossy tools save more (LLMLingua-2 and headroom remove 18–58% at their defaults)
+but change what the agent does next. `ctxprune stats` shows what it saves on your own machine.
 
 The hooks and plugins use only the Python standard library, with no model, no network and no server. Their output is
 byte-identical across operating systems and Python versions, and they never re-render history that a model has
 already cached.
-
-The 0.2 token-pruning API (`ctxprune.prune()`, LangChain, LlamaIndex, `ctxprune FILE --keep 0.5`) is still here,
-unchanged: see [Token pruning](#token-pruning-the-02-api-python-langchain-llamaindex).
-
-What it saves, on real Claude Code sessions without PowerShell:
-- **about 0.3%** of the tool-output tokens the model sees;
-- **about 1.8%** on Claude Opus, which also gets cross-turn dedup.
-
-On MCP-heavy workloads it saves **about 9%**, and 12% on Opus. That's smaller than you might expect, so please read
-the numbers below before installing.
 
 ## Install
 
@@ -34,7 +77,7 @@ ctxprune doctor                 # checks versions and runs a test call through e
 
 To install for one agent only: `ctxprune install claude-code` (or `hermes`, `pi`, `opencode`, `dsh`, `codex`).
 `ctxprune uninstall --all` removes everything it added. The first time `install` changes one of your config files,
-it keeps a backup of the original. [PACKAGE.md](PACKAGE.md) lists every file it touches, the paths it uses, and notes
+it keeps a backup of the original. [PACKAGE.md](https://github.com/riceharvest/ctxprune/blob/main/PACKAGE.md) lists every file it touches, the paths it uses, and notes
 for Windows and for the Codex proxy.
 
 Don't run `install` through `uvx`. It writes the interpreter path into your agent configs, and uvx deletes that
@@ -57,6 +100,12 @@ This is lossy compression for prompts, retrieved documents and logs: a 140M-para
 matter least and keeps identifiers, paths and numbers unsplit. It runs on CPU (int8 ONNX, ~0.1 s per 500 tokens;
 the model downloads once, 143 MB). It works exactly as in 0.2.1, with the same outputs byte for byte. The agent hooks
 above never use it.
+
+![token pruning on a failing pytest run: struck-through words are deleted, IDs and code stay intact](https://raw.githubusercontent.com/riceharvest/ctxprune/main/assets/before-after.png)
+
+```sh
+pip install ctxprune               # library + CLI; the model downloads on first use
+```
 
 ```python
 import ctxprune
@@ -108,7 +157,7 @@ On by default:
 - Windows text: a leading BOM is set aside and put back. CRLF line endings are kept exact line by line.
 - `a11y`: Playwright MCP accessibility snapshots drop the YAML `- ` dash, and ` [cursor=pointer]` becomes ` ↗`.
   Element refs stay byte-exact.
-- Marker escaping (see [docs/SAFETY.md](docs/SAFETY.md)).
+- Marker escaping (see [docs/SAFETY.md](https://github.com/riceharvest/ctxprune/blob/main/docs/SAFETY.md)).
 
 Opt-in (off by default). With the output placed inside a 16k–56k-token agent transcript, a reader did worse on these,
 even though short 1–6k-token probes showed no loss (see "Which models it was tested on"). Each saved under 1% of
@@ -190,7 +239,7 @@ losslessly ("spill files", on by default). If the agent later reads a quarter of
 +0.05 / +0.58 / +0.67 points to mixes 1 / 2 / 3. How much of the file gets read back is an assumption; I couldn't
 measure it.
 
-Every number, the exact commands and the scripts are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). `ctxprune stats`
+Every number, the exact commands and the scripts are in [docs/BENCHMARKS.md](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md). `ctxprune stats`
 shows what it saved on your own machine (a counts-only log; see "Privacy").
 
 ## Which models it was tested on
@@ -250,7 +299,7 @@ of answering was counted as a re-fetch (an extra turn), not as wrong. Without th
   model, keep a recovery file for every dropped range, and leave file views whole.
   - They need `pip install "ctxprune[model]"` and `ctxprune serve --model-dir DIR`.
   - The 0.3.0 model weights are not published yet, so for now these presets are for experiments.
-  - In my session runs, the cost results were mixed (see "Presets" in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)).
+  - In my session runs, the cost results were mixed (see "Presets" in [docs/BENCHMARKS.md](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md)).
 - **Harnesses that opt out of lossy.** On **Codex, dsh, OpenCode and Pi**, `balanced` runs as `safe` unless you set
   `CTXPRUNE_FORCE_LOSSY=1`.
   - Codex cost +36.8% (90% CI +15.8 to +60.6) with the model on: holes in file views made it re-read ranges in
@@ -299,7 +348,7 @@ The exception is the Codex proxy. It sits in the request path, so if the proxy p
 For the proxy and the plugins' request-time dedup, OFF is soft. New results go out raw, and results already sent keep
 their bytes, so turning it on or off costs no prompt-cache miss.
 
-Details are in [docs/SAFETY.md](docs/SAFETY.md).
+Details are in [docs/SAFETY.md](https://github.com/riceharvest/ctxprune/blob/main/docs/SAFETY.md).
 
 ## Same bytes everywhere, and no re-rendered history
 
@@ -318,7 +367,7 @@ A prompt cache only helps if the bytes don't change, so ctxprune is built to kee
   mid-conversation leaves the earlier history alone. `CTXPRUNE_RERENDER` is ignored: a re-render is a history edit.
 - The remaining one-time cache miss is a hard OFF (`echo hard > ~/.cache/ctxprune/OFF`).
 
-Details are in [docs/SAFETY.md](docs/SAFETY.md#6-determinism-and-prompt-cache).
+Details are in [docs/SAFETY.md](https://github.com/riceharvest/ctxprune/blob/main/docs/SAFETY.md#6-determinism-and-prompt-cache).
 
 ## See what it saves: `stats` and `audit`
 
@@ -408,7 +457,7 @@ Nothing leaves your machine. ctxprune makes no network calls in the `safe` prese
 
 ## License
 
-0BSD (see [LICENSE](LICENSE)). ctxprune 0.2.1 and earlier were Apache-2.0. The token-pruning model used by the 0.2
+0BSD (see [LICENSE](https://github.com/riceharvest/ctxprune/blob/main/LICENSE)). ctxprune 0.2.1 and earlier were Apache-2.0. The token-pruning model used by the 0.2
 API, [darioooooo0o/ctxprune-small](https://huggingface.co/darioooooo0o/ctxprune-small), is downloaded from Hugging
 Face on first use and stays Apache-2.0.
 
@@ -416,6 +465,6 @@ The optional line-scoring model weights for `balanced`/`aggressive` are not part
 They are a fine-tune of mmBERT-small (MIT), trained on data that includes CC-BY-4.0 sets (SWE-rebench-openhands,
 Nemotron-SWE). The weights are not published yet; their license and attributions will be on the Hugging Face
 model card when they are. See
-[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+[THIRD_PARTY_NOTICES](https://github.com/riceharvest/ctxprune/blob/main/THIRD_PARTY_NOTICES).
 
-Changes from 0.2.1: [CHANGELOG.md](CHANGELOG.md).
+Changes from 0.2.1: [CHANGELOG.md](https://github.com/riceharvest/ctxprune/blob/main/CHANGELOG.md).

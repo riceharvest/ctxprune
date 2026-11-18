@@ -1,13 +1,14 @@
 [project]
 name = "ctxprune"
 version = "0.3.0"
-description = "Lossless compression of agent tool outputs for Claude Code, Hermes, Pi, OpenCode, dsh and Codex"
+description = "Shrink what your LLM reads: lossless tool-output compression for coding agents (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) and token pruning for prompts and RAG (LangChain, LlamaIndex)"
 readme = "README.md"
 # 0BSD from 0.3.0 (0.2.1 was Apache-2.0). The optional model weights are not part of the package; see THIRD_PARTY_NOTICES
 license = "0BSD"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
 requires-python = ">=3.9"
-keywords = ["claude-code", "codex", "opencode", "hermes", "llm", "context-compression", "agents", "tool-output"]
+keywords = ["claude-code", "codex", "opencode", "hermes", "llm", "context-compression", "agents", "tool-output", "mcp",
+            "prompt-compression", "llmlingua", "rag", "langchain", "llamaindex", "token-classification"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -19,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing",
 ]
 # The hooks, plugins and the default `safe` preset use the standard library only (and never import these). The
@@ -47,6 +49,8 @@ ctxprune = "ctxprune.cli:main"
 Homepage = "https://github.com/riceharvest/ctxprune"
 Model = "https://huggingface.co/darioooooo0o/ctxprune-small"
 Demo = "https://huggingface.co/spaces/darioooooo0o/ctxprune"
+Changelog = "https://github.com/riceharvest/ctxprune/blob/main/CHANGELOG.md"
+Benchmarks = "https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md"
 
 [build-system]
 requires = ["hatchling>=1.27"]   # PEP 639 license expression

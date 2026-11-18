@@ -417,6 +417,41 @@ Each harness was run end to end in a throwaway HOME against a scripted stub mode
   Hermes time budget and the spill and PowerShell changes. Unit tests cover those in the research repo.
 - The proxy kill switch is covered by `scripts/test_ctxprune_proxy.py::test_kill_switch_env_and_file`.
 
+## 8. Compared with other compactors
+
+**Question.** If a tool shrinks a tool output, does the agent still do the same next thing?
+
+**Method.** Next-action replay (research repo `results/compare/harm.md` @ 22d5074, 2026-10-18).
+- 400 frozen replay items: real held-out agent trajectories, cut right after a big tool output. Each tool rewrites
+  that output at its documented default. The reader then picks the next action.
+- Readers: Qwen3.6-35B-A3B and Qwen3.8-27B. No Claude reader.
+- Metric: excess next-action divergence and re-fetch rate, measured only on the items each tool changed. Each arm is
+  paired against a resample of the raw prompt (the noise floor). 95% bootstrap over items.
+- Versions: headroom-ai 0.41.0, rtk 1.0.1, sqz 2.1.1, optscale-kompressor 1.0.2, llmlingua 0.2.2 (LLMLingua-2,
+  applied at ctxprune's hook reach).
+
+| tool | items changed | Qwen3.6 divergence | Qwen3.6 re-fetch | Qwen3.8 divergence | Qwen3.8 re-fetch |
+|---|--:|---|--:|---|--:|
+| ctxprune `safe` | 7 | n/a (too few) | 0 | n/a | 0 |
+| headroom | 133 | +12.8 [+3.8, +21.8] | +3.8 | +21.8 [+13.5, +30.1] | +3.8 |
+| ctxprune `balanced` (lossy, experimental) | 198 | +14.6 [+7.6, +22.7] | +7.6 | +32.8 [+25.8, +39.9] | +17.2 |
+| kompressor `lossless` mode | 48 | +14.6 [−4.2, +31.2] | +14.6 | +37.5 [+22.9, +52.1] | +12.5 |
+| rtk | 109 | +23.9 [+13.8, +33.0] | +5.5 | +35.8 [+26.6, +45.9] | +13.8 |
+| sqz | 45 | +28.9 [+11.1, +46.7] | +15.6 | +33.3 [+15.6, +51.1] | +15.6 |
+| LLMLingua-2 | 192 | +29.2 [+21.4, +37.5] | +18.8 | +42.7 [+34.9, +50.0] | +27.1 |
+| kompressor | 351 | +33.6 [+27.6, +39.9] | +23.6 | +44.7 [+39.0, +50.7] | +32.2 |
+
+How to read it:
+- Every lossy tool changed the agent's next action materially, more so on Qwen3.8. headroom was the mildest, and
+  milder than ctxprune's own `balanced` on Qwen3.8.
+- `safe` changed only 7 of these 400 items (most were file views and code, which it leaves alone), so this shows that
+  it does no harm where it fires, not that it saves much here.
+- The same study measured savings at each tool's own reach on 30.6k public tool outputs (research repo
+  `results/compare/tables.md`): lossy defaults removed far more, e.g. headroom 18.7 / 23.4 / 36.5% and LLMLingua-2
+  18.3 / 33.4 / 58.3% on mixes 1 / 2 / 3. That run used an earlier ctxprune runtime (8ad8a8b), so its ctxprune row is
+  not quoted; §1 has the 0.3.0 numbers.
+- Replay is one step deep: a dropped detail that matters ten turns later isn't seen.
+
 ## Not quoted, and why
 
 - **Hermes savings on my own sessions** (not published: private logs). They were measured on pinned pre-merge
