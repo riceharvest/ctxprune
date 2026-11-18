@@ -136,7 +136,13 @@ With LLMLingua: `PromptCompressor(model_name="darioooooo0o/ctxprune-small", use_
 How good it is: at 50% of tokens kept, a reader LLM (DeepSeek V4 Flash) answered 68.8% of 378 held-out questions on
 agent text exactly, vs 53.4% for LLMLingua-2-large and 41.0% for LLMLingua-2-base (uncompressed: 91.8%). It is weaker
 than LLMLingua-2-large on non-English web prose, and the question set comes from our own training sources. Per-source
-tables and caveats are on the [model card](https://huggingface.co/darioooooo0o/ctxprune-small). The training and
+tables and caveats are on the [model card](https://huggingface.co/darioooooo0o/ctxprune-small).
+
+**Use `protect=True` on tool output, logs and anything with identifiers.** ctxprune never splits or re-spaces an
+identifier, but without `protect` it may delete one. On 30 held-out agent tool outputs at 50% kept, the share of IDs,
+paths, versions, URLs and numbers that survived verbatim was 99.6% with `protect=True` (55.9% of tokens kept),
+45.8% without it, 72.9% for LLMLingua-2-base and 94.6% for LLMLingua-2-large. Every type and rate:
+[docs/bench/llmlingua_facts.md](https://github.com/riceharvest/ctxprune/blob/main/docs/bench/llmlingua_facts.md). The training and
 evaluation code for this model is at tag [`v0.2.1`](https://github.com/riceharvest/ctxprune/tree/v0.2.1)
 (`scripts/`, `ctxprune/`).
 
