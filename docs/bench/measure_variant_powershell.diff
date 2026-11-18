@@ -1,0 +1,29 @@
+--- measure.py
++++ measure_powershell.py
+@@ -38,7 +38,7 @@
+ from pathlib import Path
+ 
+ HERE = Path(__file__).resolve().parent
+-SCRIPTS = HERE.parent.parent / "scripts"
++SCRIPTS = Path("/path/to/ctxprune/scripts")   # variant: run from a copy
+ sys.path.append(str(SCRIPTS))
+ RAW = Path(os.path.expanduser("~/.cache/ctxprune-typical/raw"))
+ QWEN_TOK = os.path.expanduser("~/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/"
+@@ -418,7 +418,7 @@
+     if scope == "all":
+         return not SKIP_RE.search(bare) and not VIEW.match(bare)
+     # hook scope (Claude Code)
+-    if tool == "Bash":
++    if tool in ("Bash", "PowerShell"):   # variant: 0.3.0 matcher Bash|PowerShell|Grep|mcp__.*
+         return not persisted and len(text) <= PERSIST_CHARS
+     if tool == "Grep":
+         return not re.match(r"(Found \d+ files?|No (files|matches) found)", text)
+@@ -485,7 +485,7 @@
+ def spilled(tool: str, ds: str, full: str, pers: bool) -> bool:
+     """Claude Code never shows this output whole (Bash > 30k chars / persisted, MCP > ~50k chars): left out of the
+     hook-scope totals (the model only sees a ~2k preview)."""
+-    if tool == "Bash":
++    if tool in ("Bash", "PowerShell"):
+         return pers or len(full) > PERSIST_CHARS
+     return len(full) > MCP_SPILL_CHARS
+ 

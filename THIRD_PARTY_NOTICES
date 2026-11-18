@@ -1,0 +1,28 @@
+Third-party notices for ctxprune 0.3.0
+=====================================
+
+The ctxprune package (the code in this repository and in the wheel, including the
+runtime vendored under ctxprune/_rt/) is released under 0BSD; see LICENSE.
+
+Copied third-party code
+-----------------------
+None. At the time of the 0.3.0 release no third-party source code is copied into
+the package. If that changes, the copied file, its origin, its license and its
+copyright notice are listed here.
+
+Not part of this package
+------------------------
+- Optional dependencies of the `model` extra (`pip install "ctxprune[model]"`):
+  onnxruntime, tokenizers and numpy. They are installed separately by your
+  package manager and stay under their own licenses.
+- The v2 line-scoring model weights used by the `balanced` and `aggressive`
+  presets. They are not 0BSD and are not shipped in this package. They are a
+  fine-tune of mmBERT-small (MIT) trained on data that includes CC-BY-4.0
+  datasets (SWE-rebench-openhands, Nemotron-SWE). The weights are not
+  published yet; their license and the required attributions will be on the
+  model's Hugging Face model card when they are.
+
+Earlier versions
+----------------
+ctxprune 0.2.1 and earlier were released under Apache-2.0. Those releases keep
+that license.

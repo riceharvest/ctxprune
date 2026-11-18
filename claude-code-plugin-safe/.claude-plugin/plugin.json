@@ -1,0 +1,19 @@
+{
+  "name": "ctxprune-safe",
+  "version": "0.3.0",
+  "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without dropping content (repeated lines counted, JSON record lists as rows, escaped JSON shown as text). Stdlib Python, no model, no network; fails open.",
+  "author": {
+    "name": "riceharvest",
+    "url": "https://github.com/riceharvest"
+  },
+  "homepage": "https://github.com/riceharvest/ctxprune",
+  "repository": "https://github.com/riceharvest/ctxprune",
+  "license": "0BSD",
+  "keywords": [
+    "context",
+    "tokens",
+    "tool-output",
+    "lossless",
+    "compression"
+  ]
+}

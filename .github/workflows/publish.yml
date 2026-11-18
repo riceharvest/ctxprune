@@ -1,0 +1,64 @@
+# Publishes to PyPI when a v* tag is pushed. Uses PyPI trusted publishing (no token in the repo):
+# the pypi.org publisher is owner riceharvest, repository ctxprune, workflow publish.yml, environment pypi.
+# Keep this file name and the environment name: the trusted publisher is bound to both.
+#
+# Runs on the maintainer's self-hosted Linux runner (label ctxprune-release). That runner is only online while a
+# release runs, so jobs from pull requests never find it. Release gate on the tagged commit: wheel + sdist build,
+# the unit / hook / plugin / proxy tests and the install e2e on Python 3.9-3.13, identical determinism digests across
+# those five versions. macOS and Windows are not in this gate (no hosted runners).
+name: publish
+on:
+  push:
+    tags: ["v*"]
+permissions: {}
+jobs:
+  release:
+    runs-on: [self-hosted, Linux, X64, ctxprune-release]
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      UV_NO_CONFIG: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tag matches the package version
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          v=$(uv run --no-project -q -p 3.12 python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != version $v"; exit 1; }
+      - name: Build the sdist and the wheel
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          rm -rf dist && uv build --out-dir dist && ls -l dist
+      - name: Tests on Python 3.9-3.13
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          set -e
+          for v in 3.9 3.10 3.11 3.12 3.13; do
+            echo "::group::Python $v"
+            rm -rf ".venv-$v" && uv venv -q --seed -p "$v" ".venv-$v"
+            uv pip install -q -p ".venv-$v/bin/python" dist/*.whl
+            P="$PWD/.venv-$v/bin/python"
+            "$P" -m unittest discover -s tests/packaging -p "test_*.py"
+            (cd scripts && for t in test_lossless test_ctxprune_compress test_proxy_history test_hooks \
+                                    test_plugin_failopen test_plugin_history test_ctxprune_proxy test_hermes_plugin; do
+               "$P" -m unittest "$t"; done)
+            "$P" tests/packaging/e2e.py --ctxprune "$PWD/.venv-$v/bin/ctxprune" --wheel dist/*.whl
+            "$P" tests/packaging/determinism.py --out "determinism-$v.json"
+            echo "::endgroup::"
+          done
+          python3 - <<'EOF'
+          import json
+          d = {v: json.load(open(f"determinism-{v}.json")) for v in ("3.9", "3.10", "3.11", "3.12", "3.13")}
+          digests = {v: x["digest"] for v, x in d.items()}
+          print(digests)
+          assert len(set(digests.values())) == 1 and not any(x["fails"] for x in d.values()), "determinism differs"
+          EOF
+      - name: Publish to PyPI (trusted publishing)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv publish --trusted-publishing always dist/*

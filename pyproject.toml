@@ -1,26 +1,44 @@
 [project]
 name = "ctxprune"
-version = "0.2.1"
-description = "Context compression for AI agents: an LLMLingua-2 successor that keeps identifiers intact"
+version = "0.3.0"
+description = "Lossless compression of agent tool outputs for Claude Code, Hermes, Pi, OpenCode, dsh and Codex"
 readme = "README.md"
-license = "Apache-2.0"
-requires-python = ">=3.11"
-keywords = ["claude-code", "llm", "prompt-compression", "context-compression", "agents", "llmlingua", "rag", "token-classification"]
+# 0BSD from 0.3.0 (0.2.1 was Apache-2.0). The optional model weights are not part of the package; see THIRD_PARTY_NOTICES
+license = "0BSD"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES"]
+requires-python = ">=3.9"
+keywords = ["claude-code", "codex", "opencode", "hermes", "llm", "context-compression", "agents", "tool-output"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
     "Topic :: Text Processing",
 ]
+# The hooks, plugins and the default `safe` preset use the standard library only (and never import these). The
+# dependencies are the 0.2 token-pruning API's (`ctxprune.prune`, `Compressor`, `ctxprune FILE --keep`, the LangChain /
+# LlamaIndex classes), kept as in 0.2.1 so `pip install ctxprune` keeps giving a working `prune()`.
 dependencies = [
-    # inference on CPU out of the box: tokenizer + int8/fp32 ONNX model; torch/transformers are optional
     "tokenizers>=0.20",
     "huggingface_hub>=0.25",
     "onnxruntime>=1.18",
     "numpy",
 ]
+
+[project.optional-dependencies]
+# the `model` preset: `ctxprune serve --model-dir` scores lines with the v2 ONNX model (tokenizers, never transformers)
+model = ["onnxruntime>=1.18", "tokenizers>=0.20", "numpy"]
+# 0.2 extras, kept so existing `ctxprune[...]` installs still resolve
+torch = ["torch", "transformers>=4.45"]
+onnx = []  # ONNX is a core dependency
+langchain = ["langchain-core>=0.3"]
+llamaindex = ["llama-index-core>=0.12"]
 
 [project.scripts]
 ctxprune = "ctxprune.cli:main"
@@ -30,36 +48,77 @@ Homepage = "https://github.com/riceharvest/ctxprune"
 Model = "https://huggingface.co/darioooooo0o/ctxprune-small"
 Demo = "https://huggingface.co/spaces/darioooooo0o/ctxprune"
 
-[project.optional-dependencies]
-torch = ["torch", "transformers>=4.45"]
-onnx = []  # kept so older `ctxprune[onnx]` installs still resolve; ONNX is now a core dependency
-langchain = ["langchain-core>=0.3"]
-llamaindex = ["llama-index-core>=0.12"]
-data = ["httpx", "pyarrow", "transformers>=4.45"]  # corpus building, teacher labeling, QA eval
-export = ["torch", "transformers>=4.45", "onnx", "onnxruntime>=1.18"]
-baseline = ["llmlingua", "torch"]
-dev = ["pytest", "httpx", "pyarrow", "transformers>=4.45"]
-
-[tool.uv]
-index-strategy = "unsafe-best-match"
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]   # PEP 639 license expression
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.sdist]
-include = ["ctxprune", "tests", "README.md", "LICENSE"]
-
 [tool.hatch.build.targets.wheel]
-packages = ["ctxprune"]
+packages = ["src/ctxprune"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+# The runtime is the research tree's scripts/, vendored UNCHANGED as ctxprune/_rt/ (keep this list in sync with
+# glue.RUNTIME_MODULES; `ctxprune doctor` fails on a missing one). Never edit copies: edit scripts/ and rebuild.
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/ctxprune_core.py" = "ctxprune/_rt/ctxprune_core.py"
+"scripts/ctxprune_compress.py" = "ctxprune/_rt/ctxprune_compress.py"
+"scripts/lossless.py" = "ctxprune/_rt/lossless.py"
+"scripts/lossless2.py" = "ctxprune/_rt/lossless2.py"
+"scripts/dedup.py" = "ctxprune/_rt/dedup.py"
+"scripts/recover.py" = "ctxprune/_rt/recover.py"
+"scripts/view_safe.py" = "ctxprune/_rt/view_safe.py"
+"scripts/lossless_hook.py" = "ctxprune/_rt/lossless_hook.py"
+"scripts/v2_hook.py" = "ctxprune/_rt/v2_hook.py"
+"scripts/ctxprune_proxy.py" = "ctxprune/_rt/ctxprune_proxy.py"
+"scripts/ctxprune_note.py" = "ctxprune/_rt/ctxprune_note.py"
+"scripts/v2_server.py" = "ctxprune/_rt/v2_server.py"
+"scripts/methods.py" = "ctxprune/_rt/methods.py"
+"scripts/export_v2_onnx.py" = "ctxprune/_rt/export_v2_onnx.py"
+"scripts/line_encode.py" = "ctxprune/_rt/line_encode.py"
+"scripts/emitted.py" = "ctxprune/_rt/emitted.py"
+"scripts/spill.py" = "ctxprune/_rt/spill.py"
+"scripts/read_trim.py" = "ctxprune/_rt/read_trim.py"
+"scripts/render_store.py" = "ctxprune/_rt/render_store.py"
+"scripts/hook_budget.py" = "ctxprune/_rt/hook_budget.py"
+"scripts/ctx_audit.py" = "ctxprune/_rt/ctx_audit.py"
+"scripts/integrations/hermes/ctxprune/__init__.py" = "ctxprune/_rt/integrations/hermes/ctxprune/__init__.py"
+"scripts/integrations/hermes/ctxprune/plugin.yaml" = "ctxprune/_rt/integrations/hermes/ctxprune/plugin.yaml"
+"scripts/integrations/pi/ctxprune.ts" = "ctxprune/_rt/integrations/pi/ctxprune.ts"
+"scripts/integrations/opencode/ctxprune.js" = "ctxprune/_rt/integrations/opencode/ctxprune.js"
+"scripts/integrations/dsh/ctxprune.mjs" = "ctxprune/_rt/integrations/dsh/ctxprune.mjs"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ctxprune",
+    "tests/packaging",
+    "/README.md",
+    "/PACKAGE.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/THIRD_PARTY_NOTICES",
+    "/docs",
+    "scripts/ctxprune_core.py",
+    "scripts/ctxprune_compress.py",
+    "scripts/lossless.py",
+    "scripts/lossless2.py",
+    "scripts/dedup.py",
+    "scripts/recover.py",
+    "scripts/view_safe.py",
+    "scripts/lossless_hook.py",
+    "scripts/v2_hook.py",
+    "scripts/ctxprune_proxy.py",
+    "scripts/ctxprune_note.py",
+    "scripts/v2_server.py",
+    "scripts/methods.py",
+    "scripts/export_v2_onnx.py",
+    "scripts/line_encode.py",
+    "scripts/emitted.py",
+    "scripts/spill.py",
+    "scripts/read_trim.py",
+    "scripts/render_store.py",
+    "scripts/hook_budget.py",
+    "scripts/ctx_audit.py",
+    "scripts/integrations/hermes/ctxprune/__init__.py",
+    "scripts/integrations/hermes/ctxprune/plugin.yaml",
+    "scripts/integrations/pi/ctxprune.ts",
+    "scripts/integrations/opencode/ctxprune.js",
+    "scripts/integrations/dsh/ctxprune.mjs",
+]

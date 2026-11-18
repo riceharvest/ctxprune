@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Grep|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CTXPRUNE_PRESET=safe \"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

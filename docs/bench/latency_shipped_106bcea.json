@@ -1,0 +1,9 @@
+{
+ "n": 300,
+ "events": 6,
+ "events_rewritten": 6,
+ "p50": 39.1,
+ "p95": 47.1,
+ "max": 82.0,
+ "python": "uv venv, CPython 3.14.6, wheel built from this branch"
+}

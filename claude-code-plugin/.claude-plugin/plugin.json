@@ -1,10 +1,10 @@
 {
   "name": "ctxprune",
-  "version": "0.2.1",
-  "description": "Compresses Bash and MCP tool outputs over 6,000 characters to about half before Claude reads them, keeping IDs, numbers and paths exact. Local CPU model, no API calls.",
+  "version": "0.3.0",
+  "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without dropping content (repeated lines counted, JSON record lists as rows, escaped JSON shown as text). Local, no model download. Uses the installed ctxprune, else uvx.",
   "author": {"name": "riceharvest", "url": "https://github.com/riceharvest"},
   "homepage": "https://github.com/riceharvest/ctxprune",
   "repository": "https://github.com/riceharvest/ctxprune",
-  "license": "Apache-2.0",
-  "keywords": ["context", "compression", "tokens", "tool-output"]
+  "license": "0BSD",
+  "keywords": ["context", "tokens", "tool-output", "lossless", "compression"]
 }

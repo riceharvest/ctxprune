@@ -2,9 +2,9 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Bash|mcp__.*",
+        "matcher": "Bash|PowerShell|Grep|mcp__.*",
         "hooks": [
-          {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook.sh", "timeout": 60}
+          {"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook.sh", "timeout": 30}
         ]
       }
     ]

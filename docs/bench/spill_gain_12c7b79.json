@@ -1,0 +1,534 @@
+{
+ "n_spilled": 290,
+ "stage0_check": {
+  "none": 86,
+  "exact": 163,
+  "lossy": 23,
+  "linecap": 14,
+  "fail": 4
+ },
+ "stage0_rules_fired": {
+  "l2_jsonrows": 104,
+  "dup": 21,
+  "l2_a11y": 91,
+  "l2_json_ascii": 3,
+  "json_unescape": 2,
+  "json_compact": 35,
+  "l2_diffhdr": 1,
+  "json_truncated": 4,
+  "l2_paths": 1,
+  "grep_group": 2
+ },
+ "rules_kept": {
+  "dedup": 77,
+  "l2_jsonrows": 90,
+  "l2_a11y": 68,
+  "l2_json_ascii": 3,
+  "json_compact": 21,
+  "l2_diffhdr": 1,
+  "l2_paths": 1,
+  "grep_group": 2
+ },
+ "by_tier": {
+  "bash": {
+   "n": 11,
+   "reach": 11,
+   "fits": 1,
+   "t0": 153494,
+   "median_chars_to_cut_pct": 40.1,
+   "file_saved_pct": 6.07
+  },
+  "mcp_t2": {
+   "n": 78,
+   "reach": 71,
+   "fits": 29,
+   "t0": 1348493,
+   "median_chars_to_cut_pct": 15.8,
+   "file_saved_pct": 10.14
+  },
+  "mcp_t3": {
+   "n": 201,
+   "reach": 181,
+   "fits": 0,
+   "t0": 18307298,
+   "median_chars_to_cut_pct": 76.6,
+   "file_saved_pct": 2.99
+  }
+ },
+ "by_group": {
+  "assistant_api": {
+   "n": 8,
+   "fits": 1,
+   "t0": 162316,
+   "preview_t": 4461,
+   "read_t": 165084,
+   "fits_inline_t": 5390,
+   "fits_preview_t": 752,
+   "fits_read_t": 17003,
+   "file_read_t": 155157
+  },
+  "coding": {
+   "n": 8,
+   "fits": 0,
+   "t0": 145405,
+   "preview_t": 4397,
+   "read_t": 153709,
+   "fits_inline_t": 0,
+   "fits_preview_t": 0,
+   "fits_read_t": 0,
+   "file_read_t": 153655
+  },
+  "mcp_browser": {
+   "n": 91,
+   "fits": 14,
+   "t0": 6009769,
+   "preview_t": 44577,
+   "read_t": 6788723,
+   "fits_inline_t": 156015,
+   "fits_preview_t": 9986,
+   "fits_read_t": 241313,
+   "file_read_t": 6299426
+  },
+  "mcp_db": {
+   "n": 2,
+   "fits": 0,
+   "t0": 200069,
+   "preview_t": 658,
+   "read_t": 200073,
+   "fits_inline_t": 0,
+   "fits_preview_t": 0,
+   "fits_read_t": 0,
+   "file_read_t": 200073
+  },
+  "mcp_filesystem": {
+   "n": 24,
+   "fits": 0,
+   "t0": 1531860,
+   "preview_t": 10086,
+   "read_t": 1631365,
+   "fits_inline_t": 0,
+   "fits_preview_t": 0,
+   "fits_read_t": 0,
+   "file_read_t": 1631365
+  },
+  "mcp_github": {
+   "n": 59,
+   "fits": 0,
+   "t0": 4760165,
+   "preview_t": 21902,
+   "read_t": 4767588,
+   "fits_inline_t": 0,
+   "fits_preview_t": 0,
+   "fits_read_t": 0,
+   "file_read_t": 4749651
+  },
+  "mcp_multi": {
+   "n": 90,
+   "fits": 14,
+   "t0": 6720006,
+   "preview_t": 36216,
+   "read_t": 7620877,
+   "fits_inline_t": 140845,
+   "fits_preview_t": 8639,
+   "fits_read_t": 230761,
+   "file_read_t": 7399416
+  },
+  "mcp_saas": {
+   "n": 8,
+   "fits": 1,
+   "t0": 279695,
+   "preview_t": 3573,
+   "read_t": 280324,
+   "fits_inline_t": 17641,
+   "fits_preview_t": 1270,
+   "fits_read_t": 18538,
+   "file_read_t": 261304
+  }
+ },
+ "policies": {
+  "A@r=0.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": -1.25,
+    "mcp_browser": -5.16,
+    "mcp_db": 0.0,
+    "mcp_multi": -2.33,
+    "coding": 0.0,
+    "assistant_api": -0.19,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": -1.03,
+    "M3 MCP-heavy assistant": -1.96
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     -2.6,
+     -0.25
+    ],
+    "M3 MCP-heavy assistant": [
+     -3.56,
+     -0.97
+    ]
+   }
+  },
+  "A@r=0.25": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": -0.85,
+    "mcp_browser": -1.59,
+    "mcp_db": 0.0,
+    "mcp_multi": -0.79,
+    "coding": 0.0,
+    "assistant_api": -0.01,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": -0.32,
+    "M3 MCP-heavy assistant": -0.68
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     -0.78,
+     -0.1
+    ],
+    "M3 MCP-heavy assistant": [
+     -1.22,
+     -0.36
+    ]
+   }
+  },
+  "A@r=0.5": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": -0.49,
+    "mcp_browser": -0.47,
+    "mcp_db": 0.0,
+    "mcp_multi": -0.13,
+    "coding": 0.0,
+    "assistant_api": 0.14,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": -0.09,
+    "M3 MCP-heavy assistant": -0.18
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     -0.27,
+     -0.0
+    ],
+    "M3 MCP-heavy assistant": [
+     -0.41,
+     0.0
+    ]
+   }
+  },
+  "A@r=1.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": 0.14,
+    "mcp_browser": 0.61,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.47,
+    "coding": 0.0,
+    "assistant_api": 0.38,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": 0.12,
+    "M3 MCP-heavy assistant": 0.36
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     0.02,
+     0.29
+    ],
+    "M3 MCP-heavy assistant": [
+     0.17,
+     0.64
+    ]
+   }
+  },
+  "Ap@r=0.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": 0.0,
+    "mcp_browser": -0.01,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.0,
+    "coding": 0.0,
+    "assistant_api": 0.0,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": -0.0,
+    "M3 MCP-heavy assistant": -0.0
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     -0.0,
+     -0.0
+    ],
+    "M3 MCP-heavy assistant": [
+     -0.0,
+     0.0
+    ]
+   }
+  },
+  "Ap@r=0.25": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.48,
+    "mcp_saas": 0.34,
+    "mcp_browser": 2.53,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.39,
+    "coding": 0.0,
+    "assistant_api": 0.0,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.05,
+    "M2 coder + MCP": 0.58,
+    "M3 MCP-heavy assistant": 0.67
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     0.37,
+     0.72
+    ],
+    "M3 MCP-heavy assistant": [
+     0.46,
+     0.86
+    ]
+   }
+  },
+  "Ap@r=0.5": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.51,
+    "mcp_saas": 0.65,
+    "mcp_browser": 3.45,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.56,
+    "coding": 0.0,
+    "assistant_api": 0.0,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.05,
+    "M2 coder + MCP": 0.77,
+    "M3 MCP-heavy assistant": 0.96
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     0.51,
+     0.94
+    ],
+    "M3 MCP-heavy assistant": [
+     0.62,
+     1.24
+    ]
+   }
+  },
+  "Ap@r=1.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.53,
+    "mcp_saas": 1.19,
+    "mcp_browser": 4.42,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.75,
+    "coding": 0.0,
+    "assistant_api": 0.0,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.06,
+    "M2 coder + MCP": 0.96,
+    "M3 MCP-heavy assistant": 1.29
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     0.69,
+     1.16
+    ],
+    "M3 MCP-heavy assistant": [
+     0.88,
+     1.65
+    ]
+   }
+  },
+  "AAp@r=0.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.0,
+    "mcp_saas": -1.25,
+    "mcp_browser": -5.17,
+    "mcp_db": 0.0,
+    "mcp_multi": -2.33,
+    "coding": 0.0,
+    "assistant_api": -0.19,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.0,
+    "M2 coder + MCP": -1.03,
+    "M3 MCP-heavy assistant": -1.96
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.0,
+     0.0
+    ],
+    "M2 coder + MCP": [
+     -2.45,
+     -0.23
+    ],
+    "M3 MCP-heavy assistant": [
+     -3.35,
+     -1.02
+    ]
+   }
+  },
+  "AAp@r=0.25": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.48,
+    "mcp_saas": -0.51,
+    "mcp_browser": 0.97,
+    "mcp_db": 0.0,
+    "mcp_multi": -0.39,
+    "coding": 0.0,
+    "assistant_api": -0.01,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.05,
+    "M2 coder + MCP": 0.27,
+    "M3 MCP-heavy assistant": -0.0
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     -0.22,
+     0.56
+    ],
+    "M3 MCP-heavy assistant": [
+     -0.64,
+     0.4
+    ]
+   }
+  },
+  "AAp@r=0.5": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.51,
+    "mcp_saas": 0.16,
+    "mcp_browser": 3.02,
+    "mcp_db": 0.0,
+    "mcp_multi": 0.46,
+    "coding": 0.0,
+    "assistant_api": 0.14,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.05,
+    "M2 coder + MCP": 0.68,
+    "M3 MCP-heavy assistant": 0.79
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     0.36,
+     0.87
+    ],
+    "M3 MCP-heavy assistant": [
+     0.39,
+     1.09
+    ]
+   }
+  },
+  "AAp@r=1.0": {
+   "groups": {
+    "mcp_filesystem": 0.0,
+    "mcp_github": 0.53,
+    "mcp_saas": 1.32,
+    "mcp_browser": 5.06,
+    "mcp_db": 0.0,
+    "mcp_multi": 1.25,
+    "coding": 0.0,
+    "assistant_api": 0.38,
+    "web_research": 0.0
+   },
+   "mixes": {
+    "M1 coder, few MCP": 0.06,
+    "M2 coder + MCP": 1.09,
+    "M3 MCP-heavy assistant": 1.66
+   },
+   "ci95": {
+    "M1 coder, few MCP": [
+     0.04,
+     0.06
+    ],
+    "M2 coder + MCP": [
+     0.81,
+     1.31
+    ],
+    "M3 MCP-heavy assistant": [
+     1.23,
+     2.11
+    ]
+   }
+  }
+ }
+}

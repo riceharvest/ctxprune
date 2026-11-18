@@ -1,12 +1,20 @@
 {
   "name": "ctxprune",
-  "description": "Context compression for Claude Code: shrinks big Bash and MCP tool outputs before Claude reads them",
-  "owner": {"name": "riceharvest", "url": "https://github.com/riceharvest"},
+  "description": "Context compression for Claude Code: rewrites big tool outputs into a shorter form before Claude reads them, without dropping content",
+  "owner": {
+    "name": "riceharvest",
+    "url": "https://github.com/riceharvest"
+  },
   "plugins": [
     {
       "name": "ctxprune",
       "source": "./claude-code-plugin",
-      "description": "Compresses Bash and MCP tool outputs over 6,000 characters to about half, keeping IDs, numbers and paths exact. Runs locally on CPU."
+      "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without dropping content. Uses the installed ctxprune, else uvx."
+    },
+    {
+      "name": "ctxprune-safe",
+      "source": "./claude-code-plugin-safe",
+      "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without dropping content (repeated lines counted, JSON record lists as rows, escaped JSON shown as text). Stdlib Python, no model, no network; fails open."
     }
   ]
 }

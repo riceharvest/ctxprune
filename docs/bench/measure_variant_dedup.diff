@@ -1,0 +1,11 @@
+--- measure_powershell.py
++++ measure_dedup.py
+@@ -495,7 +495,7 @@
+     from ctxprune_core import Settings, process
+     from dedup import DedupSession, call_inputs, expand as dexpand
+     from lossless import compress, decode as ldecode
+-    st = Settings(model=False, state=os.path.expanduser("~/.cache/ctxprune-typical/state"))
++    st = Settings(model=False, dedup=True, state=os.path.expanduser("~/.cache/ctxprune-typical/state"))
+     ev = tr["ev"]
+     later = [0] * len(ev)
+     n = 0

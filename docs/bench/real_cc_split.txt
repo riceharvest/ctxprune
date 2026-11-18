@@ -1,0 +1,6 @@
+safe (dedup off: every model except claude-opus-*):
+non-windows: 37 sessions, 410536 o200k tokens, saved 0.29% [0.04, 0.62]
+windows: 18 sessions, 871990 o200k tokens, saved 4.08% [1.98, 6.88]
+dedup on (claude-opus-* served by Anthropic):
+non-windows: 37 sessions, 410536 o200k tokens, saved 1.76% [0.66, 3.38]
+windows: 18 sessions, 871990 o200k tokens, saved 6.53% [4.23, 9.86]
