@@ -189,6 +189,8 @@ def _context_store(path: str):
     if st is None:
         from render_store import RenderStore
         st = _STORES[path] = RenderStore(path)
+        st.hold_pins()   # T2.1 residual: a pin that changed bytes is never evicted (Claude thinking signatures cover
+                         # those bytes, and these harnesses can run Claude models); persisted in the store's meta
     return st
 
 

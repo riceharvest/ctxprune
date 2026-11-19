@@ -358,7 +358,7 @@ of answering was counted as a re-fetch (an extra turn), not as wrong. Without th
 ## Presets
 
 - **`safe` (the default).** The rules above, with nothing dropped and no model.
-  - **Cross-turn dedup is decided by model**, once per session. It is on for `claude-opus-*` served by Anthropic and
+  - **Cross-turn dedup is decided by model, per request**. It is on for `claude-opus-*` served by Anthropic and
     off for everything else (`ctxprune_core.DEDUP_MODELS`). `CTXPRUNE_DEDUP=0|1` overrides that in every integration.
   - In Claude Code the hook reads the model from the session. If `ANTHROPIC_BASE_URL` points anywhere other than
     Anthropic, dedup stays off.

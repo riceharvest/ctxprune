@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -140,6 +141,29 @@ class Idempotent(unittest.TestCase):
                 self.assertEqual(b, a)
                 self.assertEqual(rec["stage"], "emitted")
             finally:
+                if old is None:
+                    os.environ.pop("CTXPRUNE_STATE", None)
+                else:
+                    os.environ["CTXPRUNE_STATE"] = old
+
+
+class ContextStoreHoldsPins(unittest.TestCase):
+    """T2.1 residual: the Hermes / Pi / OpenCode context store holds changed pins like the proxy does."""
+
+    def test_hold_pins_set_and_persisted(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.environ.get("CTXPRUNE_STATE")
+            os.environ["CTXPRUNE_STATE"] = d
+            C._STORES.clear()
+            try:
+                st = C._context_store(C.context_store_path())
+                self.assertTrue(st.hold)
+                st.close()
+                C._STORES.clear()
+                from render_store import RenderStore
+                self.assertTrue(RenderStore(C.context_store_path()).hold)   # remembered in meta
+            finally:
+                C._STORES.clear()
                 if old is None:
                     os.environ.pop("CTXPRUNE_STATE", None)
                 else:
