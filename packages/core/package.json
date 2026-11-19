@@ -1,0 +1,14 @@
+{
+  "name": "@ctxprune/core",
+  "version": "0.5.0",
+  "description": "Native TypeScript lossless helpers and optional ONNX Runtime adapter for ctxprune",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md"],
+  "scripts": { "build": "tsc -p tsconfig.json" },
+  "peerDependencies": { "onnxruntime-node": ">=1.17" },
+  "peerDependenciesMeta": { "onnxruntime-node": { "optional": true } },
+  "devDependencies": { "typescript": "^5.7.0" }
+}
