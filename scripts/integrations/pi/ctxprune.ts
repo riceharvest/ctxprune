@@ -18,7 +18,7 @@
 // Deterministic in the request prefix, so the prompt cache sees the same bytes. Read/edit/write results are counted
 // but never rewritten. By model: on for claude-opus-* (Opus 5.5 probe passed), off otherwise; CTXPRUNE_DEDUP=0|1 overrides; CTXPRUNE_OFF=1: off for
 // new results (results already sent keep their pinned text: off()).
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -47,19 +47,18 @@ export function noteTarget(ctx) {
 }
 
 function compress(text, command, tool, noModel) {
-  try {
+  return new Promise((resolve) => {
     const args = [CLI, `--command=${command || ""}`, `--tool=${tool || ""}`, "--harness", "pi"];   // `=`: a value starting with "-" is not a flag
     if (noModel) args.push("--no-model");
-    const out = execFileSync(PY, args, {
-      input: text, encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024,
+    try { const child = execFile(PY, args, {
+      encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024,
       env: { ...process.env, CTXPRUNE_HARNESS: "pi", ...(TARGET ? { CTXPRUNE_TARGET: TARGET } : {}),
              ...(MODEL ? { CTXPRUNE_MODEL: MODEL } : {}) },   // the session's model: lossless.PATHS_WIN_MODELS
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-    return typeof out === "string" && out.length ? out : null;
-  } catch (e) {
-    return null;
-  }
+    }, (err, stdout) => resolve(!err && typeof stdout === "string" && stdout.length ? stdout : null));
+      child.stdin.on("error", () => {});
+      child.stdin.end(text);
+    } catch (e) { resolve(null); }
+  });
 }
 
 // H2 fail-open escape: lossless.escape_markers in JS (same line boundaries, invisible prefix class and marker prefix).
@@ -211,23 +210,24 @@ function contextDedup(events, seed) {
 // toggle never rewrites history the provider has cached (ctxprune_compress.context).
 // Dedup goes by the current model, per request (claude-opus-* on; the allow-list is ctxprune_core.DEDUP_MODELS);
 // CTXPRUNE_DEDUP=0|1 overrides.
-export function dedupOn() {
+export async function dedupOn() {
   const v = (process.env.CTXPRUNE_DEDUP || "").toLowerCase();
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off"].includes(v)) return false;
   if (!MODEL) return false;
   if (DEDUP.has(MODEL)) return DEDUP.get(MODEL);
-  let on = false;
-  try {
-    on = execFileSync(PY, [CLI, `--dedup-for=${MODEL}`], { encoding: "utf8", timeout: 15000,
-      stdio: ["ignore", "pipe", "ignore"] }).trim() === "1";
-  } catch (e) { /* off */ }
+  const on = await new Promise((resolve) => {
+    try {
+      execFile(PY, [CLI, `--dedup-for=${MODEL}`], { encoding: "utf8", timeout: 15000 },
+        (err, stdout) => resolve(!err && typeof stdout === "string" && stdout.trim() === "1"));
+    } catch (e) { resolve(false); }
+  });
   DEDUP.set(MODEL, on);
   return on;
 }
 
-function off() {
-  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") && dedupOn();
+async function off() {
+  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") && await dedupOn();
   if (on) return false;
   try {
     return !existsSync(join(process.env.CTXPRUNE_STATE || join(homedir(), ".cache", "ctxprune"), "context-store.sqlite"));
@@ -277,7 +277,7 @@ export async function onContext(event, ctx) {
     ({ events, where } = contextEvents(msgs));
     const first = msgs.find((m) => m && m.role === "user");   // first-render pins are per conversation
     seed = first ? JSON.stringify(first.content) : null;
-    if (off() || events.filter((e) => e.t === "result").length < 2) return apply(sentFallback(seed, events, where));
+    if (await off() || events.filter((e) => e.t === "result").length < 2) return apply(sentFallback(seed, events, where));
     let out = await contextDedup(events, seed);
     if (out === null) return apply(sentFallback(seed, events, where));   // CLI crash / timeout: last sent bytes
     sentRemember(seed, events, out);
@@ -330,7 +330,7 @@ export default function (pi) {
         text = readFileSync(full, "utf8");
         footer = `\n[ctxprune: compressed from ${text.length} chars; the full output is in ${full}]`;
       }
-      const out = compress(text, standIn(tool, event.input ?? event.args), tool, noModel);
+      const out = await compress(text, standIn(tool, event.input ?? event.args), tool, noModel);
       if (out === null || out === text) return fallback();
       const final = out + footer;
       if (final.length >= shown.length && !(footer === "" && escapedOnly(out, text))) {

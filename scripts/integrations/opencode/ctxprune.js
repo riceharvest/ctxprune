@@ -14,7 +14,7 @@
 // reloads the list from storage for every step). Deterministic in the request prefix (prompt cache safe). read /
 // edit / write / patch / todo outputs are counted but never rewritten. By model: on for claude-opus-* (Opus 5.5 probe passed), off otherwise; CTXPRUNE_DEDUP=0|1 overrides; CTXPRUNE_OFF=1: off for new results (results
 // already sent keep their pinned text: off()).
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -55,15 +55,16 @@ function targetEnv(sessionID) {
 }
 
 function compress(text, command, tool, sessionID) {
-  try {
-    const out = execFileSync(PY, [CLI, `--command=${command || ""}`, `--tool=${tool || ""}`, "--harness", "opencode"], {   // `=`: "-x" commands stay values
-      input: text, encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024,
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(PY, [CLI, `--command=${command || ""}`, `--tool=${tool || ""}`, "--harness", "opencode"], {   // `=`: "-x" commands stay values
+      encoding: "utf8", timeout: TIMEOUT_MS, maxBuffer: 256 * 1024 * 1024,
       env: { ...process.env, CTXPRUNE_HARNESS: "opencode", ...targetEnv(sessionID) }, stdio: ["pipe", "pipe", "ignore"],
-    });
-    return typeof out === "string" && out.length ? out : null;
-  } catch (e) {
-    return null;
-  }
+      }, (err, stdout) => resolve(!err && typeof stdout === "string" && stdout.length ? stdout : null));
+      child.stdin.on("error", () => {});
+      child.stdin.end(text);
+    } catch (e) { resolve(null); }
+  });
 }
 
 // H2 fail-open escape: lossless.escape_markers in JS (same line boundaries, invisible prefix class and marker prefix).
@@ -207,24 +208,25 @@ function contextDedup(events, seed, model) {
 // toggle never rewrites history the provider has cached (ctxprune_compress.context).
 // Dedup goes by the current model, per request (claude-opus-* on; the allow-list is ctxprune_core.DEDUP_MODELS);
 // CTXPRUNE_DEDUP=0|1 overrides.
-function dedupOn(sid, model) {
+async function dedupOn(sid, model) {
   const v = (process.env.CTXPRUNE_DEDUP || "").toLowerCase();
   if (["1", "true", "yes", "on"].includes(v)) return true;
   if (["0", "false", "no", "off"].includes(v)) return false;
   if (!model) return false;
   if (DEDUP.has(model)) return DEDUP.get(model);
-  let on = false;
-  try {
-    on = execFileSync(PY, [CLI, `--dedup-for=${model}`], { encoding: "utf8", timeout: 15000,
-      stdio: ["ignore", "pipe", "ignore"] }).trim() === "1";
-  } catch (e) { /* off */ }
+  const on = await new Promise((resolve) => {
+    try {
+      execFile(PY, [CLI, `--dedup-for=${model}`], { encoding: "utf8", timeout: 15000 },
+        (err, stdout) => resolve(!err && typeof stdout === "string" && stdout.trim() === "1"));
+    } catch (e) { resolve(false); }
+  });
   DEDUP.set(model, on);
   if (DEDUP.size > 4096) DEDUP.delete(DEDUP.keys().next().value);
   return on;
 }
 
-function off(sid, model) {
-  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") && dedupOn(sid, model);
+async function off(sid, model) {
+  const on = !["1", "true", "yes"].includes(process.env.CTXPRUNE_OFF || "") && await dedupOn(sid, model);
   if (on) return false;
   try {
     return !existsSync(join(process.env.CTXPRUNE_STATE || join(homedir(), ".cache", "ctxprune"), "context-store.sqlite"));
@@ -296,7 +298,7 @@ export const CtxPrune = async () => {
         const first = msgs.find((m) => m && m.info && m.info.role === "user");   // first-render pins: per conversation
         seed = first && Array.isArray(first.parts)
           ? JSON.stringify(first.parts.filter((p) => p && p.type === "text").map((p) => p.text)) : null;
-        if (off(sid, model) || events.filter((e) => e.t === "result").length < 2) return apply(sentFallback(seed, events, where));
+        if (await off(sid, model) || events.filter((e) => e.t === "result").length < 2) return apply(sentFallback(seed, events, where));
         const out = await contextDedup(events, seed, model);
         if (out === null) return apply(sentFallback(seed, events, where));   // CLI crash / timeout: last sent bytes
         sentRemember(seed, events, out);
@@ -321,7 +323,7 @@ export const CtxPrune = async () => {
         if (input && input.callID) pending.delete(input.callID);
         if (!tool || SKIP.test(tool) || !output || typeof output.output !== "string" || !output.output) return;
         if (killSwitch()) return;   // CTXPRUNE_OFF=1: untouched, like the Claude Code hook (no fail-open escape either)
-        const out = compress(output.output, standIn(tool, args), tool, input && input.sessionID);
+        const out = await compress(output.output, standIn(tool, args), tool, input && input.sessionID);
         if (out !== null && (out.length < output.output.length || escapedOnly(out, output.output))) output.output = out;
         else output.output = escapeMarkers(output.output);   // timeout / crash / not shorter: escaped, never raw
       } catch (e) {
