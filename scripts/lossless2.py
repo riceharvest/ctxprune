@@ -991,6 +991,85 @@ def _dec_sffiles(text: str) -> str | None:
     return outer.replace(m.group(0), _ser(decode(rest).split("\n"), k), 1) + nl
 
 
+# ---------------------------------------------------------------- jsondefs (repeated JSON objects, whole-output)
+
+DEFS_HEAD = "[cp:defs: each @N@ below stands for the JSON text on its own line here; put that text back in place of @N@]"
+_DEF_LINE = re.compile(r"^@(\d{1,3})@ (.+)$")
+_DEF_TOK = re.compile(r"@(\d{1,3})@")
+DEFS_MAX = 60
+DEFS_MIN_LEN = 24
+DEFS_MAX_TEXT = 400_000
+_JDEC = json.JSONDecoder()
+
+
+def _enc_jsondefs(text: str) -> str:
+    """JSON document (or its jsonrows encoding) in which whole JSON objects repeat byte for byte (Notion MCP: every
+    rich_text run carries the same `annotations` block, every record the same `created_by` / `parent` object) -> the
+    legend header, one `@N@ <object>` line per repeated object, the end fence, then the text with each occurrence
+    replaced by `@N@`. Textual and exact: a token that already occurs in the text is never used, each definition must
+    save estimated tokens, and the decoder must give the text back. Nothing is dropped or reordered."""
+    if len(text) > DEFS_MAX_TEXT or "@" in text and _DEF_TOK.search(text) or text.startswith(DEFS_HEAD):
+        return text
+    cnt: dict[str, int] = {}
+    i = text.find("{")
+    while i != -1:
+        try:
+            _, e = _JDEC.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            e = None
+        if e is not None and e - i >= DEFS_MIN_LEN:
+            sub = text[i:e]
+            cnt[sub] = cnt.get(sub, 0) + 1
+        i = text.find("{", i + 1)
+    cands = sorted((s for s, c in cnt.items() if c >= 2 and "\n" not in s and "\r" not in s),
+                   key=lambda s: -(cnt[s] - 1) * len(s))[:4 * DEFS_MAX]
+    cur, defs = text, []
+    for sub in cands:
+        c = cur.count(sub)
+        n = len(defs) + 1
+        tok = f"@{n}@"
+        if c < 2 or n > DEFS_MAX or MARKERISH.match(sub) or _est(sub) * (c - 1) <= c * _est(tok) + 4:
+            continue
+        defs.append(sub)
+        cur = cur.replace(sub, tok)
+    if not defs:
+        return text
+    new = "\n".join([DEFS_HEAD] + [f"@{n}@ {d}" for n, d in enumerate(defs, 1)] + [END_CP, cur])
+    if len(new) >= len(text) or _est(new) >= _est(text):
+        return text
+    try:
+        ok = _expand_defs(new) == text
+    except Exception:  # noqa: BLE001
+        ok = False
+    return new if ok else text
+
+
+def _dec_jsondefs(text: str) -> str | None:
+    """None when text is not a jsondefs encoding."""
+    out = _expand_defs(text)
+    return None if out is None else decode(out)
+
+
+def _expand_defs(text: str) -> str | None:
+    lines = text.split("\n")
+    if lines[0] != DEFS_HEAD:
+        return None
+    defs: dict[str, str] = {}
+    k = 1
+    while k < len(lines) and lines[k] != END_CP:
+        m = _DEF_LINE.match(lines[k])
+        if not m or m.group(1) in defs:
+            return None
+        defs[m.group(1)] = m.group(2)
+        k += 1
+    if k >= len(lines) or not defs:
+        return None
+    body = "\n".join(lines[k + 1:])
+    out = _DEF_TOK.sub(lambda m: defs.get(m.group(1), m.group(0)), body)
+    _spend(len(out))
+    return out
+
+
 # ---------------------------------------------------------------- json_ascii (\uXXXX-escaped JSON)
 
 JA_HEAD = "[cp: \\uXXXX escapes shown as characters]"
@@ -1290,6 +1369,8 @@ def _decode_lf(text: str) -> str:
     try:                                   # decode never raises: a malformed encoding is returned as is
         if head in JA_HEADS:
             w = _dec_jsonascii(text)
+        elif head == DEFS_HEAD:
+            w = _dec_jsondefs(text)
         elif head.startswith("{") and "[cp:content below" in head:
             w = _dec_hread(text)
         elif head.startswith("{") and "[cp:files below" in head:
@@ -1338,7 +1419,7 @@ FLAG_RULES = {"blockref": "CTXPRUNE_BLOCKREF", "prefix": "CTXPRUNE_PREFIX", "jso
 #   jsonrows_ext (key.sub columns, quoted keys): Qwen3.6 thinking -7.3 pt on those items, thinking runs into the cap
 #   (lprobe3). a11y (Playwright) passed lprobe3 on Qwen3.6 / Qwen3.8 / Gemma: on. dupref is never encoded (0% even
 #   with the note); its markers still decode.
-JSON_RULES = ("json_ascii", "sffiles", "jsonrows", "jsonrows_ext", "jsonrows_flat", "paths", "paths_win")   # paths: sffiles groups by directory;
+JSON_RULES = ("json_ascii", "sffiles", "jsonrows", "jsonrows_ext", "jsonrows_flat", "jsondefs", "paths", "paths_win")   # paths: sffiles groups by directory;
 # jsonrows_ext: jsonrows flattens key.sub columns and allows non-word (quoted) keys
 ALL_RULES = TEXT_RULES
 LINE_ORDER = (("a11y", _enc_a11y), ("diffhdr", _enc_diffhdr), ("hits", _enc_hits), ("paths", _enc_paths), ("catn", _enc_catn),
@@ -1347,7 +1428,7 @@ LINE_ORDER = (("a11y", _enc_a11y), ("diffhdr", _enc_diffhdr), ("hits", _enc_hits
 
 def _marked(text: str) -> bool:
     if text.startswith(LEGEND_HEAD) or "[cp:rows #" in text or "[cp:content below" in text or \
-            "[cp:files below" in text or text.partition("\n")[0] in JA_HEADS or \
+            "[cp:files below" in text or text.partition("\n")[0] in JA_HEADS + (DEFS_HEAD,) or \
             text.startswith("[cp: lines ending in "):
         return True
     if "[" not in text:
@@ -1403,8 +1484,19 @@ def _encode_lf(text: str, rules: tuple[str, ...]) -> tuple[str, dict]:
                 new = fn(text, "paths" in rules, "paths_win" in rules) if name == "sffiles" else \
                     fn(text, "jsonrows_ext" in rules, "jsonrows_flat" in rules) if name == "jsonrows" else fn(text)
             if new != text and _est(new) <= _est(text) and decode(new) == text:
-                stats["rules"], stats["after"] = [name] + inner, len(new)
+                stats["rules"] = [name] + inner
+                if name in ("jsonrows", "sffiles") and "jsondefs" in rules:   # repeated objects inside the encoding
+                    new2 = _enc_jsondefs(new)
+                    if new2 != new and decode(new2) == text:
+                        new = new2
+                        stats["rules"].append("jsondefs")
+                stats["after"] = len(new)
                 return new, stats
+    if "jsondefs" in rules and text[:1] in "[{" and _jload(text.rstrip("\n")) is not None:
+        new = _enc_jsondefs(text)
+        if new != text and decode(new) == text:
+            stats["rules"], stats["after"] = ["jsondefs"], len(new)
+            return new, stats
     diffy = bool(DIFFY.search(text))
     for name, fn in LINE_ORDER:
         if name not in rules or (name == "blockref" and diffy):

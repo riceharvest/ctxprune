@@ -798,7 +798,11 @@ class McpAndKillSwitch(unittest.TestCase):
             cur = j["hookSpecificOutput"]["updatedMCPToolOutput"]
             for k in path:
                 cur = cur[k]
-            self.assertIn("[cp:rows #1]", cur.split("\n")[0])
+            if cur.startswith("[cp:defs"):                              # jsondefs wraps the rows encoding
+                cur_rows = cur.split("\n[/cp]\n", 1)[1]
+            else:
+                cur_rows = cur
+            self.assertIn("[cp:rows #1]", cur_rows.split("\n")[0])
             self.assertIn(", parent(json), ", cur)                       # key.sub columns: CTXPRUNE_JSONROWS_EXT=1
             self.assertNotIn("parent.type", cur)
             self.assertEqual(decode(cur), text)

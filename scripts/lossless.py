@@ -1188,7 +1188,7 @@ def _compress(text: str, command: str | None, paths: bool | None, paths_win: boo
         if paths_win is None:
             paths_win = paths_win_on()
         keep = lambda r: (r not in FLAG_RULES or r in on) and (paths or r not in ("paths", "paths_win")) and \
-            (paths_win or r != "paths_win") and (rows or not r.startswith("jsonrows"))
+            (paths_win or r != "paths_win") and (rows or not r.startswith(("jsonrows", "jsondefs")))
         text_rules = tuple(r for r in TEXT_RULES if keep(r))
         json_rules_ = tuple(r for r in JSON_RULES if keep(r))
         rs = json_rules_ if json_doc else tuple(r for r in VIEW_RULES if keep(r)) if view_first else text_rules
