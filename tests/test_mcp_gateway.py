@@ -47,3 +47,35 @@ def test_gateway_roundtrip(tmp_path):
     exec(BACKEND.split("for line in")[0].replace("name = sys.argv[1]", "name = 'gh'"), {"json": json, "sys": sys}, ns)
     direct = len(json.dumps(ns["tools"])) * 3
     assert 1 - len(json.dumps(tools)) / direct >= 0.85
+
+
+def test_discovery_turns_scripted_session(tmp_path):
+    """Count the real discovery turns (list_tools + describe_tool tools/call round trips) before the first
+    backend call on one scripted session. The 'agent' is a fixed script, not a model: it shows the protocol
+    minimum (1 turn if the list line carries enough to call, 2 with describe_tool), not a live completion rate."""
+    (tmp_path / "b.py").write_text(BACKEND)
+    (tmp_path / "c.json").write_text(json.dumps({"gh": {"command": [sys.executable, str(tmp_path / "b.py"), "gh"]}}))
+    p = subprocess.Popen([sys.executable, "-m", "ctxprune", "mcp-gateway", "--config", str(tmp_path / "c.json")],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    turns = []
+
+    def call(i, tool, args):
+        turns.append(tool)
+        p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                                  "params": {"name": tool, "arguments": args}}) + "\n")
+        p.stdin.flush()
+        return json.loads(p.stdout.readline())["result"]["content"][0]["text"]
+
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+    p.stdin.flush(); p.stdout.readline()
+    listing = call(2, "list_tools", {"server": "gh"})
+    line = [l for l in listing.splitlines() if l.startswith("gh/gh_op0:")][0]
+    list_only_enough = line.endswith(" (a)")   # required arg names (not types) are on the list line
+    discovery_list_only = len(turns)
+    call(3, "describe_tool", {"name": "gh/gh_op0"})
+    discovery_with_describe = len(turns)
+    call(4, "call_tool", {"name": "gh/gh_op0", "args": {"a": "v"}})
+    p.stdin.close(); p.wait(timeout=5)
+    assert turns == ["list_tools", "describe_tool", "call_tool"]
+    assert list_only_enough
+    assert (discovery_list_only, discovery_with_describe) == (1, 2)
