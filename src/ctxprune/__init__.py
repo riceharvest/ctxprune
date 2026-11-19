@@ -21,6 +21,9 @@ __all__ = [
     "prune_scored",
     "compress_many",
     "DEFAULT_MODEL",
+    "wrap_openai",
+    "wrap_anthropic",
+    "LiteLLMCallback",
 ]
 
 _default = None
@@ -109,6 +112,10 @@ def compress_many(
 
 
 def __getattr__(name: str):  # PEP 562: keep `import ctxprune` import-free for the hook
+    if name in ("wrap_openai", "wrap_anthropic", "LiteLLMCallback"):
+        from . import sdk
+
+        return getattr(sdk, name)
     if name in ("Compressor", "DEFAULT_MODEL", "ScoredText"):
         from . import compress
 
