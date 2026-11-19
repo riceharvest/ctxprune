@@ -1200,8 +1200,9 @@ class PathsWinBySessionModel(unittest.TestCase):
 
     def test_listed_model_hosted_only(self):
         import lossless
+        # (paths_win follows `paths` since card t_edbc761c: the allow-list for sonnet is `paths`' own list)
         with mock.patch.object(lossless, "PATHS_WIN_MODELS", ("claude-opus-",)), \
-                mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "", "CTXPRUNE_PATHS_MODELS": "claude-"}):
+                mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "", "CTXPRUNE_PATHS_MODELS": "claude-opus-"}):
             for target, llm, enc in (("", "claude-opus-5-5", True), ("https://api.anthropic.com", "claude-opus-5-5", True),
                                      ("http://127.0.0.1:8000", "claude-opus-5-5", False), ("", "claude-sonnet-5", False),
                                      ("", "", False)):

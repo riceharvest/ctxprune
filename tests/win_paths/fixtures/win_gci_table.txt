@@ -1,0 +1,38 @@
+
+    Directory: D:\proj\ViewCore\View
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---          12-06-2026 06:00 AM          26381 SchemaHandler.h
+-a---          12-06-2026 06:01 AM          33232 ParseClient.cs
+-a---          12-06-2026 06:02 AM          96030 CoreOptions.cs
+-a---          12-06-2026 06:03 AM          73548 CoreOptions.xaml
+-a---          12-06-2026 06:04 AM          20537 SearchBase.md
+-a---          12-06-2026 06:05 AM          81480 RouterOptions.resx
+-a---          12-06-2026 06:06 AM          30706 ModelsHelper.ts
+-a---          12-06-2026 06:07 AM           5802 UtilOptions.md
+-a---          12-06-2026 06:08 AM          42587 WorkerBase.config
+-a---          12-06-2026 06:09 AM          25332 ParseManager.xaml
+-a---          12-06-2026 06:10 AM          38751 ApiHandler.cs
+
+    Directory: D:\proj\Models\Parse\EventsTests
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---          12-06-2026 06:00 AM          29449 EventsManager.json
+-a---          12-06-2026 06:01 AM            697 RenderManager.csproj
+-a---          12-06-2026 06:02 AM          15820 UtilManager.cs
+-a---          12-06-2026 06:03 AM          85089 EventsHelper.json
+-a---          12-06-2026 06:04 AM          52899 AuthTests.cs
+-a---          12-06-2026 06:05 AM          35619 DbHelper.resx
+
+    Directory: D:\proj\Queue
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a---          12-06-2026 06:00 AM          44566 JobsClient.cpp
+-a---          12-06-2026 06:01 AM          64890 AuthManager.json
+-a---          12-06-2026 06:02 AM          94444 HttpTests.cs
+-a---          12-06-2026 06:03 AM           7425 SyncManager.resx
+-a---          12-06-2026 06:04 AM          40591 JobsHelper.cs
+-a---          12-06-2026 06:05 AM          75649 TaskBase.cs

@@ -1,0 +1,30 @@
+== paths=True paths_win=False
+  linux_compiler_errors         1342 ->  1342    0.0%  []
+  linux_find                    1408 ->   457   67.5%  ['l2_paths']
+  linux_git_diff_name_only       464 ->   464    0.0%  []
+  linux_rel                     2057 ->   692   66.4%  ['l2_paths']
+  win_dir_s_b                   2201 ->  2201    0.0%  []
+  win_gci_fullname              3190 ->  3190    0.0%  []
+  win_gci_table                  615 ->   615    0.0%  []
+  win_git_status                 514 ->   514    0.0%  []
+  win_git_status_short           407 ->   407    0.0%  []
+  win_mixed_sep                 1743 ->  1743    0.0%  []
+  win_msbuild_errors            2118 ->  2118    0.0%  []
+  win_unc                       1705 ->  1705    0.0%  []
+  TOTAL win: 12493 -> 12493  0.0%
+  TOTAL linux: 5271 -> 2955  43.9%
+== paths=True paths_win=True
+  linux_compiler_errors         1342 ->  1342    0.0%  []
+  linux_find                    1408 ->   457   67.5%  ['l2_paths']
+  linux_git_diff_name_only       464 ->   464    0.0%  []
+  linux_rel                     2057 ->   692   66.4%  ['l2_paths']
+  win_dir_s_b                   2201 ->   588   73.3%  ['l2_paths']
+  win_gci_fullname              3190 ->   825   74.1%  ['l2_paths']
+  win_gci_table                  615 ->   615    0.0%  []
+  win_git_status                 514 ->   514    0.0%  []
+  win_git_status_short           407 ->   407    0.0%  []
+  win_mixed_sep                 1743 ->   518   70.3%  ['l2_paths']
+  win_msbuild_errors            2118 ->  2118    0.0%  []
+  win_unc                       1705 ->   449   73.7%  ['l2_paths']
+  TOTAL win: 12493 -> 6034  51.7%
+  TOTAL linux: 5271 -> 2955  43.9%

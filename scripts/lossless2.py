@@ -112,7 +112,9 @@ _CW = r"[^\x00-\x2c\x2e\x2f\x3a-\x40\x5b-\x5e\x60\x7b-\x7f\s]"
 _POSS = "+" if sys.version_info >= (3, 11) else ""   # possessive repeat where nothing after it can backtrack into it
 HIT = re.compile(rf"^((?:[{_A}.@~+-]|{_U}|/(?!/))*(?:[{_A}.@~+-]|{_U})[^\s:]*?)([:-])(\d+)\2(.*)$")   # reference only: see _hit_match
 PATHLINE = re.compile(rf"^(?:\./|~/|/)?(?:(?:[{_A}.@+-]|{_U})+/)+(?:[{_A}.@+-]|{_U})+/?$")
-PATHLINE_WIN = re.compile(rf"^(?:\./|~/|/|[A-Za-z]:\\|\\\\|\.\\)?(?:(?:[{_A}.@+-]|{_U})+[/\\])+(?:[{_A}.@+-]|{_U})+[/\\]?$")
+_S = rf"(?:[{_A}.@+-]|{_U})+(?: (?:[{_A}.@+-]|{_U})+)*"   # a name segment: single interior spaces allowed (Windows)
+PATHLINE_WIN = re.compile(rf"^(?!(?=[^\n]* )(?![^\n]*\\))(?:\./|~/|/|[A-Za-z]:\\|\\\\|\.\\)?(?:{_S}[/\\])+{_S}[/\\]?$")
+# ^ reference only (_pathlike is the matcher): a space inside a segment counts only on a line that has a `\`
 # ^ name chars as in _U (NFD combining marks, Indic vowel signs count). `\`-separated Windows lists (C:\, \\server\share,
 #   .\ roots) only with the rule `paths_win` (lossless.paths_win_on: hosted + probed model, or CTXPRUNE_PATHS_WIN=1):
 #   ship-bytes probe 2026-10-18, Qwen3.6 no-think -11 pt [-18, -6] on them (the reader joins `DIR\` + ` name` keeping
@@ -285,6 +287,13 @@ def _pathlike(ln: str, win: bool = False) -> bool:
     record per char and per segment (one 10 MB `a/b/…` line: 1.6 GB, red team 2). Same answer: an optional root,
     then >= 2 non-empty name segments split by single separators, and at most one trailing separator."""
     run = _CP_SEP_RUN if win else _CP_SLASH_RUN
+    if win and " " in ln and "\\" in ln:
+        # Windows names have spaces (`C:\Program Files\x`, `Contoso Billing`): a single space INSIDE a segment is a name
+        # char (no leading/trailing/double space, so the `[cp:dir]` indent space still marks name lines). Only on lines
+        # that carry a backslash; `/`-only lines keep the no-space rule (prose such as `and/or like this` stays prose).
+        if "  " in ln or any(p != p.strip(" ") for p in _SEP_WIN.split(ln)):
+            return False
+        ln = ln.replace(" ", "_")
     roots = [r for r in (_ROOTS_WIN if win else _ROOTS) if ln.startswith(r)]
     if win and _DRIVE.match(ln):
         roots.append(ln[:3])

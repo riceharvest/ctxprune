@@ -1,0 +1,34 @@
+M  src/Http/ViewHandler.csproj
+ M src/Http/QueueHelper.h
+A  src/Http/IoHandler.resx
+ M src/Http/RouterClient.csproj
+ M src/Http/UtilHandler.cs
+A  src/Http/ViewTests.config
+?? src/Http/ConfigTests.config
+ M src/Http/ParseHelper.cpp
+ M src/Http/ParseHandler.md
+ M src/BillingService/AuthTests/Http/BillingClient.csproj
+ M src/BillingService/AuthTests/Http/NetTests.md
+M  src/BillingService/AuthTests/Http/ConfigHelper.json
+M  src/BillingService/AuthTests/Http/ConfigTests.ts
+A  src/BillingService/AuthTests/Http/SessionClient.json
+A  src/BillingService/AuthTests/Http/SchemaManager.csproj
+M  src/QueueCore/BillingHandler.json
+A  src/QueueCore/StoreClient.cs
+A  src/QueueCore/ApiHandler.cs
+ M src/QueueCore/WorkerManager.h
+A  src/QueueCore/QueueTests.ts
+ M src/QueueCore/ConfigHandler.h
+?? src/QueueCore/CoreBase.cs
+?? src/QueueCore/CoreOptions.csproj
+A  src/QueueCore/ApiHandler.resx
+ M src/QueueCore/ModelsHandler.cs
+ M src/QueueCore/SearchBase.h
+M  src/Http/Models/SyncService/NetTests.config
+?? src/Http/Models/SyncService/AuthManager.json
+?? src/Http/Models/SyncService/QueueManager.h
+A  src/Http/Models/SyncService/CoreHandler.csproj
+ M src/Log/LogService/BillingCore/JobsHelper.cpp
+ M src/Log/LogService/BillingCore/CoreOptions.cpp
+M  src/Log/LogService/BillingCore/SearchManager.h
+A  src/Log/LogService/BillingCore/JobsClient.csproj

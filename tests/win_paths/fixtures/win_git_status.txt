@@ -1,0 +1,46 @@
+On branch feature/billing-retry
+Your branch is up to date with 'origin/feature/billing-retry'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+
+	modified:   src/Http/ViewHandler.csproj
+	modified:   src/Http/QueueHelper.h
+	modified:   src/Http/IoHandler.resx
+	modified:   src/Http/RouterClient.csproj
+	modified:   src/Http/UtilHandler.cs
+	modified:   src/Http/ViewTests.config
+	modified:   src/Http/ConfigTests.config
+	modified:   src/Http/ParseHelper.cpp
+	modified:   src/Http/ParseHandler.md
+	modified:   src/BillingService/AuthTests/Http/BillingClient.csproj
+	modified:   src/BillingService/AuthTests/Http/NetTests.md
+	modified:   src/BillingService/AuthTests/Http/ConfigHelper.json
+	modified:   src/BillingService/AuthTests/Http/ConfigTests.ts
+	modified:   src/BillingService/AuthTests/Http/SessionClient.json
+	modified:   src/BillingService/AuthTests/Http/SchemaManager.csproj
+	modified:   src/QueueCore/BillingHandler.json
+	modified:   src/QueueCore/StoreClient.cs
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+
+	src/QueueCore/ApiHandler.cs
+	src/QueueCore/WorkerManager.h
+	src/QueueCore/QueueTests.ts
+	src/QueueCore/ConfigHandler.h
+	src/QueueCore/CoreBase.cs
+	src/QueueCore/CoreOptions.csproj
+	src/QueueCore/ApiHandler.resx
+	src/QueueCore/ModelsHandler.cs
+	src/QueueCore/SearchBase.h
+	src/Http/Models/SyncService/NetTests.config
+	src/Http/Models/SyncService/AuthManager.json
+	src/Http/Models/SyncService/QueueManager.h
+	src/Http/Models/SyncService/CoreHandler.csproj
+	src/Log/LogService/BillingCore/JobsHelper.cpp
+	src/Log/LogService/BillingCore/CoreOptions.cpp
+	src/Log/LogService/BillingCore/SearchManager.h
+	src/Log/LogService/BillingCore/JobsClient.csproj
+
+no changes added to commit (use "git add" and/or "git commit -a")
