@@ -88,6 +88,14 @@ TOOLS = [
             "path": {"type": "string"}, "query": {"type": "string"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}},
             "required": ["path", "query"]},
+        "name": "search_saved",
+        "title": "Search a saved output",
+        "description": "Search a saved or spilled text output by its file path handle and return matching snippets.",
+        "inputSchema": {"type": "object", "properties": {
+            "handle": {"type": "string", "description": "Path to the saved output (the handle shown by the spill)."},
+            "query": {"type": "string"},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 20, "default": 3}},
+            "required": ["handle", "query"]},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
 ]
@@ -130,6 +138,11 @@ def _pruned(text: str, keep: float, protect: bool | str, query: str | None = Non
 
 def call_tool(name: str, args: dict) -> dict:
     try:
+        if name == "search_saved":
+            from .search_saved import search_saved
+            hits = search_saved(str(args.get("handle", "")), str(args.get("query", "")),
+                                int(args.get("context_lines", 3)))
+            return {"content": [{"type": "text", "text": json.dumps(hits, ensure_ascii=True)}], "isError": False}
         text = _read(args)
         if name == "read_compact":
             out, note = _compact(text)

@@ -1,0 +1,4 @@
+# L4.2 search_saved — result
+Built: src/ctxprune/search_saved.py (stdlib sqlite3 FTS5, one row per line, db 0600 in state dir 0700, 7d TTL prune on connect, idempotent mtime/size reindex), MCP tool `search_saved`, CLI `ctxprune search <handle> <query>`. 0 extra deps. Tests: tests/test_search_saved.py (4 pass).
+Kill gate: TTL cleanup OK, deps OK. Ingest latency BORDERLINE/UNPROVEN: host load avg ~55 so wall time is meaningless (25-75 ms for 66 KB). CPU time (process_time, synchronous=OFF): 7.6-16.8 ms per 66 KB => ~12-25 ms per 100 KB, i.e. around the 20 ms gate. Search 3-8 ms CPU (spec <2 ms not met on 1.1k-line files). Re-measure on an idle box with real 50-500 KB logs before claiming the gate.
+Distribution: agents using Claude Code/Codex via `ctxprune mcp` (tool search_saved) and shell via `ctxprune search`; handle = path shown by spill/digest output. Not yet wired to auto-index on spill.

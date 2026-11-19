@@ -379,6 +379,21 @@ def main(argv: list | None = None) -> int:
     if cmd == "mcp-gateway":
         from .mcp_gateway import main as gateway_main
         return gateway_main(rest)
+    if cmd == "search":
+        import argparse
+        from .search_saved import search_saved
+        ap = argparse.ArgumentParser(prog="ctxprune search")
+        ap.add_argument("handle", help="path of a saved/spilled output")
+        ap.add_argument("query", help="FTS5 search expression")
+        ap.add_argument("--context-lines", type=int, default=3)
+        a = ap.parse_args(rest)
+        try:
+            blocks = search_saved(a.handle, a.query, a.context_lines)
+            print("\n--\n".join(b["snippet"] for b in blocks) if blocks else "no matches")
+        except (OSError, ValueError) as e:
+            print(f"ctxprune search: {e}", file=sys.stderr)
+            return 2
+        return 0
     if cmd == "bundle":
         from .bundle import main as bundle_main
         return bundle_main(rest)
