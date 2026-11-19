@@ -13,6 +13,7 @@
     ctxprune bundle hermes|claude-code DEST           self-contained plugin dirs (catalog / marketplace builds)
     ctxprune hook claude-code                         (called by Claude Code: hook JSON on stdin)
     ctxprune mcp                                      stdio MCP server: read_compact (lossless), read_pruned (lossy)
+    ctxprune mcp-gateway --config FILE                stdio meta-tool gateway for configured MCP servers
   0.2 token pruning (lossy, still supported; model darioooooo0o/ctxprune-small):
     ctxprune FILE [--keep 0.5] [--protect] [--stats]  token-prune a file (or stdin) and print it
     ctxprune serve [--port 8719]                      0.2 HTTP API: POST /compress {"text": ..., "rate": 0.5}
@@ -364,6 +365,9 @@ def main(argv: list | None = None) -> int:
     if cmd == "mcp":
         from .mcp_server import main as mcp_main
         return mcp_main(rest)
+    if cmd == "mcp-gateway":
+        from .mcp_gateway import main as gateway_main
+        return gateway_main(rest)
     if cmd == "bundle":
         from .bundle import main as bundle_main
         return bundle_main(rest)
