@@ -70,6 +70,26 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    {
+        "name": "read_skeleton",
+        "title": "Read source signatures and exact line ranges",
+        "description": ("Read a source file as an outline of imports, classes, functions and type declarations with "
+                        "exact 1-based source line ranges. Opt-in navigation aid; use read_compact for non-code."),
+        "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "required": ["path"]},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "read_symbols",
+        "title": "Read query-ranked source symbols",
+        "description": ("Find symbols relevant to a query using lexical BM25 ranking and return the top matching "
+                        "definitions verbatim with exact line ranges. Read-only; results are source code."),
+        "inputSchema": {"type": "object", "properties": {
+            "path": {"type": "string"}, "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}},
+            "required": ["path", "query"]},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
 ]
 
 
@@ -113,6 +133,14 @@ def call_tool(name: str, args: dict) -> dict:
         text = _read(args)
         if name == "read_compact":
             out, note = _compact(text)
+        elif name in ("read_skeleton", "read_symbols"):
+            from . import code_reader
+            path = os.path.expanduser(str(args.get("path", "")))
+            if name == "read_skeleton":
+                out = code_reader.read_skeleton(path, text)
+            else:
+                out = code_reader.read_symbols(path, text, str(args.get("query", "")), int(args.get("limit", 5)))
+            note = f"[ctxprune: source outline; {len(text.splitlines())} source lines]"
         elif name == "read_pruned":
             keep = float(args.get("keep", 0.5))
             if not 0 < keep <= 1:
