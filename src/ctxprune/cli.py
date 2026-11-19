@@ -1,6 +1,8 @@
 """ctxprune command line.
 
     ctxprune install claude-code|hermes|pi|opencode|dsh|codex|--all [--preset safe|balanced|aggressive]
+    ctxprune wrap claude|opencode|hermes|pi|codex|--all   one line: install the lossless `safe` hook, show the config diff
+    ctxprune unwrap <agent>|--all                     the clean undo of wrap
     ctxprune uninstall <harness>|--all
     ctxprune upgrade [--spec SPEC] [--dry-run]       upgrade the package, then refresh every installed integration
     ctxprune doctor                                   versions + a canary call through every installed integration
@@ -198,6 +200,7 @@ def _install(argv: list, verb: str) -> int:
         if eph and not a.allow_ephemeral:
             print(f"ctxprune runs from a temporary environment ({eph}); the paths it would write into your agent "
                   "configs disappear with it.\nInstall it for good first, then run install again:\n"
+                  "  uvx ctxprune wrap claude   (installs ctxprune for good, then wraps)\n"
                   "  uv tool install ctxprune && ctxprune install --all\n"
                   "  (or: pipx install ctxprune / pip install --user ctxprune)", file=sys.stderr)
             return 2
@@ -238,6 +241,108 @@ def _install(argv: list, verb: str) -> int:
               "). Check it works: ctxprune doctor")
         print(f"See what it saves ({', '.join(targets)}): ctxprune stats; static overhead per agent: ctxprune audit")
     return rc
+
+
+def _unified(path: str, old: str | None, new: str | None) -> str:
+    import difflib
+    a = (old or "").splitlines(keepends=True)
+    b = (new or "").splitlines(keepends=True)
+    if a == b:
+        return ""
+    if len(a) == 0 and len(b) > 40:   # a big new file (a vendored plugin): the path and size, not 300 lines
+        return f"--- /dev/null\n+++ {path}\n@@ new file, {len(b)} lines (ctxprune's own plugin; its first line says so) @@\n"
+    if len(b) == 0 and len(a) > 40:
+        return f"--- {path}\n+++ /dev/null\n@@ file removed, {len(a)} lines @@\n"
+    d = list(difflib.unified_diff(a, b, "/dev/null" if old is None else path, "/dev/null" if new is None else path))
+    out = "".join(x if x.endswith("\n") else x + "\n" for x in d)
+    lines = out.splitlines(keepends=True)
+    return "".join(lines[:60]) + (f"... ({len(lines) - 60} more diff lines)\n" if len(lines) > 60 else "")
+
+
+def _wrap(argv: list, verb: str) -> int:
+    """`ctxprune wrap AGENT`: install (or `unwrap`: uninstall) AGENT's integration, then print the diff of the agent's
+    config files. Same code and manifest as `install`/`uninstall`; under uvx it first installs ctxprune for good."""
+    import argparse
+    import os
+    import subprocess
+    from . import installers as ins
+    ap = argparse.ArgumentParser(prog=f"ctxprune {verb}", description="one-line agent install: the lossless `safe` "
+                                 "hook, nothing lossy; idempotent; `unwrap` removes everything it added")
+    ap.add_argument("agent", nargs="*", metavar="AGENT", help=" | ".join(ins.WRAP_AGENTS) + " (or --all)")
+    ap.add_argument("--all", action="store_true", help="every agent found on this machine (wrap) / installed (unwrap)")
+    ap.add_argument("--no-diff", action="store_true", help="skip the config diff")
+    ap.add_argument("--scope", choices=["user", "project", "local"], default=None, help="claude only, as in install")
+    a = ap.parse_args(argv)
+    bad = [x for x in a.agent if x not in ins.AGENT_ALIASES]
+    if bad:
+        ap.error(f"unknown agent {', '.join(bad)} (choose from {', '.join(ins.WRAP_AGENTS)})")
+    eph = ins.ephemeral_env() if verb == "wrap" else None
+    if eph and not os.environ.get("CTXPRUNE_WRAP_NO_BOOTSTRAP"):   # `uvx ctxprune wrap claude`
+        spec = os.environ.get("CTXPRUNE_WRAP_SPEC") or f"ctxprune=={__version__}"
+        if shutil_which("uv"):
+            cmds = [["uv", "tool", "install", "--force", spec]]
+            bindir = lambda: subprocess.run(["uv", "tool", "dir", "--bin"], capture_output=True, text=True).stdout.strip()
+        elif shutil_which("pipx"):
+            cmds = [["pipx", "install", "--force", spec]]
+            bindir = lambda: os.path.join(os.path.expanduser("~"), ".local", "bin")
+        else:
+            print("ctxprune runs from a temporary environment and neither uv nor pipx was found to install it for "
+                  "good.\nInstall uv (https://docs.astral.sh/uv/) and run again, or: pip install --user ctxprune && "
+                  "ctxprune wrap " + " ".join(a.agent or ["--all"]), file=sys.stderr)
+            return 2
+        print("ctxprune is running from a temporary environment; installing it for good first: "
+              + " ".join(cmds[0]), flush=True)
+        if subprocess.run(cmds[0]).returncode != 0:
+            print("could not install ctxprune; nothing was changed", file=sys.stderr)
+            return 1
+        exe = os.path.join(bindir(), "ctxprune.exe" if os.name == "nt" else "ctxprune")
+        if not os.path.exists(exe):
+            print(f"installed, but {exe} was not found; run `ctxprune {verb} {' '.join(argv)}` from a new shell",
+                  file=sys.stderr)
+            return 1
+        return subprocess.run([exe, verb, *argv]).returncode
+    inst = verb == "wrap"
+    if a.all:
+        targets = [t for t in (ins.detected() if inst else sorted(ins.load_manifest()["harnesses"]))
+                   if t != "dsh" or not inst]   # wrap --all leaves dsh alone (`install dsh` is explicit); unwrap --all removes it
+        if not targets:
+            print("no supported agent found on this machine" if inst else "nothing installed")
+            return 0 if not inst else 1
+    else:
+        targets = list(dict.fromkeys(ins.AGENT_ALIASES[x] for x in a.agent))
+    if not targets:
+        ap.error("name an agent (" + ", ".join(ins.WRAP_AGENTS) + ") or pass --all")
+    if a.scope not in (None, "user") and targets != ["claude-code"]:
+        ap.error("--scope project|local applies to claude only")
+    ins.JOURNAL = journal = {}
+    args = [*targets] + (["--scope", a.scope] if a.scope else [])
+    try:
+        rc = _install(args, "install" if inst else "uninstall")
+    finally:
+        ins.JOURNAL = None
+    if not a.no_diff:
+        mpath = ins.manifest_path()
+        shown = False
+        for path in sorted(journal):
+            if path == mpath or os.path.basename(path).endswith(".json") and os.sep + "backups" + os.sep in path:
+                continue
+            old, new = journal[path], ins._read_safe(path)
+            d = _unified(path, old, new)
+            if d:
+                if not shown:
+                    print("\nconfig diff:")
+                    shown = True
+                print(d, end="")
+        if not shown:
+            print("\nconfig diff: none (nothing changed)")
+    if inst and rc == 0:
+        print("Undo: ctxprune unwrap " + " ".join(a.agent or ["--all"]))
+    return rc
+
+
+def shutil_which(x: str):
+    import shutil
+    return shutil.which(x)
 
 
 def _refresh(argv: list) -> int:
@@ -355,6 +460,8 @@ def main(argv: list | None = None) -> int:
         return 0
     if cmd in ("install", "uninstall"):
         return _install(rest, cmd)
+    if cmd in ("wrap", "unwrap"):
+        return _wrap(rest, cmd)
     if cmd == "upgrade":
         return _upgrade(rest)
     if cmd == "refresh":

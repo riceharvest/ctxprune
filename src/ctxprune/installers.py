@@ -42,7 +42,23 @@ def _read(path: str) -> str | None:
         return None
 
 
+JOURNAL: dict | None = None   # when a dict: path -> text before the first change (for `wrap`'s config diff)
+
+
+def _journal(path: str) -> None:
+    if JOURNAL is not None and path not in JOURNAL:
+        JOURNAL[path] = _read_safe(path)
+
+
+def _read_safe(path: str) -> str | None:
+    try:
+        return _read(path)
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _write(path: str, text: str, mode: int | None = None) -> None:
+    _journal(path)
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     try:
@@ -92,6 +108,8 @@ def _update(harness: str, path: str, new: str, result: dict) -> None:
 
 
 def _remove(path: str, result: dict) -> None:
+    if os.path.isfile(path):
+        _journal(path)
     if os.path.isdir(path) and not os.path.islink(path):
         shutil.rmtree(path)
     elif os.path.lexists(path):
@@ -712,6 +730,11 @@ INSTALL = {"claude-code": install_claude_code, "hermes": install_hermes, "pi": i
            "opencode": install_opencode, "dsh": install_dsh, "codex": install_codex}
 UNINSTALL = {"claude-code": uninstall_claude_code, "hermes": uninstall_hermes, "pi": uninstall_pi,
              "opencode": uninstall_opencode, "dsh": uninstall_dsh, "codex": uninstall_codex}
+
+
+AGENT_ALIASES = {"claude": "claude-code", "claude-code": "claude-code", "claudecode": "claude-code",
+                 "hermes": "hermes", "pi": "pi", "opencode": "opencode", "codex": "codex", "dsh": "dsh"}
+WRAP_AGENTS = ("claude", "opencode", "hermes", "pi", "codex")   # the one-liner's agents (dsh stays `install dsh`)
 
 
 def detected() -> list:

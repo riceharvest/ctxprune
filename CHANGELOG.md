@@ -9,6 +9,16 @@ Every item is opt-in; 0.4.0 entry-point output is unchanged.
   `read_symbols` (MCP tools listed only with `CTXPRUNE_MCP_EXTRA_TOOLS=1`). See docs/lab/ and research/ result files for
   the numbers and what is unmeasured.
 
+## 0.4.1 (2026-11-19)
+
+One-line agent install. No change to compression, the 0.2 / 0.3 API or the lossless output.
+
+- `ctxprune wrap claude|opencode|hermes|pi|codex|--all` installs the lossless `safe` integration and prints the diff of
+  the agent's config files; `ctxprune unwrap AGENT|--all` removes it. Same code, manifest and backups as `install` /
+  `uninstall`, which are unchanged.
+- `uvx ctxprune wrap claude` works: from a temporary uvx environment it first runs `uv tool install ctxprune==VERSION`
+  (pipx if there is no uv), then runs `wrap` from the permanent copy. `ctxprune install` still refuses to run from uvx.
+
 ## 0.4.0 (2026-11-19)
 
 0.4 is the lossy release: a second token-pruning engine and new entry points for `prune()`. The lossless `safe`
