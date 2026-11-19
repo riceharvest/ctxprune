@@ -124,4 +124,8 @@ def __getattr__(name: str):  # PEP 562: keep `import ctxprune` import-free for t
         from .compat import PromptCompressor
 
         return PromptCompressor
+    if name in ("render_notebook", "unescape_notebook_diff", "extract_code_cells"):
+        from . import notebook
+
+        return getattr(notebook, name)
     raise AttributeError(f"module 'ctxprune' has no attribute {name!r}")

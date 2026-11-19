@@ -360,6 +360,9 @@ def main(argv: list | None = None) -> int:
         return _audit(rest)
     if cmd == "compress":
         return _compress(rest)
+    if cmd == "notebook":
+        from .notebook import main as notebook_main
+        return notebook_main(rest)
     if cmd == "proxy":
         return _proxy(rest)
     if cmd == "mcp":
