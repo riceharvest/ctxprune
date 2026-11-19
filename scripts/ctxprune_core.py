@@ -70,6 +70,10 @@ PRESETS: dict[str, dict] = {
     # one step past balanced; the user asked for it, so the harness opt-out below does not apply
     "aggressive": {"model": True, "keep": 0.33, "min_chars": 1500, "select": BALANCED_SELECT, "recoverable": True,
                    "dedup": "model"},
+    # T1.12: safe + the tool-specific spike digests (scripts/digest.py): lockfile diffs, registry JSON, g++ overload
+    # floods, big JSON arrays, ... Lossy by design but the original is always saved and named in the footer; no model.
+    "digest": {"model": False, "keep": 0.5, "min_chars": 2000, "select": "", "recoverable": True, "dedup": "model",
+               "digest": True},
 }
 # Per-harness overrides of `balanced` (wave data, results/consolidated/README.md + matrix-*.md, ratio-of-totals cost):
 #   lossy=False -> balanced runs as safe there unless forced (CTXPRUNE_FORCE_LOSSY=1 / force=True): Codex +36.8%
@@ -183,13 +187,14 @@ class Settings:
     Settings.from_env(); the constructor defaults are the raw pipeline knobs (model on), kept for tests and callers
     that set everything themselves."""
     FIELDS = ("keep", "min_chars", "port", "timeout", "model", "recoverable", "dedup", "harness", "view_model", "state",
-              "preset", "select", "alpha", "guard_turns", "persisted", "target", "llm")
+              "preset", "select", "alpha", "guard_turns", "persisted", "target", "llm", "digest")
 
     def __init__(self, keep: float = 0.5, min_chars: int = 2000, port: int = 8765, timeout: float = 20.0,
                  model: bool = True, recoverable: bool = True, dedup: bool = False, harness: str = "",
                  view_model: bool | None = None, state: str | None = None, preset: str = "", select: str = "",
                  alpha: float | None = None, guard_turns: int = GUARD_TURNS, persisted: str = "drop", target: str = "",
-                 llm: str = ""):
+                 llm: str = "", digest: bool = False):
+        self.digest = digest            # preset `digest`: tool-specific spike digests, original saved (scripts/digest.py)
         self.keep, self.min_chars, self.port, self.timeout = keep, min_chars, port, timeout
         self.llm = llm                  # the session's model id (this request's model, never cached per session): DEDUP_MODELS, PATHS_WIN_MODELS
         self.model = model              # False = lossless only (the `safe` preset)
@@ -236,7 +241,7 @@ class Settings:
                 recoverable=v["recoverable"] and e("CTXPRUNE_RECOVERABLE", "1") != "0",
                 dedup=_preset_dedup(v["dedup"], llm if llm is not None else e("CTXPRUNE_MODEL", "")),
                 llm=llm if llm is not None else e("CTXPRUNE_MODEL", ""),
-                harness=harness, preset=v["preset"],
+                harness=harness, preset=v["preset"], digest=bool(v.get("digest")) and e("CTXPRUNE_DIGEST", "1") != "0",
                 select=env("CTXPRUNE_SELECT", str, v["select"]), alpha=env("CTXPRUNE_ALPHA", float, None),
                 guard_turns=env("CTXPRUNE_GUARD_TURNS", int, GUARD_TURNS), persisted=v["persisted"],
                 target=cc_target() if harness == "claude-code" else e("CTXPRUNE_TARGET", ""))
@@ -417,6 +422,17 @@ def process(text: str, command: str = "", *, tool: str = "", intent: str = "", i
         if new != text:
             rec["stage"] = "lossless"
         out = new
+        if s.digest and not is_error and not is_view(command):
+            try:
+                from digest import digest as _dg, footer as _dgf
+                from recover import _write, private_dir, state_dir
+                d_new, ids = _dg(new, command)
+                if ids:
+                    path = _write(private_dir(state_dir(s.state)), text)   # the ORIGINAL, byte for byte
+                    out = new = d_new + _dgf(ids, path)
+                    rec["stage"], rec["digest"] = "digest", ids
+            except Exception as e:  # noqa: BLE001 - no saved original, no digest
+                rec["digest_error"] = repr(e)[:200]
         if s.model and not model_on and not is_error and len(new) >= s.min_chars:
             rec["v2"] = "guard"   # refetch guard: this session runs safe for a while
         elif model_on and not is_error and len(new) >= s.min_chars:

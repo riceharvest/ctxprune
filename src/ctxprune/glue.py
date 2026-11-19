@@ -33,7 +33,7 @@ MIN_CLAUDE_CODE = (2, 1, 121)   # updatedToolOutput with the full tool object
 HOOK_MATCHER = "Bash|PowerShell|Grep|mcp__.*"   # PowerShell: Windows Claude Code (lands with lossless-transforms)
 # the scripts the shipping paths import (wheel: ctxprune/_rt; checked by `ctxprune doctor`)
 SAFE_MODULES = ("ctxprune_core", "ctxprune_compress", "lossless", "lossless2", "dedup", "recover", "view_safe",
-                "lossless_hook", "emitted", "spill", "read_trim", "render_store", "hook_budget")   # stdlib only: what the self-contained plugin bundles ship
+                "lossless_hook", "emitted", "spill", "read_trim", "render_store", "hook_budget", "digest")   # stdlib only: what the self-contained plugin bundles ship
 MODEL_MODULES = ("v2_hook", "v2_server", "methods", "export_v2_onnx", "line_encode")
 TOOL_MODULES = ("ctx_audit",)   # `ctxprune audit` (local, advice only); not part of the plugin bundles
 RUNTIME_MODULES = SAFE_MODULES + MODEL_MODULES + ("ctxprune_proxy", "ctxprune_note") + TOOL_MODULES
