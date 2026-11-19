@@ -294,6 +294,7 @@ def _compress(argv: list) -> int:
     ap = argparse.ArgumentParser(prog="ctxprune compress")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--command", default="", help="the command that produced the text (enables grep grouping etc.)")
+    ap.add_argument("--redact-secrets", action="store_true", help="mask recognized credentials before compression (reversible only in this process)")
     ap.add_argument("--stats", action="store_true", help="chars before/after on stderr")
     a = ap.parse_args(argv)
     if a.file and a.file != "-":
@@ -302,6 +303,9 @@ def _compress(argv: list) -> int:
     else:
         raw = sys.stdin.buffer.read()
     text = raw.decode("utf-8", "surrogateescape")
+    if a.redact_secrets:
+        from .redact import Redactor
+        text = Redactor().redact(text)
     glue.boot()
     import ctxprune_compress
     out, rec = ctxprune_compress.run(text, command=a.command, harness="cli")
