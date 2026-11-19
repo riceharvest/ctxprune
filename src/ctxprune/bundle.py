@@ -189,7 +189,7 @@ def main():
         os.environ["CTXPRUNE_PRESET"] = "safe"
         g.boot()   # private umask, rt/ on sys.path (appended), CTXPRUNE_OFF + counts-only stats
         import lossless_hook
-        sys.argv = [lossless_hook.__file__]   # dedup: by model once per session (claude-opus-*: on); CTXPRUNE_DEDUP
+        sys.argv = [lossless_hook.__file__]   # dedup: by the current model, per output (claude-opus-*: on); CTXPRUNE_DEDUP
         lossless_hook.main()
     except BaseException:
         pass

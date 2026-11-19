@@ -5,7 +5,7 @@ Shrink what your LLM reads, locally. ctxprune has two parts:
 | you want to... | use | drops content? | what you get |
 |---|---|---|---|
 | shrink tool outputs inside a coding agent (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) | `ctxprune install --all` | **no**: every value stays | ~9% fewer tool-output tokens on MCP-heavy work (12% on Claude Opus), 0.3–4% on coding |
-| shrink prompts, retrieved documents or logs you control (Python, LangChain, LlamaIndex, shell) | `ctxprune.prune(text, keep=0.5)` | **yes**: deletes low-value words | you pick the size; at 50% kept, +15 points of QA accuracy over LLMLingua-2-large |
+| shrink prompts, retrieved documents or logs you control (Python, LangChain, LlamaIndex, shell) | `ctxprune.prune(text, keep=0.5)` | **yes**: deletes low-value words | you pick the size; at 50% kept, +15 points of QA accuracy over LLMLingua-2-large on held-out agent text, level with it on held-out LongBench |
 
 Both run on your machine with no API key, and nothing leaves it.
 
@@ -56,6 +56,7 @@ check fails. [What is exact and what isn't](#what-is-exact-and-what-isnt) has th
 | reading accuracy, Claude Opus 5.5 | `jsonrows`, `a11y` and 4 opt-in rules: −3 to +1 points vs the raw output; dedup −0.2 [−1.8, +1.3] | 100 questions per rule, 450 for dedup |
 | hook latency (Claude Code, fresh process per call) | p50 39 ms, p95 47 ms (runtime 106bcea) | 300 replayed events |
 | token pruning, QA at 50% kept (uncompressed 91.8%) | **68.8%** vs LLMLingua-2-large 53.4%, -base 41.0% | 378 held-out questions, DeepSeek V4 Flash reader |
+| token pruning on LongBench (0.4 query mode, same token budget as LLMLingua-2-large) | **level with** LLMLingua-2-large: +2.36 [−0.70, +5.51] (9-task macro), +0.15 [−2.76, +3.42] without `passage_retrieval_en` | 270 held-out items, Gemma-4-31B reader, query-aware vs query-blind; 21 items share a source document with the dev set ([BENCHMARKS §9](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#9-longbench-rematch-against-llmlingua-2)) |
 
 Brackets are 95% CIs. The agent-hook numbers trace back to scripts and result files in
 [docs/BENCHMARKS.md](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md), and the token-pruning ones to the
@@ -99,8 +100,9 @@ For clients without tool-output hooks, `ctxprune mcp` is a local stdio MCP serve
 
 - `read_compact(path, start_line?, end_line?)`: the lossless `safe` pipeline, for big logs, JSON/MCP dumps, CSV and
   test output. Nothing is dropped.
-- `read_pruned(path, keep=0.5, protect=true)`: token pruning with the model below (lossy). Identifiers, numbers and
-  paths are kept unless `protect=false`.
+- `read_pruned(path, keep=0.5, protect="auto")`: token pruning with the model below (lossy). `protect="auto"` (the 0.4
+  default; it was `true` in 0.3.2) keeps technical text such as IDs, numbers and paths verbatim and prunes plain prose;
+  `protect=true` keeps every identifier, `protect=false` keeps none.
 
 ```json
 { "mcpServers": { "ctxprune": { "command": "uvx", "args": ["ctxprune", "mcp"] } } }
@@ -150,6 +152,33 @@ ctxprune serve                                 # HTTP on 127.0.0.1:8719: POST /c
 
 With LLMLingua: `PromptCompressor(model_name="darioooooo0o/ctxprune-small", use_llmlingua2=True)` needs
 [LLMLingua#261](https://github.com/microsoft/LLMLingua/pull/261).
+
+### New in 0.4: query-aware pruning, shared budgets, `protect="auto"`
+
+0.4 adds an engine and new entry points. **Everything above returns the same bytes as 0.3.2** (checked against a pristine
+0.3.2 install, see the [CHANGELOG](https://github.com/riceharvest/ctxprune/blob/main/CHANGELOG.md)); the new engine runs only
+when you ask for something new.
+
+```python
+import ctxprune
+ctxprune.prune(text, keep=0.33, protect="auto", query="why did the build fail?")   # query-aware, keeps what answers it
+ctxprune.compress_many(docs, keep=0.5, query=q)    # retrieved chunks under one shared budget, overlap removed
+sc = ctxprune.score(text); ctxprune.prune_scored(sc, keep=0.5, query=q)   # score once, slice per query (~0.3 ms)
+ctxprune.prune(json_text, keep=0.5, mode="json")   # shrink JSON values only, the result stays valid JSON
+```
+
+- `protect="auto"` (the default for the new entry points) keeps IDs, numbers and paths in technical text such as logs and
+  tool output and prunes plain prose normally. `protect=True` stays the strictest setting.
+- **What is measured.** On held-out LongBench the query mode is **level with LLMLingua-2-large**, not better
+  (+2.36 [−0.70, +5.51] 9-task macro; the lead comes from `passage_retrieval_en` and `multifieldqa_en`). A zero-model
+  BM25 selector at the same budget is level with it too, so the model's value over lexical query matching is not shown.
+  Without a question (query-blind) it is level on 9 tasks and **worse** without `passage_retrieval_en`
+  (−3.73 [−6.52, −1.14]). On the dev set it also loses `triviaqa` and `lcc`, which two opt-in flags partly recover
+  (`Compressor(fewshot=..., rep_decay=...)`, default off). Details, controls and the 21-item overlap disclosure:
+  [BENCHMARKS §9](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#9-longbench-rematch-against-llmlingua-2).
+- Most of the gain in kept facts on tool output comes from the `protect` setting, not the engine: 0.3.2 with
+  `protect=True` already keeps 97.7% of facts on the proxy test, `protect="auto"` 96.2%, unprotected 0.3.2 62.1%.
+  On a negation-flip probe the polarity-safe rate is 80% for both 0.3.2 and 0.4 (no improvement).
 
 How good it is: at 50% of tokens kept, a reader LLM (DeepSeek V4 Flash) answered 68.8% of 378 held-out questions on
 agent text exactly, vs 53.4% for LLMLingua-2-large and 41.0% for LLMLingua-2-base (uncompressed: 91.8%). It is weaker
@@ -497,7 +526,8 @@ Changes from 0.2.1: [CHANGELOG.md](https://github.com/riceharvest/ctxprune/blob/
 
 Made by [@imdariotoo](https://x.com/imdariotoo). I post my releases on X, so follow there for the next ones.
 
-The GPU work behind this release ran on RTX 5090s from [CloudRift](https://www.cloudrift.ai), provided through their
+The GPU work behind the agent-hook benchmarks (BENCHMARKS §4–§8, first published in 0.3) ran on RTX 5090s from [CloudRift](https://www.cloudrift.ai), provided through their
 AI Builder Grant: the comprehension and long-context probes on open models, the next-action replay against other
 compactors, and the agent-session runs behind the presets. Thanks to CloudRift for the compute. The savings numbers
-and the latency were measured locally on CPU, and the 0.2 token-pruning model was trained on a local GPU.
+and the latency were measured locally on CPU, the 0.2 token-pruning model was trained on a local GPU, and the 0.4 LongBench
+and RAG measurements ran locally (no rented compute).

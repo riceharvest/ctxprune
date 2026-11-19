@@ -170,8 +170,9 @@ are in [BENCHMARKS.md §4](BENCHMARKS.md#4-comprehension-probes).
 Opus passed every default rule and the shipped dedup format. The figures are in §4 of BENCHMARKS.md.
 
 **By model:**
-- **Cross-turn dedup** is on only for `claude-opus-*` served by Anthropic (`ctxprune_core.DEDUP_MODELS`), decided once
-  per session. `CTXPRUNE_DEDUP=0|1` overrides that.
+- **Cross-turn dedup** is on only for `claude-opus-*` served by Anthropic (`ctxprune_core.DEDUP_MODELS`), decided per
+  request (the current model), so a `/model` switch or Claude Code's Opus → Sonnet fallback stops new references at once;
+  results already sent keep their bytes (never re-rendered). `CTXPRUNE_DEDUP=0|1` overrides that.
   - Its references point at text that is still in context, so nothing is lost in principle.
   - **Opus 5.5** followed them: −0.2 [−1.8, +1.3] points over 450 items in the shipped format.
   - **Qwen3.8** answered worse: −7.3 points for whole-output references, −18.0 for line runs and −21.3 for references

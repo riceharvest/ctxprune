@@ -191,7 +191,7 @@ class Settings:
                  alpha: float | None = None, guard_turns: int = GUARD_TURNS, persisted: str = "drop", target: str = "",
                  llm: str = ""):
         self.keep, self.min_chars, self.port, self.timeout = keep, min_chars, port, timeout
-        self.llm = llm                  # the session's model id (decided once per session): DEDUP_MODELS, PATHS_WIN_MODELS
+        self.llm = llm                  # the session's model id (this request's model, never cached per session): DEDUP_MODELS, PATHS_WIN_MODELS
         self.model = model              # False = lossless only (the `safe` preset)
         self.recoverable, self.dedup, self.harness = recoverable, dedup, harness
         # file views (lossless.is_view) get lossless only. Harness data 2026-10-17: holes in `sed -n` views made Codex

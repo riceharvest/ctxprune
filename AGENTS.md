@@ -4,7 +4,7 @@ ctxprune has two parts. Pick the one that matches what the user asked for.
 
 - **Agent hooks (lossless):** rewrites big tool outputs in Claude Code, Hermes, Pi, OpenCode, dsh and Codex into a
   shorter form that keeps every value. Standard library only, no model, no network.
-- **Token pruning (lossy, the 0.2 API):** deletes low-value words from text (prompts, retrieved documents, logs) with a
+- **Token pruning (lossy; the 0.2 API plus the 0.4 query-aware engine):** deletes low-value words from text (prompts, retrieved documents, logs) with a
   140M model that runs on CPU and downloads once from Hugging Face (143 MB, `~/.cache/huggingface`).
 
 Nothing leaves the machine in either part; there is no telemetry.
@@ -36,11 +36,13 @@ some_command 2>&1 | ctxprune --keep 0.33 --protect   # --protect: never drop IDs
 ```python
 import ctxprune
 ctxprune.prune(text, keep=0.5, protect=False)
+ctxprune.prune(text, keep=0.33, protect="auto", query="the question")   # 0.4: query-aware; compress_many(docs, query=) for RAG
 ```
 
 **LangChain / LlamaIndex**: `from ctxprune.integrations import CtxpruneDocumentCompressor` (LangChain document
 compressor) or `CtxpruneNodePostprocessor` (LlamaIndex node postprocessor); both take `rate` and `force_protected`.
 
 Things to tell the user about token pruning:
+- 0.4 query mode on held-out LongBench is level with LLMLingua-2-large (+2.36 [-0.70, +5.51]), not better; see docs/BENCHMARKS.md section 9.
 - It is lossy: at 50% kept, a reader LLM answered 68.8% of questions on our agent-text set vs 91.8% uncompressed.
 - It is weaker on source code and non-English prose; do not use it on files that will be edited.

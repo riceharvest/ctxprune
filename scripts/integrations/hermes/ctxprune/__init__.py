@@ -43,7 +43,7 @@ rewrite is request-local (the session keeps the full outputs; compaction and its
 only on the request prefix, so the provider prompt cache sees the same bytes. Results that stay JSON (a failing
 terminal command: Hermes reads its exit_code) are deduped inside their "output" string and re-serialized exactly.
 Not rewritten: read_file, patch/edit/write, memory, todo, skill_* (PLAN §3.0); they are still counted and referable.
-Chat Completions, Anthropic Messages and Responses request shapes. By model, decided once per session: on for
+Chat Completions, Anthropic Messages and Responses request shapes. By model, decided per request: on for
 claude-opus-* (the Opus 5.5 comprehension probe passed), off for everything else (Qwen3.6/3.8 lost 6-27 pts);
 CTXPRUNE_DEDUP=0|1 overrides.
 """

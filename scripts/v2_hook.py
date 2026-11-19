@@ -12,7 +12,7 @@ settings.json:
      "command": "python3 /abs/scripts/v2_hook.py [--preset balanced] [--keep R] [--min-chars N] [--port 8765]
                  [--persisted skip|keep|drop]"}]}]}}
   Without --preset / CTXPRUNE_PRESET the hook runs the `safe` preset (lossless only, like lossless_hook.py). Cross-turn
-  dedup goes by model, once per session: on for claude-opus-* served by Anthropic (ctxprune_core.DEDUP_MODELS), off
+  dedup goes by the current model, per output (a /model switch or Claude Code's Opus -> Sonnet fallback takes effect at once): on for claude-opus-* served by Anthropic (ctxprune_core.DEDUP_MODELS), off
   otherwise; CTXPRUNE_DEDUP=0|1 or --dedup on|off overrides.
 Before all that (lossless_hook.spill_or_read): a Read goes only to the opt-in boundary trim (read_trim.py,
 CTXPRUNE_READ_TRIM=1; the matcher must then include Read), and a result Claude Code spills to a file goes to spill.py
@@ -98,7 +98,7 @@ def main() -> None:
                                timeout=a.timeout,
                                recoverable=a.recoverable == "on", harness="claude-code")
         from lossless_hook import cc_dedup
-        st.dedup = cc_dedup(ev, a.dedup)   # --dedup, CTXPRUNE_DEDUP, else by model once per session (Opus: on)
+        st.dedup = cc_dedup(ev, a.dedup)   # --dedup, CTXPRUNE_DEDUP, else by the model of THIS call (Opus: on)
         persisted = (a.persisted or st.persisted) if st.model else "skip"   # model off: can't fit inline
         from lossless_hook import spill_or_read
         if spill_or_read(ev, persisted == "skip"):   # Read trim (opt-in) / exact spill files; --persisted keep|drop

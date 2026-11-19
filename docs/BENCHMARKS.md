@@ -6,11 +6,14 @@ file the number is in.
 **Compute.** The GPU runs here (the open-model comprehension and long-context probes in §4, the `balanced` replay and
 agent-session runs in §6, and the competitor replay in §8) ran on rented RTX 5090s from
 [CloudRift](https://www.cloudrift.ai), provided through their AI Builder Grant; §5 is computed from those probe
-answers. §1–3 and §7 ran locally, and the Claude Opus probes ran through Claude.
+answers. §1–3 and §7 ran locally, and the Claude Opus probes ran through Claude. §9 and §10 (0.4) ran
+locally too: the reader on a local Intel Arc B70, the compressors on CPU and a local RTX 3060, with no rented compute.
 
 **Runtime.** Unless noted, numbers are for the ctxprune runtime at research-repo `main` **12c7b79** (2026-10-18).
 This packaging branch is rebased onto that commit, and its wheel vendors `scripts/` unchanged. The re-runs used a
 clean `git archive 12c7b79` export, not a working tree.
+The 0.4 numbers in §9 and §10 come from the 0.4 code at lab commit `707898a`; the reviewer rebuilt 18 held-out arm
+items byte-exact on it and on the later release candidate.
 
 **Traceability.**
 - The study scripts and tables are committed in the research repo (mostly at 3a73482), and I cite those commits.
@@ -469,6 +472,167 @@ How to read it:
   18.3 / 33.4 / 58.3% on mixes 1 / 2 / 3. That run used an earlier ctxprune runtime (8ad8a8b), so its ctxprune row is
   not quoted; §1 has the 0.3.0 numbers.
 - Replay is one step deep: a dropped detail that matters ten turns later isn't seen.
+
+## 9. LongBench rematch against LLMLingua-2
+
+LLMLingua-2's own benchmark, with its own prompts and scorer (`metrics.py`, first-line rule, max over answers), 9 English
+LongBench tasks. Two separate sets, and they must not be mixed up:
+
+- **Held-out (the headline, 9.1):** 270 items never used to build or tune ctxprune 0.4, frozen before use.
+- **Dev-set (9.2):** 256 items the 0.4 code was tuned on. Every number there is dev-set.
+
+Reader for both: Gemma-4-31B-it QAT q4_0 via llama.cpp, temperature 0, thinking off, picked from outside the Qwen and
+DeepSeek families our model was trained from. The reader ran locally (Intel Arc B70), not on rented GPUs.
+
+### 9.1 Held-out: level with LLMLingua-2-large
+
+**ctxprune 0.4 in query mode is level with LLMLingua-2-large on held-out LongBench. It does not beat it.**
+
+- Items: 30 per task from 9 tasks (270). The configuration (code commit, flags, budget rule, statistics) was written down
+  and hashed before any ctxprune arm was built (`frozen_config.json` sha256 `32c11b71…966670ea`, committed in the
+  research repo at `36b5ddb`). The held-out set was read once.
+- **Disclosure:** 0 items overlap the dev set exactly, but 21 of the 270 share a source document with a dev item
+  (18 of the 30 `qmsum` items, 2 `multifieldqa_en`, 1 `qasper`). Results without them are given below.
+- Budget: ctxprune and the BM25 baseline are matched per item to the token count LLMLingua-2-large actually produced
+  (o200k): mean 2,038 vs 2,051 tokens (0.993x), no item above 1.020x, no fallbacks. LLMLingua-2 ran natively
+  (`target_token=2000`, `drop_consecutive=True`).
+- **Query-aware vs query-blind.** `v04_query` is given the question (`query=`); LLMLingua-2 and `v04_agnostic` are not.
+  `gov_report` and `lcc` have no question, so there `v04_query` equals `v04_agnostic`. `bm25_only` is a zero-model baseline:
+  the same unit splitter, ranked by BM25 against the question, at the same budget.
+
+Per-task score (LLMLingua metrics x100), 30 items per task:
+
+| task | LLMLingua-2-large | v04 query-blind | **v04 query** | BM25 only |
+|---|---:|---:|---:|---:|
+| qasper | 51.9 | 49.0 | 49.2 | 47.1 |
+| multifieldqa_en | 50.0 | 50.6 | 58.5 | 56.9 |
+| hotpotqa | 54.9 | 39.1 | 48.8 | 47.3 |
+| 2wikimqa | 58.8 | 48.9 | 59.9 | 53.6 |
+| gov_report | 25.8 | 25.7 | 25.9 | 26.9 |
+| qmsum | 22.1 | 20.5 | 22.1 | 23.8 |
+| triviaqa | 88.4 | 89.1 | 89.1 | 85.7 |
+| passage_retrieval_en | 80.0 | 98.3 | 100.0 | 96.7 |
+| lcc | 10.5 | 9.7 | 10.1 | 19.2 |
+| **macro, 9 tasks** | 49.15 | 47.87 | 51.51 | 50.80 |
+| macro, 8 tasks (no `passage_retrieval_en`) | 45.29 | 41.56 | 45.45 | 45.06 |
+
+Paired differences (2,000 bootstrap resamples within task, 95% CIs):
+
+| comparison | macro, 9 tasks | macro, 8 tasks | reading |
+|---|---|---|---|
+| v04 query − LLMLingua-2-large | **+2.36 [−0.70, +5.51]** | +0.15 [−2.76, +3.42] | level with |
+| ... without the 21 dev-shared-document items (n=249) | +1.93 [−1.14, +5.27] | −0.32 [−3.42, +2.72] | level with |
+| v04 query-blind − LLMLingua-2-large | −1.28 [−4.12, +1.55] | **−3.73 [−6.52, −1.14]** | level on 9 tasks, worse on 8 |
+| v04 query − BM25 only | +0.71 [−1.77, +3.40] | +0.38 [−2.34, +3.33] | level with |
+| ... n=249 | +0.30 [−2.14, +2.93] | | level with |
+| v04 query − v04 query-blind | **+3.64 [+1.06, +6.31]** | +3.88 [+0.99, +6.84] | seeing the question helps |
+| ... n=249 | +3.40 [+0.82, +6.04] | | |
+
+What it says:
+
+- The 9-task lead of the query mode over LLMLingua-2-large comes from two tasks: `passage_retrieval_en` (+20.0
+  [+6.7, +33.3]; the question is matched to its paragraph, a lexical shortcut) and `multifieldqa_en` (+8.5 [+3.3, +14.7]).
+  It is lower on `hotpotqa` (−6.1 [−17.0, +4.0]) and `qasper` (−2.7 [−8.7, +3.6]); `qmsum` and `lcc` are level
+  (−0.0, −0.4). Without `passage_retrieval_en` the difference is +0.15.
+- **The neural model's added value over lexical query matching is not shown:** a zero-model BM25 selector at the same
+  budget is level with `v04 query` (+0.71 [−1.77, +3.40]).
+- **Query-blind mode** (no question, the use case LLMLingua-2 is built for) is **worse** than LLMLingua-2-large without
+  `passage_retrieval_en`: −3.73 [−6.52, −1.14]; on the four QA tasks −7.00 [−12.10, −2.29]; `hotpotqa` −15.8
+  [−28.4, −4.8]. Its only large win is `passage_retrieval_en` (+18.3 [+5.0, +33.3]).
+- Query-aware and query-blind are different problems. We did not run LongLLMLingua (the question-aware LLMLingua
+  family), so **there is no claim here against it.**
+
+Smaller arms (10 items per task, 90 items, chosen before the run; wide CIs): LLMLingua-2-base, the 0.3.2 engine and random
+atom deletion at the same budget.
+
+| comparison (n=90) | macro, 9 tasks | macro, 8 tasks |
+|---|---|---|
+| v04 query − random deletion | +12.90 [+6.82, +19.05] | +7.02 [+1.14, +13.23] |
+| LLMLingua-2-large − random deletion | +10.49 [+3.08, +17.62] | +5.55 [−0.40, +11.97] |
+| v04 query − LLMLingua-2-base | +8.08 [+2.13, +14.14] | +5.34 [−0.20, +11.20] |
+| v04 query-blind − LLMLingua-2-base | +3.26 [−1.89, +8.78] | +0.55 [−3.94, +5.57] |
+| v04 query − 0.3.2 engine | +3.50 [−2.09, +9.00] | −2.31 [−7.13, +2.49] |
+| v04 query-blind − 0.3.2 engine | −1.32 [−7.24, +4.79] | −7.11 [−13.09, −1.56] |
+
+The +8.08 against LLMLingua-2-base is a query-aware method against a query-blind one, on 90 items, and its 8-task CI
+touches 0; it is not a "beats LLMLingua-2-base" result. Against the 0.3.2 engine the 0.4 query mode is level. Random
+deletion scores far lower, so the test does detect information loss. Positive control: on a 30-item uncompressed
+subset (3-4 items per task) the compressed arms read worse than the full text (v04 query −8.25 [−12.89, −3.95],
+LLMLingua-2-large −5.39 [−10.94, +0.64]). Re-reading 60 rows with an empty cache gave 51 identical answers, with
+mean per-arm score shifts of at most 0.11.
+
+**Power.** The pre-registered detectable difference at n=270 was about 4.8 points; the hypothesised +2 sat below it, so a
+true +2 would usually read as "level with". It did.
+
+Deviations, all disclosed: the first uncompressed-baseline run was invalid (the llama.cpp Vulkan server crashed; the 29
+error answers were removed from the cache and the arm was re-run); the reader ran ~7.3 h locally; mean tokens were
+counted with o200k, not in Gemma tokens (the reviewer audited the reader's own token counts: 0.9817x for the 0.4
+arms against LLMLingua-2-large, no truncation). Review: **WEAKER** (numbers and freeze order reproduce; the wording above is
+what the reviewer allowed). Raw answers, scripts and the review are in the research repo (commit `493f658`,
+`research/v04_code/lab/heldout/gate/`).
+
+### 9.2 Dev-set (the 0.4 code was tuned on these items)
+
+The earlier rematch: 256 items (30 per task, 16 for `lcc`), the same reader and scorer, ctxprune matched per item to
+LLMLingua-2-large's token count (plain 1.006x, `protect` 1.049x because forced IDs cannot be dropped). LLMLingua-2 ran
+natively at `target_token=2000` (this page said "rate 0.33" before; that was wrong). **The 0.4 code was tuned on exactly
+these items, so the 0.4 columns are dev-set results and are not evidence of a win.** The 0.3.2 columns were not tuned on
+them.
+
+| task | LLMLingua-2-base | LLMLingua-2-large | 0.3.2 | 0.3.2 `protect` | v04 query-blind | v04 query |
+|---|---:|---:|---:|---:|---:|---:|
+| qasper | 45.4 | 49.6 | 49.8 | 48.7 | 47.7 | 50.5 |
+| multifieldqa_en | 41.3 | 42.5 | 42.7 | 38.1 | 40.8 | 58.4 |
+| hotpotqa | 39.1 | 46.8 | 49.7 | 46.4 | 54.9 | 72.1 |
+| 2wikimqa | 53.4 | 56.2 | 54.7 | 52.9 | 51.5 | 52.0 |
+| gov_report | 25.3 | 25.7 | 24.8 | 24.4 | 24.6 | 25.0 |
+| qmsum | 21.4 | 23.2 | 16.4 | 16.0 | 22.2 | 23.8 |
+| triviaqa | 90.4 | 90.4 | 90.4 | 87.1 | 90.4 | 83.8 |
+| passage_retrieval_en | 80.0 | 83.3 | 63.3 | 80.0 | 100.0 | 100.0 |
+| lcc (n=16) | 8.6 | 9.0 | 14.6 | 14.2 | 8.7 | 8.7 |
+| **macro, 9 tasks** | 45.0 | 47.4 | 45.2 | 45.3 | 49.0 | 52.7 |
+
+Paired differences to LLMLingua-2-large (dev-set): 0.3.2 −2.3 [−6.0, +1.5] (level with LLMLingua-2-base, not better than
+-large), 0.3.2 `protect` −2.1 [−6.2, +1.9], v04 query-blind +1.6 [−1.3, +4.6], v04 query +5.3 [+2.0, +8.5].
+**The dev-set +5.3 did not replicate on held-out (+2.36 [−0.70, +5.51], 9.1).**
+
+**Losses on the dev set, shown on purpose:**
+
+- **`triviaqa`** (83.8 for v04 query vs 90.4): the whole gap is two items on which the reader answered "not mentioned in
+  the passage"; neither 0.4 mode keeps the `Question:`/`Answer:` markers of the 24 few-shot examples.
+- **`lcc`** (8.7 vs 14.6 for 0.3.2): one item (`lcc-3`, 83 → 0) accounts for the gap; the reader answers in prose on 14
+  of 16 items in every arm. This is a known regression of the 0.4 engine on source code.
+- **`passage_retrieval_en`** scores 100 in both 0.4 modes (0.3.2 without `protect`: 63.3). That is a paragraph-number
+  match, a BM25-style shortcut, which is why 9.1 also gives the 8-task numbers.
+- Without `passage_retrieval_en` the dev-set margin over LLMLingua-2-large is +3.84 [+0.35, +7.11].
+
+Opt-in fixes (default off, so 0.4 output is unchanged unless you turn them on): `Compressor(fewshot="pin"|"noquery"|"both")`
+and `Compressor(rep_decay="prose"|...)`. On the dev set only, with `fewshot="pin"` and `rep_decay="prose"`: triviaqa 92.67
+(was 83.78; two items, CI [0.0, +20.0]), `lcc` 14.69 (was 8.69; one item; on the 30-item dev extension 11.17 vs 6.97,
+CI includes 0, and 0.3.2 scores 18.00), 9-task macro 54.27 (was 52.69; +1.58 [+0.09, +3.56]). Because the lcc effect is not
+robust and the registered gate as a whole was not met, they stay opt-in. The review of this experiment: **WEAKER** (numbers reproduce;
+"recovers / level with", not "fixed"). Evidence: research repo `research/v04_code/lab/dev_fix/`.
+
+## 10. Other 0.4 measurements (dev-set or offline proxy, not held-out, not independently reviewed)
+
+Gemma-4-31B-it reader unless stated. These are screens used while building 0.4; none of them is a held-out result.
+
+| probe | 0.3.2 | LLMLingua-2-large | v0.4 | note |
+|---|---:|---:|---:|---|
+| multi-document RAG, F1 (`compress_many`, n=30, shared 0.5 budget) | 72.5 (4,835 tokens) | | **75.3** (4,813) | +2.8 F1, n=30, dev-set |
+| `llmlingua_facts`: share of 605 facts kept (n=120 chunks, `protect="auto"`) | 62.1% | 86.6% | **96.2%** | offline proxy; 0.3.2 with `protect=True` scores 97.7% |
+| MCP JSON: valid JSON / scalar recall (n=40 at 0.5) | 0.0% / 50.0% | 0.0% / 71.4% | **100.0% / 95.8%** | JSON-values mode |
+| negation probe (n=40): `polarity_safe` | 80.0% (F1 44.8) | 47.5% (F1 48.8) | **80.0%** (F1 49.3) | **no improvement** on polarity safety: 0.3.2 and 0.4 are equal |
+| query-time slicing, 10 pre-scored chunks | | | 0.30 ms (1.05 ms before the cache) | cached anchor plan, byte-identical output; commit message numbers, CPU |
+
+How to read it:
+
+- The facts gain is mostly the `protect` flag, not the 0.4 engine: 0.3.2 with `protect=True` keeps 97.7% of the facts,
+  `protect="auto"` 96.2%, and 0.3.2 without protection 62.1%. The 0.4 `auto` mode's advantage is that it prunes plain prose
+  while keeping technical text intact; it is not a higher fact-retention score.
+- On the negation probe 0.4 matches the 0.3.2 polarity-safe rate (80.0%) and does not improve it; both are far above
+  LLMLingua-2-large (47.5%). n=40 is too few to see a small difference.
+- The RAG result is n=30 on the dev set (+2.8 F1); an offline answer-hit proxy on the same 30 items gave 80.0% vs 73.3%.
 
 ## Not quoted, and why
 

@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.4.0 (2026-11-19)
+
+0.4 is the lossy release: a second token-pruning engine and new entry points for `prune()`. The lossless `safe`
+stack that the Claude Code hook, the Hermes / Pi / OpenCode / dsh plugins, the MCP server and the Codex proxy use is
+unchanged in its output (two safety fixes below). The 0.2 / 0.3 API returns the same bytes as 0.3.2.
+
+### Headline (held-out, with its limits)
+
+- **ctxprune 0.4 in query mode is level with LLMLingua-2-large on held-out LongBench. It does not beat it.** 270 items
+  never used to tune 0.4 (30 per task, 9 English tasks), Gemma-4-31B reader, same token budget as LLMLingua-2-large:
+  **+2.36 [-0.70, +5.51]** 9-task macro, +0.15 [-2.76, +3.42] without `passage_retrieval_en`. The question-aware ctxprune
+  mode is compared with a question-blind LLMLingua-2, and no comparison with LongLLMLingua was run.
+- **21 of the 270 held-out items share a source document with a dev-set item** (18 of 30 `qmsum`, 2 `multifieldqa_en`,
+  1 `qasper`; no item is identical). Without them (n=249): +1.93 [-1.14, +5.27] macro9, -0.32 [-3.42, +2.72] macro8.
+- **Not shown:** a zero-model BM25 selector at the same budget is level with the query mode (+0.71 [-1.77, +3.40]), so the
+  neural model's added value over lexical query matching on LongBench is not shown. Query-blind mode is level on 9 tasks
+  and **worse** without `passage_retrieval_en` (-3.73 [-6.52, -1.14]; `hotpotqa` -15.8 [-28.4, -4.8]). The 9-task lead
+  comes from `passage_retrieval_en` (+20.0) and `multifieldqa_en` (+8.5); `hotpotqa` (-6.1) and `qasper` (-2.7) are lower.
+- The review of this result (a different model family, from raw files) is **WEAKER**: the numbers reproduce, and the
+  wording above is what it allowed. The pre-registered claim "beats LLMLingua-2-large" failed (CI lower bound below 0),
+  so it is not made. On a 90-item subset the query mode is +8.08 [+2.13, +14.14] over LLMLingua-2-base, but that is a
+  query-aware method against a query-blind one and the 8-task interval includes 0 (+5.34 [-0.20, +11.20]).
+- Dev-set only (the 0.4 code was tuned on these 256 items): query mode +5.3 [+2.0, +8.5] over LLMLingua-2-large, which
+  did **not** replicate held-out. The dev set also shows **losses**: `triviaqa` 83.8 vs 90.4, `lcc` 8.7 vs 14.6 (0.3.2),
+  `passage_retrieval_en` is a lexical shortcut. All of it is in [docs/BENCHMARKS.md §9](docs/BENCHMARKS.md#9-longbench-rematch-against-llmlingua-2).
+
+### What is new
+
+- **`ctxprune.prune(text, keep, protect="auto", query=..., mode=..., unit=..., clean_web=...)`**: the v0.4 engine, selected
+  whenever a call uses something 0.3.2 did not have. `protect="auto"` keeps IDs, numbers and paths in technical text and
+  prunes prose; `protect="ids"` keeps identifiers only; `protect=True` is still the strictest.
+- **Query-aware pruning** (`query=`) spends the budget on the parts of the text that match the question.
+- **`compress_many(docs, keep, query=, scores=)`**: retrieved chunks under one shared budget with overlap removed.
+  RAG QA (Gemma-4-31B, n=30, dev-set): F1 **75.3 vs 72.5** for flat 0.3.2 pruning, at slightly fewer tokens.
+- **`score()` / `prune_scored()`**: score a text once, slice it per query without running the model
+  (0.30 ms per 10 chunks; 1.05 ms before the anchor plan was cached, same output).
+- **`mode="json"`** shrinks JSON values only (`mode="auto"` tries the lossless rules first, then JSON values); on 40 MCP-style results the output was valid JSON every time
+  (95.8% scalar recall at 0.5 kept; 0.3.2 gave 0.0% valid).
+- Smaller engine changes: negation anchors, intra-document repetition decay, paragraph and header preservation,
+  `clean_web=True`, a lexical two-stage cascade (`fast=True`, opt-in) and overlapping windows (`overlap=`, opt-in,
+  off by default; it did not clear its gate).
+- `ctxprune.compat.PromptCompressor`: the LLMLingua-style class on the new engine.
+- Opt-in `Compressor(rep_decay="prose"|..., fewshot="pin"|"noquery"|"both")`, off by default (output unchanged when
+  unset). Dev-set only: triviaqa 92.67 (was 83.78) and lcc 14.69 (was 8.69; one item decides it, and on the 30-item
+  extension 11.17 vs 6.97 with the interval including 0; 0.3.2 scores 18.00). They stay off by default because of
+  that, and `lcc` is still a known regression of the 0.4 engine on source code.
+- Measured on the dev set or offline proxies, none of it held-out (BENCHMARKS §10): 96.2% of facts kept on tool output
+  and prose with `protect="auto"` (0.3.2 default 62.1%, but **0.3.2 with `protect=True` already keeps 97.7%**, so that
+  gain is the `protect` setting, not the engine). **Negation probe, n=40: `polarity_safe` is 80.0% for both 0.3.2 and 0.4:
+  no improvement.**
+
+### Compatibility
+
+- **The 0.2 / 0.3 API returns the same bytes as 0.3.2.** `prune(text, keep[, protect])`,
+  `Compressor().compress(text, rate=..., force_protected=bool, keep_structure=..., unit="chars"|"tokens"|callable,
+  threshold=..., measure=...)`, `ctxprune FILE --keep [--protect]`, `ctxprune serve` `POST /compress` without the new
+  fields, and `CtxpruneDocumentCompressor` / `CtxpruneNodePostprocessor` with their defaults run the frozen 0.3.2 path
+  (`ctxprune/_v032.py`). Checked against a pristine 0.3.2 install with the release probes (`probe_api.py`,
+  `probe_cli.sh`) and 132 further call shapes; golden 0.3.2 outputs are in `tests/golden/`.
+- The v0.4 engine runs when a call asks for something 0.3.2 did not have: `protect="auto"|"ids"`, `query=`, `mode=`,
+  `clean_web=`, `fast=`, `unit="tokens_est"|"o200k"|"cl100k"`, `Compressor(engine="v04")`, or a constructor option that
+  did not exist before (`rep_decay`, `fewshot`, `overlap`); there an unset `protect` means `"auto"`. `compress_many`,
+  `score`, `prune_scored`, `ctxprune.compat.PromptCompressor` and `ctxprune mcp` always use it.
+  LangChain / LlamaIndex classes: `force_protected="auto"` turns on query-aware, shared-budget pruning.
+- `Compressor(engine="auto"|"v04"|"v032")` pins an engine. `prune(..., protect=None, unit=None)` and
+  `Compressor.compress(force_protected=None, unit=None)` now default to "unset" (was `False` / `"chars"`); an unset value
+  keeps the 0.3.2 meaning unless a new option is used.
+- **One deliberate behaviour change: `ctxprune mcp` `read_pruned` now defaults to `protect="auto"` (it was `true` in
+  0.3.2)** and runs the v0.4 engine. Pass `protect=true` for the 0.3.2 behaviour.
+- Other differences that are not output: new constructor keywords and signatures, the legacy CLI `--help` text, and ONNX
+  threads default to `min(cpu, 4)`.
+
+### Lossless `safe` stack
+
+- Output unchanged: the lossless suite, the hook / plugin / MCP smoke tests and the Codex-proxy tests pass on this release
+  (release gate, run on the tagged tree).
+- **Safety (two residual holes closed).** The proxy now clears its per-request dedup state at the start of every request:
+  a request that failed during setup (and went out unchanged, fail-open) could leave its Opus dedup session in a
+  thread-local, so the next request on the same keep-alive connection (for example a Sonnet request) got dedup
+  references. For Anthropic-format traffic the render store also never evicts a pin that changed a result's bytes (not
+  by age, not over the size cap, not at open): losing one makes a resumed conversation's history differ from what was
+  sent, which is a 400 on the Claude 5.x thinking models. Docs now say what the code already did: cross-turn dedup is
+  decided per request by the current model. The Hermes, Pi and OpenCode context stores do not call the pin hold yet.
+
 ## 0.3.2 (2026-11-18)
 
 - **`ctxprune mcp`**: a stdio MCP server for clients without tool-output hooks (Claude Desktop, Cursor, Cline, ...).

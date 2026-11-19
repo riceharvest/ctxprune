@@ -3879,7 +3879,8 @@ def sim_1302() -> dict:
         full, dig = _explore(real), _explore(mir)
         t_full, t_dig = sum(tokens(v) for v in full.values()), sum(tokens(v) for v in dig.values())
         assert t_dig < 0.15 * t_full, f"the scripted exploration should cost under 15% of the real tree ({t_dig} vs {t_full} tokens)"
-        assert dig["cat src"] == full["cat src"] and dig["ls -R"] == full["ls -R"] and dig["find"] == full["find"], "source files and the tree shape are the real thing"
+        # `find` does not promise traversal order; compare its actual file set.
+        assert dig["cat src"] == full["cat src"] and dig["ls -R"] == full["ls -R"] and sorted(dig["find"].splitlines()) == sorted(full["find"].splitlines()), "source files and the tree shape are the real thing"
         # --- five questions: four are answered the same from the mirror, one cannot be and says so
         q = {}
         q["lodash version pinned"] = ("lodash@4.17.21" in dig["cat lock"], json.loads(full["cat lock"])["packages"]["node_modules/lodash"]["version"] == "4.17.21")

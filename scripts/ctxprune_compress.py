@@ -298,7 +298,7 @@ def main_context(harness: str, log: str | None) -> int:
 
 
 def main() -> int:
-    for x in sys.argv[1:]:   # --dedup-for=MODEL: "1" / "0" (the plugins ask once per session; one allow-list, in core)
+    for x in sys.argv[1:]:   # --dedup-for=MODEL: "1" / "0" (the plugins ask per model id, per request; one allow-list, in core)
         if x.startswith("--dedup-for="):
             try:
                 from ctxprune_core import dedup_on

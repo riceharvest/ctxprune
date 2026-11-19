@@ -37,7 +37,7 @@ def _hook(argv: list) -> int:
         from . import glue
         glue.boot()
         v = glue.resolved("claude-code")
-        dedup = glue.dedup_flag(v)   # [] = by model, decided once per session by the hook (claude-opus-*: on)
+        dedup = glue.dedup_flag(v)   # [] = by model, decided per output by the hook (claude-opus-*: on)
         if v.get("model"):   # a lossy preset: v2_hook resolves keep/min_chars/persisted from the same table
             import v2_hook as h
             args = ["--preset", v.get("requested") or v["preset"]] + dedup

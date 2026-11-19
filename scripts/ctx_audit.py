@@ -1270,7 +1270,8 @@ def self_test() -> None:
             lines.append(rec)
 
         sys_prompt = "You are a coding agent. " * 200 + CANARY                     # 5,000+ chars
-        tools = [{"name": "Bash", "description": "run " * 500 + CANARY, "input_schema": {}}]
+        tools = [{"name": "Bash", "description": "run " * 500 + CANARY, "input_schema": {}},
+                 {"name": "Artifact", "description": "art " * 100, "input_schema": {}}]   # T2.1: never verified
         lines.append({"type": "attachment", "attachment": {"type": "prompt_snapshot", "systemPrompt": [sys_prompt],
                                                            "tools": tools}})
         add({"type": "attachment", "attachment": {"type": "hook_success", "hookEvent": "SessionStart",
@@ -1369,6 +1370,13 @@ def self_test() -> None:
         assert not any(s["category"] == "large hook injection" for s in sug)            # no double count
         bash_s = [s for s in sug if "'Bash'" in s["what"]]
         assert bash_s and not bash_s[0]["verified"], bash_s                            # deny of Bash not verified
+        # T2.1 (c): Artifact has no verified removal (`disableArtifact` / deny "Artifact": absent from API-key and
+        # fake-OAuth sessions, results/billmap/stubcheck/README.md), so it is reported as [unverified] and never in the
+        # savings total; the bare-name deny that IS verified (the 18 tools of VERIFIED_DENY_TOOLS) is untouched.
+        assert "Artifact" not in VERIFIED_DENY_TOOLS and "disableArtifact" not in VERIFIED_DENY_TOOLS
+        art_s = [s for s in sug if "'Artifact'" in s["what"]]
+        assert art_s and not art_s[0]["verified"], art_s
+        assert "no setting verified to remove this tool's schema" in art_s[0]["what"], art_s
         assert all(s["verified"] for s in sug if s["category"] in ("unused MCP server", "unused plugin"))
         assert "[unverified, not in total]" in text and "verified mechanisms only" in text
         assert "disableBundledSkills" not in text.replace("NOT disableBundledSkills", "")

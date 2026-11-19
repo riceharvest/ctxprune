@@ -2019,7 +2019,7 @@ def _oracle_989(x: str, e: str) -> bool:
 
 
 def _load_atoms():
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(harness.HERE))), "ctxprune", "atoms.py")
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(harness.HERE))), "src", "ctxprune", "atoms.py")
     import sys
     name = "ctxprune_atoms_for_989"
     spec = importlib.util.spec_from_file_location(name, path)

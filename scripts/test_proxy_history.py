@@ -289,5 +289,138 @@ class History(unittest.TestCase):
         self.assertGreaterEqual(s.live_s, 365 * 86400)
 
 
+# ---------------------------------------------------------------- T2.1 (v0.4): per-request dedup + pins that never go
+REF = "identical to"   # dedup.py WHOLE / MARK text: only a dedup reference contains it
+
+
+class Gate(History):
+    """T2.1 canaries on the same proxy + stub upstream as History (dedup decided BY MODEL here, not forced on)."""
+
+    def start(self, **kw):
+        kw.setdefault("dedup", None)
+        super().start(**kw)
+
+    def fresh(self, api: str) -> dict:
+        """A conversation of its own: the session seed (system + first message) keys clears_seen / pin state that
+        lives in the shared CTXPRUNE_STATE dir, so History's server_clears run must not reach these."""
+        conv = APIS[api][1]()
+        msgs = conv["messages"]
+        msgs[-1 if api == "chat" else 0]["content"] = f"gate {self.id()}"
+        return conv
+
+    def turn_texts(self, body: dict) -> list:
+        return [b["content"] for m in body["messages"] if m["role"] == "user" and isinstance(m["content"], list)
+                for b in m["content"] if b.get("type") == "tool_result"]
+
+    def test_model_switch_opus_sonnet_haiku_opus(self):
+        """Opus -> Sonnet -> Haiku -> Opus mid-session (/model, or Claude Code's usage-limit fallback): a result that
+        arrives while the request's model is not Opus never gets a dedup reference; Opus gets them again; history
+        already sent is byte-stable at every step (the switch is the one event the cache can't survive anyway)."""
+        path, _, turn = APIS["anthropic"]
+        conv = self.fresh("anthropic")
+        models = ["claude-opus-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"]
+        sent = []
+        for k, model in enumerate(models, start=1):
+            turn(conv, k, grep_out("word"))   # the same output every turn: a dedup candidate each time
+            conv["model"] = model
+            sent.append(self.post(path, copy.deepcopy(conv)))
+            if k > 1:
+                self.assert_prefix("anthropic", sent[-2], sent[-1], f"{model} turn {k}")
+        last = [self.turn_texts(b)[-1] for b in sent]
+        self.assertIn(REF, last[1], "Opus: a repeated output is deduped")
+        self.assertNotIn(REF, last[2], "Sonnet: new result must carry no dedup reference")
+        self.assertNotIn(REF, last[3], "Haiku: new result must carry no dedup reference")
+        self.assertIn(REF, last[4], "back on Opus: dedup is on again")
+
+    def test_failed_setup_does_not_leak_a_dedup_session(self):
+        """rewrite() keeps its per-request state in thread-locals; a request that raised during setup (fail-open: the
+        original bytes go out) must not leave the Opus DedupSession for the next request on that thread (HTTP/1.1
+        keep-alive reuses the handler thread): that request is a Sonnet one."""
+        path, _, turn = APIS["anthropic"]
+
+        def body(model: str, n: int = 2) -> bytes:
+            conv = self.fresh("anthropic")
+            conv["model"] = model
+            for k in range(1, n + 1):
+                turn(conv, k, grep_out("word"))
+            return json.dumps(conv).encode()
+
+        cp.rewrite("anthropic", body("claude-opus-5-5", 1))   # turn 1 pinned (compressed), as the earlier request
+        real = cp.clears_seen
+        cp.clears_seen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            with self.assertRaises(RuntimeError):
+                cp.rewrite("anthropic", body("claude-opus-5-5"))
+        finally:
+            cp.clears_seen = real
+        out, _, _ = cp.rewrite("anthropic", body("claude-sonnet-5-5"))
+        self.assertFalse(REF.encode() in out, "a Sonnet request inherited the failed Opus request's dedup session")
+
+    def age_store(self, days: float) -> None:
+        cp.STORE.db.execute(f"UPDATE pin SET seen = seen - {int(days * 86400)}")
+        cp.STORE.db.execute(f"UPDATE content SET seen = seen - {int(days * 86400)}")
+        cp.STORE.mem.clear()
+        cp.STORE.mem_size = 0
+
+    def drive(self, api: str, n: int, start: int = 1, conv=None):
+        path, _, turn = APIS[api]
+        conv = conv or self.fresh(api)
+        out = []
+        for k in range(start, start + n):
+            turn(conv, k, grep_out(f"w{k}"))
+            out.append(self.post(path, copy.deepcopy(conv)))
+        return conv, out
+
+    def assert_prefix(self, api: str, old: dict, new: dict, why: str) -> None:
+        ps, pt, ph = prefix_parts(api, old)
+        s, t, h = prefix_parts(api, new)
+        self.assertTrue(strip_cc(h[:len(ph)]) == strip_cc(ph), f"{api}: earlier messages changed: {why}")
+
+    def test_anthropic_pins_never_evicted_even_over_the_cap_and_past_the_live_window(self):
+        """A resumed Claude Code session (weeks / months later) must find every pin: losing one turns a compressed
+        result raw in history = an edit of the prefix = a 400 on the 5.x models. The cap and the 365-day live window
+        used to let a pin that old go; for the Anthropic API a pin that changed bytes now never does (a NULL pin,
+        'sent unchanged', is harmless to lose: raw stays raw). Also at open (restart) and with env limits lowered."""
+        conv, sent = self.drive("anthropic", 3)
+        self.assertGreater(sum(1 for r in cp.STORE.db.execute("SELECT t FROM pin") if r[0] is not None), 0)
+        cp.STORE.max_bytes, cp.STORE.live_s = 1, 60                       # CTXPRUNE_STORE_MAX_MB / LIVE_DAYS lowered
+        self.age_store(400)
+        cp.STORE.evict(time.time())
+        conv, more = self.drive("anthropic", 1, start=4, conv=conv)
+        self.assert_prefix("anthropic", sent[-1], more[0], "pins evicted (400 days, over the cap)")
+        self.start()                                                      # restart: eviction at open (default limits)
+        self.age_store(800)
+        cp.STORE.max_bytes, cp.STORE.live_s = 1, 60
+        cp.STORE.evict(time.time())
+        conv, more2 = self.drive("anthropic", 1, start=5, conv=conv)
+        self.assert_prefix("anthropic", more[0], more2[0], "pins evicted (800 days, after a restart)")
+
+    def test_anthropic_hold_is_decided_at_open(self):
+        """The store remembers that it holds Anthropic pins: after a restart the eviction that runs at open (before any
+        request has been seen) already honours it."""
+        from render_store import RenderStore
+        conv, sent = self.drive("anthropic", 2)
+        path = cp.STORE.path
+        cp.STORE.close()
+        db = __import__("sqlite3").connect(path)
+        db.execute("UPDATE pin SET seen = seen - 800*86400")
+        db.commit(); db.close()
+        s = RenderStore(path, max_mb=0.000001, live_days=1)
+        self.assertGreater(sum(1 for r in s.db.execute("SELECT t FROM pin") if r[0] is not None), 0)
+        s.close()
+
+    def test_other_apis_keep_the_old_limits(self):
+        """Scope: only Anthropic-format traffic holds its pins; chat / responses stores are evicted as before."""
+        conv, sent = self.drive("chat", 2)
+        cp.STORE.max_bytes, cp.STORE.live_s = 1, 60
+        self.age_store(400)
+        cp.STORE.evict(time.time())
+        self.assertEqual(cp.STORE.count("pin"), 0)
+
+
+for _n in [n for n in dir(History) if n.startswith("test_")]:   # Gate inherits History's helpers, not its tests
+    setattr(Gate, _n, None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -1058,20 +1058,23 @@ def rewrite(api: str, raw: bytes, soft_off: bool = False, beta: str = "") -> tup
     if not isinstance(body, dict):
         return raw, [], False
     recs: list = []
+    if api == "anthropic":   # T2.1: its pins are the record of the bytes the thinking signatures were made over
+        STORE.hold_pins()
     seed = session_seed(api, body)
-    _RQ.chain, _RQ.soft_off = seed, soft_off
-    _RQ.cut, _RQ.hist = history_cut(api, body), False
-    _RQ.llm = session_model(seed, body)
-    _DD.expand = False
-    if dedup_for(seed, body):
-        from dedup import DedupSession
-        _DD.s = DedupSession()
-        _DD.expand = clears_seen(seed, body, beta)   # registration only: no new markers
-    st = _settings()
-    if st.model and st.guard_turns > 0:
-        from ctxprune_core import Guard
-        _DD.g, _DD.call_t = Guard({}, turns=st.guard_turns), {}
+    _DD.s = _DD.g = None   # per-request state lives in thread-locals (HTTP/1.1 keep-alive reuses the thread): start
+    _DD.expand = False     # clean, so a request that raised during setup can't leave its (Opus) session to the next
     try:
+        _RQ.chain, _RQ.soft_off = seed, soft_off
+        _RQ.cut, _RQ.hist = history_cut(api, body), False
+        _RQ.llm = session_model(seed, body)
+        if dedup_for(seed, body):   # decided from THIS request's model: an Opus -> Sonnet / Haiku switch stops new refs
+            from dedup import DedupSession
+            _DD.s = DedupSession()
+            _DD.expand = clears_seen(seed, body, beta)   # registration only: no new markers
+        st = _settings()
+        if st.model and st.guard_turns > 0:
+            from ctxprune_core import Guard
+            _DD.g, _DD.call_t = Guard({}, turns=st.guard_turns), {}
         WALKERS[api](body, recs)
         note = session_note(seed)
     finally:

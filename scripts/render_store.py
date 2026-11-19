@@ -26,7 +26,11 @@ miss but a broken request, and Claude Code sessions resume weeks later. So:
   * over CTXPRUNE_STORE_MAX_MB (default 2048) the least recently seen go, but never one seen within
     CTXPRUNE_STORE_LIVE_DAYS (default 365): over the cap rather than break a resumable conversation (unbounded growth
     beyond the cap is accepted; most pins are a NULL "sent unchanged");
-  * memory-only mode (no path, or the sqlite-failure fallback) never drops a pin from the LRU; content rows go first.
+  * memory-only mode (no path, or the sqlite-failure fallback) never drops a pin from the LRU; content rows go first;
+  * hold_pins() (T2.1, v0.4; the proxy calls it for Anthropic-format traffic, remembered in the store's meta so the
+    eviction at open honours it): a pin that CHANGED its result's bytes (non-NULL) is never deleted, whatever the
+    live window, CTXPRUNE_STORE_LIVE_DAYS / MAX_DAYS / MAX_MB say. A NULL pin ("sent unchanged") may still go: the
+    result then stays raw in history, which is what was sent. Growth is bounded by what was compressed.
 Runs at open and then every EVICT_S. A row that can't be read at runtime is "no pin" (the caller passes the client's bytes through) and is
 deleted, the store stays persistent; only MAX_READ_ERRORS such failures in a row, or a write error, switch to memory
 only (byte stability then lasts for this process only).
@@ -76,6 +80,7 @@ class RenderStore:
         self._last_evict = 0.0
         self.evicted = 0
         self.healed: str | None = None   # set when an unreadable store was moved aside at open
+        self.hold = False                 # hold_pins(): changed pins are never evicted (persisted in meta)
         self.bad_rows = 0                 # rows skipped as "no pin" (unreadable at runtime) and deleted
         self.read_errors = 0              # consecutive read failures (MAX_READ_ERRORS -> memory only)
         if self.path:
@@ -141,6 +146,7 @@ class RenderStore:
             self.db.execute(f"CREATE TABLE IF NOT EXISTS {t} (k TEXT PRIMARY KEY, t TEXT, ver TEXT, seen INTEGER)")
             self.db.execute(f"CREATE INDEX IF NOT EXISTS {t}_seen ON {t}(seen)")
         self.db.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+        self.hold = bool(self.db.execute("SELECT 1 FROM meta WHERE k='hold_pins'").fetchone())
         self._evict()
 
     def _fail(self, e: Exception) -> None:
@@ -286,23 +292,37 @@ class RenderStore:
             self._fail(ex)
             return 0
 
+    def hold_pins(self) -> None:
+        """From now on (and after a restart) no pin that changed bytes is evicted. Idempotent, cheap once set."""
+        if self.hold:
+            return
+        self.hold = True
+        if self.db is not None:
+            with self.lock:
+                try:
+                    self.db.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('hold_pins', '1')")
+                except Exception as ex:  # noqa: BLE001
+                    self._fail(ex)
+
     def _evict(self, now: float | None = None) -> int:
         now = time.time() if now is None else now
         self._last_evict = now
         if self.db is None:
             return 0
         n = 0
+        keep = {"pin": " AND t IS NULL"} if self.hold else {}   # hold_pins(): a pin that changed bytes stays
         with self.lock:
             if self.max_age_s > 0:
                 for t in TABLES:
-                    n += self.db.execute(f"DELETE FROM {t} WHERE seen < ?", (int(now - self.max_age_s),)).rowcount
+                    n += self.db.execute(f"DELETE FROM {t} WHERE seen < ?{keep.get(t, '')}",
+                                         (int(now - self.max_age_s),)).rowcount
             floor = int(now - self.live_s)
             while self._live_bytes() > self.max_bytes:
                 got = 0
                 for t in TABLES:
                     got += self.db.execute(
-                        f"DELETE FROM {t} WHERE k IN (SELECT k FROM {t} WHERE seen < ? ORDER BY seen LIMIT 500)",
-                        (floor,)).rowcount
+                        f"DELETE FROM {t} WHERE k IN (SELECT k FROM {t} WHERE seen < ?{keep.get(t, '')} "
+                        f"ORDER BY seen LIMIT 500)", (floor,)).rowcount
                 if not got:
                     break   # everything left is live: over the cap rather than break a live session
                 n += got

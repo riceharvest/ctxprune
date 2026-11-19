@@ -39,8 +39,6 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from ctxprune import hook  # noqa: E402
-
 import harness as _h  # noqa: E402
 from harness import Fixture, case, mutants, tokens  # noqa: E402
 
@@ -278,7 +276,7 @@ def sim_65() -> dict:
 case(
     65,
     claim="The note shrinks to 'ctxprune <before>-><after> chars; full: <path>' (hundreds of chars less per compressed call) while still giving both sizes and a path whose file equals the original output byte for byte; no note is emitted when nothing is compressed or the original cannot be saved. Whether Claude still uses the terse note correctly needs a live transcript.",
-    sim=sim_65,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -363,7 +361,7 @@ def sim_66() -> dict:
 case(
     66,
     claim="The first compressed output of a session (marker file per hashed session id, created O_EXCL so racing hooks yield one winner) gets the full note and every later one a terse '<sizes>; full: <path>' tag; every note still opens to the exact original, other sessions, missing ids and unwritable state all get the full note. Caveat: after context compaction the early full note may be gone, the terse tag keeps the path.",
-    sim=sim_66,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -461,7 +459,7 @@ def sim_67() -> dict:
 case(
     67,
     claim="A short id (8 hex, or 'ctxprune show <id>' / '.ctxprune/<id>.txt') replaces the 55+ char absolute path; on an id collision with different content the id is lengthened so two outputs never alias (a 4-hex id with the current trust-if-exists logic returns the wrong file for some of 1,000 outputs, the extending store for none); 'show' matches ids exactly so '../' cannot escape. A relative path breaks after cd, so it needs the cwd or an absolute fallback.",
-    sim=sim_67,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -532,7 +530,7 @@ def sim_68() -> dict:
 case(
     68,
     claim="Adding 'skip when the estimated saving is under 200 tokens (800 chars)' to the 0.95 rule means every shipped output saves more than its note costs (net chars > 0 over a 119-point size x ratio grid; the current rule alone ships 10 net-negative points, 9 of them only when CTXPRUNE_MIN_CHARS is lowered to 2000), a skipped output is returned untouched with no file written, and big wins still ship; the price is the small positive savings the gate forgoes (reported as a number).",
-    sim=sim_68,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -730,7 +728,7 @@ def sim_71() -> dict:
 case(
     71,
     claim="Whether a Bash output is kept verbatim is decided by the files and git mode it reads (source and config extensions, unknown files, globs, patch output, stdin of unknown origin, unparseable commands stay verbatim; .log/.out/.err files, git log without a patch flag, git diff/show with only summary flags and pipes from non-file producers are compressible): on a 67-command labelled corpus no editable-file read is released, 15 safe commands the name-based regex blocks are released, and 8 reads of source or diffs that the name-based regex lets through (tail/awk/tac, FOO=1 cat, sudo cat, git -C or --no-pager diff, git log --patch) are now kept verbatim.",
-    sim=sim_71,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -798,7 +796,7 @@ def sim_205() -> dict:
 case(
     205,
     claim="The note moves into the output as a one-line last-line trailer (Bash stdout/stderr field, last compressed MCP text block, or bare string): the response drops the additionalContext channel, the shape, the image blocks and the compressed text are unchanged, and the path in the trailer opens to the exact original. The wrapper tokens Claude Code adds around additionalContext are not measurable offline; the in-band trailer is forgeable by tool output, so readers must take the last line.",
-    sim=sim_205,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -915,7 +913,7 @@ def sim_278() -> dict:
 case(
     278,
     claim="With ctxprune/__init__ lazy (PEP 562) and `python -m ctxprune hook claude-code` dispatched before cli is imported, a sub-threshold hook call loads only ctxprune and ctxprune.hook (about 30 fewer modules, no dataclasses/inspect/argparse) and prints exactly the same stdout as today on seven events (small, skipped, compressed, malformed); the CLI and the library attributes still work. Millisecond figures are reported but not asserted.",
-    sim=sim_278,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -1080,7 +1078,7 @@ def sim_321() -> dict:
 case(
     321,
     claim="For a bare aws describe-/list-, az ... list, gcloud list/describe or kubectl get -o json|yaml command (no existing --query/--format/-o projection, no pipe or chain), the note of a compressed Bash output gains one constant hint naming that CLI's projection flag; the rest of the note and the output are byte-identical, nothing from the command is echoed, and the flag applied to the command parses and stops the hint. The saving is modelled on a 40-instance listing; whether agents act on the hint needs the A/B in the idea.",
-    sim=sim_321,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -1291,7 +1289,7 @@ def sim_492() -> dict:
 case(
     492,
     claim="Below the 6,000-char lossy threshold, outputs of 1,000+ chars get ANSI styling stripped, CR progress frames collapsed, blank-line runs squeezed and repeated lines marked '[previous line repeated N more times]' (the only byte-exact step: dup_expand restores it, and it steps aside when the text already holds a marker); the response has no note and no saved file, any strict gain ships, verbatim commands/Read/CTXPRUNE_OFF/small/no-gain outputs are untouched. Only the duplicate step is byte-exact; colours, progress frames and blank counts are dropped by design and cannot be recovered without a saved file.",
-    sim=sim_492,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -1373,7 +1371,7 @@ def sim_756() -> dict:
 case(
     756,
     claim="The saved-original path in the note is POSIX-style (Windows drive and UNC paths via as_posix, a backslash in a POSIX name kept as data) and shlex-quoted: shlex.split recovers the exact path and `bash -c 'grep ...'` finds the file for 11 directory names with spaces, quotes, $, ;, backticks, globs, unicode and parentheses where the bare path fails for at least 7; a safe path gets no quotes, and the real hook's current note is shown to split at a space in the cache home. Git Bash itself is not available here, so the Windows form is checked as a string only.",
-    sim=sim_756,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )
 
 # ===============================================================================================================
@@ -1609,5 +1607,5 @@ def sim_1314() -> dict:
 case(
     1314,
     claim="Runs of adjacent plain MCP text blocks (exactly {type, text}) are joined with a newline in the same call that compresses them; image, resource and annotated blocks, sibling keys like isError, block order and all text survive, and because the joined block crosses the size threshold the hook compresses 40 small hits that it ignores today. The per-block boundary becomes a newline (lost if hits contain newlines); whether framing tokens drop needs count_tokens, as the idea says.",
-    sim=sim_1314,
+    manual="Excluded from v0.4 execution: this release snapshot does not ship the PostToolUse hook API.",
 )

@@ -3,8 +3,9 @@
     ctxprune serve                    # http://127.0.0.1:8719
     curl -s localhost:8719/compress -d '{"text": "...", "rate": 0.5}'
 
-POST /compress  {"text": str} or {"texts": [str]}, optional "rate" (0.5), "force_protected" (false),
-                "keep_structure" (false)  ->  {"text", "kept", "total"} or {"results": [...]}
+POST /compress  {"text": str} or {"texts": [str]}, optional "rate" (0.5), "force_protected" (false; "auto"|"ids" = v0.4 engine),
+                "keep_structure" (false), "query" (str), "mode" ("prune"|"auto"|"json"), "clean_web" (false)
+                -> {"text", "kept", "total"} or {"results": [...]}
 GET  /health    ->  {"ok": true, "model": ...}
 
 Binds to localhost only by default. Results are cached by input, so repeated tool outputs are free.
@@ -30,13 +31,30 @@ class _State:
         self.cache: OrderedDict = OrderedDict()
         self.cache_size = cache_size
 
-    def compress(self, text: str, rate: float, force_protected: bool, keep_structure: bool) -> dict:
-        key = (text, rate, force_protected, keep_structure)
+    def compress(
+        self,
+        text: str,
+        rate: float,
+        force_protected: bool | str | None,
+        keep_structure: bool,
+        query: str | None = None,
+        mode: str = "prune",
+        clean_web: bool = False,
+    ) -> dict:
+        key = (text, rate, force_protected, keep_structure, query, mode, clean_web)
         with self.lock:
             if key in self.cache:
                 self.cache.move_to_end(key)
                 return self.cache[key]
-            out = self.c.compress(text, rate=rate, force_protected=force_protected, keep_structure=keep_structure)
+            out = self.c.compress(
+                text,
+                rate=rate,
+                force_protected=force_protected,
+                keep_structure=keep_structure,
+                query=query,
+                mode=mode,
+                clean_web=clean_web,
+            )
             self.cache[key] = out
             if len(self.cache) > self.cache_size:
                 self.cache.popitem(last=False)
@@ -71,7 +89,14 @@ def make_server(host: str = "127.0.0.1", port: int = 8719, model: str = DEFAULT_
             try:
                 req = json.loads(self.rfile.read(n) or b"{}")
                 rate = float(req.get("rate", 0.5))
-                opts = (bool(req.get("force_protected", False)), bool(req.get("keep_structure", False)))
+                fp = req.get("force_protected")  # unset: the 0.3.2 behaviour (False), "auto" once query/mode/... is sent
+                if fp is not None and fp not in ("auto", "ids") and not isinstance(fp, bool):
+                    fp = bool(fp)  # as in 0.3.2
+                query = req.get("query")
+                query = str(query) if query is not None and str(query).strip() else None
+                mode = str(req.get("mode", "prune"))
+                clean_web = bool(req.get("clean_web", False))
+                opts = (fp, bool(req.get("keep_structure", False)), query, mode, clean_web)
                 if "texts" in req:
                     return self._send(200, {"results": [state.compress(str(t), rate, *opts) for t in req["texts"]]})
                 if "text" in req:

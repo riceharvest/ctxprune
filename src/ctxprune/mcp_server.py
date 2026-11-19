@@ -2,7 +2,7 @@
 
 Two read tools, so a big log, JSON dump or report enters the context already shortened:
   read_compact  the lossless `safe` pipeline (the same bytes the agent hooks produce); nothing is dropped
-  read_pruned   opt-in token pruning with the 0.2 model (lossy); identifiers, numbers and paths kept by default
+  read_pruned   opt-in token pruning with the v0.4 neural model (lossy); identifiers & query evidence prioritized
 
 Stdlib JSON-RPC 2.0 over stdin/stdout (one message per line), protocol 2025-06-18; no MCP SDK dependency.
 Local only: it reads the files the client asks for and makes no network calls (read_pruned downloads the model from
@@ -43,16 +43,28 @@ TOOLS = [
         "title": "Read a file, token-pruned (lossy)",
         "description": ("Read a text file and delete its least useful words with a small local model, keeping about "
                         "`keep` of its tokens. Lossy: use it for long prose, retrieved documents or logs when the "
-                        "gist matters more than every word. Identifiers, numbers and paths are kept unless "
-                        "protect=false."),
+                        "gist matters more than every word. Pass `query` to focus the budget on relevant spans."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path of the file to read."},
                 "keep": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.5,
                          "description": "Share of tokens to keep (0-1]."},
-                "protect": {"type": "boolean", "default": True,
-                            "description": "Never drop identifiers, numbers or paths."},
+                "protect": {
+                    "anyOf": [
+                        {"type": "boolean"},
+                        {"type": "string", "enum": ["auto", "ids"]},
+                    ],
+                    "default": "auto",
+                    "description": "Identifier protection: 'auto' (smart technical vs prose), 'ids', true, or false.",
+                },
+                "query": {"type": "string", "description": "Optional question/topic to prioritize relevant spans."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["prune", "auto"],
+                    "default": "prune",
+                    "description": "'prune' (neural) or 'auto' (lossless first; JSON-values-only for valid JSON).",
+                },
             },
             "required": ["path"],
         },
@@ -86,11 +98,14 @@ def _compact(text: str) -> tuple[str, str]:
     return out, f"[ctxprune: {len(text):,} -> {len(out):,} chars, lossless]"
 
 
-def _pruned(text: str, keep: float, protect: bool) -> tuple[str, str]:
+def _pruned(text: str, keep: float, protect: bool | str, query: str | None = None,
+            mode: str = "prune") -> tuple[str, str]:
     from . import prune
-    out = prune(text, keep=keep, protect=protect)
+    out = prune(text, keep=keep, protect=protect, query=query, mode=mode, unit="tokens_est")  # v0.4 engine
+    pnote = f", protect={protect}" if protect is not False else ""
+    qnote = ", query-aware" if query else ""
     return out, (f"[ctxprune: {len(text):,} -> {len(out):,} chars, token-pruned, target {keep:.0%} of tokens"
-                 f"{', identifiers kept' if protect else ''} (lossy)]")
+                 f"{pnote}{qnote} (lossy)]")
 
 
 def call_tool(name: str, args: dict) -> dict:
@@ -102,7 +117,16 @@ def call_tool(name: str, args: dict) -> dict:
             keep = float(args.get("keep", 0.5))
             if not 0 < keep <= 1:
                 raise ValueError("keep must be in (0, 1]")
-            out, note = _pruned(text, keep, bool(args.get("protect", True)))
+            prot = args.get("protect", "auto")
+            if isinstance(prot, str) and prot not in ("auto", "ids"):
+                low = prot.lower()
+                prot = True if low in ("true", "1", "yes") else (False if low in ("false", "0", "no") else "auto")
+            query = args.get("query")
+            query = str(query) if query is not None and str(query).strip() else None
+            mode = str(args.get("mode", "prune"))
+            if mode not in ("prune", "auto", "json"):
+                raise ValueError("mode must be 'prune', 'auto', or 'json'")
+            out, note = _pruned(text, keep, prot, query=query, mode=mode)
         else:
             return {"content": [{"type": "text", "text": f"unknown tool {name}"}], "isError": True}
         return {"content": [{"type": "text", "text": out}, {"type": "text", "text": note}], "isError": False}

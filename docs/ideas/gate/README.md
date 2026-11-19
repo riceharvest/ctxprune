@@ -153,3 +153,13 @@ dropped rather than listed.
 `python docs/ideas/gate/run.py --sync` copies every case's claim into the `check` fields of `ideas.jsonl` and rebuilds the
 markdown (a pytest keeps the two in step). To add a case for a new idea, write a `case(...)` call in a `cases_*.py`, run
 `--coverage`, then `--sync`. The gated set is every kept `L` idea plus the shortlisted `R` ideas; other ideas may have a case too.
+
+### v0.4 release-snapshot exclusions
+
+This repository snapshot contains the lossy `src/ctxprune` package and does not ship `ctxprune.hook`. The seed-era hook
+gates #65, #66, #67, #68 and #71 are intentionally outside the v0.4 coverage denominator. Hook-dependent simulations
+remain registered as `manual` cases with this reason, so a missing hook module cannot silently pass as tested behavior.
+The independent #959 Grep/Glob transform remains executable. Hook-only claims need their original hook source restored
+before they can be promoted back to executable tests. #461 is also `manual`: it measures a hypothetical optimization
+that skips scoring fully protected windows, which the production `Compressor` does not implement; it is not a v0.4
+release behavior gate.

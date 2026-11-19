@@ -1042,7 +1042,7 @@ class RefetchGuard(unittest.TestCase):
 
 class DedupOptIn(unittest.TestCase):
     """Cross-turn dedup goes by MODEL (ctxprune_core.DEDUP_MODELS = claude-opus-*: Opus 5.5 probe passed; Qwen3.6/3.8,
-    and every unprobed model, off), decided once per session; CTXPRUNE_DEDUP=0|1 overrides."""
+    and every unprobed model, off), decided per request by the current model; CTXPRUNE_DEDUP=0|1 overrides."""
 
     def test_defaults_off_env_opts_in(self):
         import ctxprune_proxy

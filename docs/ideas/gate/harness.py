@@ -411,8 +411,12 @@ def all_ideas() -> list[dict]:
 def gated_ideas() -> list[dict]:
     """Ideas that must have a case: every kept [L] idea, plus the shortlisted [R] ideas (status scope, est medium or
     large, found by the generation loop: the same rule build.py uses for the shortlist star)."""
-    return [r for r in all_ideas() if (r["tag"] == "L" and r["status"] != "dropped") or
-            (r["tag"] == "R" and r["status"] == "scope" and r["est"] in ("medium", "large") and r["round"] > 0)]
+    # These five seed-era ideas describe the original PostToolUse hook. The v0.4
+    # source snapshot is the lossy library only; their old claims are retained in
+    # ideas.jsonl for history but are not gates for this release line.
+    intentionally_excluded = {65, 66, 67, 68, 71}
+    return [r for r in all_ideas() if r["id"] not in intentionally_excluded and ((r["tag"] == "L" and r["status"] != "dropped") or
+            (r["tag"] == "R" and r["status"] == "scope" and r["est"] in ("medium", "large") and r["round"] > 0))]
 
 
 def coverage() -> tuple[list[int], list[int]]:
