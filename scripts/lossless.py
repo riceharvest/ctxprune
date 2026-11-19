@@ -137,6 +137,24 @@ def unescape_markers(text: str) -> str:
     return _per_line(text, lambda ln: _ESCAPED.sub(r"\1\2", ln, count=1), lambda ln: _ESCAPED2.sub(r"\1\2", ln, count=1))
 
 
+# Deliberately narrower than INVISIBLE: sanitizer input is untrusted prose, and broad
+# Default_Ignorable removal corrupts Arabic marks, emoji variation selectors and joiners.
+_UNTRUSTED_CONTROLS = _re.compile(r"[\U000E0000-\U000E007F\u202A-\u202E\u2066-\u2069]")
+_HTML_COMMENT = _re.compile(r"<!--.*?-->", _re.S)
+
+
+def sanitize_untrusted(text: str) -> tuple[str, dict]:
+    """Strip invisible injection carriers from untrusted web/MCP text.
+
+    This is opt-in at the integration boundary. ZWJ/ZWNJ, Arabic marks, variation
+    selectors, and all other script shaping characters are preserved.
+    """
+    stripped_controls = len(_UNTRUSTED_CONTROLS.findall(text))
+    stripped_comments = len(_HTML_COMMENT.findall(text))
+    result = _HTML_COMMENT.sub("", _UNTRUSTED_CONTROLS.sub("", text))
+    return result, {"invisible_controls": stripped_controls, "html_comments": stripped_comments}
+
+
 # ---------------------------------------------------------------- command parsing
 
 def _tokens(command: str | None) -> list[str]:
