@@ -12,6 +12,7 @@
     ctxprune serve --model-dir DIR                    line-model server for lossy presets (ctxprune[model])
     ctxprune bundle hermes|claude-code DEST           self-contained plugin dirs (catalog / marketplace builds)
     ctxprune hook claude-code                         (called by Claude Code: hook JSON on stdin)
+    ctxprune mcp-wrap -- <server cmd...>              wrap any stdio MCP server: lossless rewrite of its tool results
     ctxprune mcp                                      stdio MCP server: read_compact (lossless), read_pruned (lossy)
     ctxprune mcp-gateway --config FILE                stdio meta-tool gateway for configured MCP servers
   0.2 token pruning (lossy, still supported; model darioooooo0o/ctxprune-small):
@@ -394,6 +395,9 @@ def main(argv: list | None = None) -> int:
             print(f"ctxprune search: {e}", file=sys.stderr)
             return 2
         return 0
+    if cmd == "mcp-wrap":
+        from .mcp_wrap import main as wrap_main
+        return wrap_main(rest)
     if cmd == "bundle":
         from .bundle import main as bundle_main
         return bundle_main(rest)

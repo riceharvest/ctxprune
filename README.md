@@ -113,6 +113,21 @@ use), and needs no MCP SDK.
 
 <!-- mcp-name: io.github.riceharvest/ctxprune -->
 
+## Wrap any MCP server: `ctxprune mcp-wrap`
+
+For clients without hooks (Cursor, Claude Desktop, Cline, Windsurf, Codex), put `ctxprune mcp-wrap --` in front of the
+server command. Its tool results are rewritten with the lossless `safe` rules; everything else passes through
+byte for byte.
+
+```json
+{"mcpServers": {"playwright": {"command": "ctxprune", "args": ["mcp-wrap", "--", "npx", "@playwright/mcp@latest"]}}}
+```
+
+Only `result.content[].text` of `tools/call` is touched. Results with `structuredContent` or `isError` are left alone
+(`--structured` rewrites the text and keeps `structuredContent` as is), file read/write/edit tools are skipped, a
+rewrite is kept only if it decodes back (JSON: to the same pairs, in order), and any error forwards the original
+line. It is stateless (no cross-call dedup). `CTXPRUNE_OFF=1` turns it off.
+
 ## Token pruning: the 0.2 API (Python, LangChain, LlamaIndex)
 
 This is lossy compression for prompts, retrieved documents and logs: a 140M-parameter token classifier

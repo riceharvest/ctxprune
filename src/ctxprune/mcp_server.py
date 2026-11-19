@@ -101,6 +101,10 @@ TOOLS = [
 ]
 
 
+# 0.5 tools: listed only with CTXPRUNE_MCP_EXTRA_TOOLS=1 so the 0.4.0 tools/list stays byte-identical.
+_OPT_IN_TOOLS = ("read_skeleton", "read_symbols", "search_saved")
+
+
 def _read(args: dict) -> str:
     path = os.path.expanduser(str(args.get("path", "")))
     if not path:
@@ -188,7 +192,7 @@ def handle(msg: dict) -> dict | None:
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": TOOLS if os.environ.get("CTXPRUNE_MCP_EXTRA_TOOLS") == "1" else [t for t in TOOLS if t["name"] not in _OPT_IN_TOOLS]}
     elif method == "tools/call":
         p = msg.get("params") or {}
         result = call_tool(str(p.get("name")), p.get("arguments") or {})

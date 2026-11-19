@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (0.5 lab, v0.5-lab integration)
+
+Every item is opt-in; 0.4.0 entry-point output is unchanged.
+
+- `ctxprune mcp-wrap -- <server cmd>` (T1.8): stdio MCP proxy applying the lossless rules to `tools/call` text results.
+- `ctxprune mcp-gateway`, `ctxprune.wrap_openai` / `wrap_anthropic` / `LiteLLMCallback`, `search_saved`, `read_skeleton` /
+  `read_symbols` (MCP tools listed only with `CTXPRUNE_MCP_EXTRA_TOOLS=1`). See docs/lab/ and research/ result files for
+  the numbers and what is unmeasured.
+
 ## 0.4.0 (2026-11-19)
 
 0.4 is the lossy release: a second token-pruning engine and new entry points for `prune()`. The lossless `safe`
