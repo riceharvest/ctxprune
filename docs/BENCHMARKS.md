@@ -431,24 +431,37 @@ Each harness was run end to end in a throwaway HOME against a scripted stub mode
   that output at its documented default. The reader then picks the next action.
 - Readers: Qwen3.6-35B-A3B and Qwen3.8-27B. No Claude reader.
 - Metric: excess next-action divergence and re-fetch rate, measured only on the items each tool changed. Each arm is
-  paired against a resample of the raw prompt (the noise floor). 95% bootstrap over items.
-- Versions: headroom-ai 0.41.0, rtk 1.0.1, sqz 2.1.1, optscale-kompressor 1.0.2, llmlingua 0.2.2 (LLMLingua-2,
-  applied at ctxprune's hook reach).
+  paired per item against a resample of the raw prompt (the noise floor). 95% bootstrap over trajectories.
+- Versions: headroom-ai 0.41.0, rtk 1.0.1, sqz 2.1.1, optscale-kompressor 1.0.2, llmlingua 0.2.2 (LLMLingua-2 at keep
+  0.33, applied at ctxprune's hook reach).
+- Reproduce: `python3 results/compare/harm_score.py --raw-dir results/rented/replay-compete/replay` (research repo,
+  harm_score.py @ a8e2c83).
 
 | tool | items changed | Qwen3.6 divergence | Qwen3.6 re-fetch | Qwen3.8 divergence | Qwen3.8 re-fetch |
 |---|--:|---|--:|---|--:|
 | ctxprune `safe` | 7 | n/a (too few) | 0 | n/a | 0 |
-| headroom | 133 | +12.8 [+3.8, +21.8] | +3.8 | +21.8 [+13.5, +30.1] | +3.8 |
-| ctxprune `balanced` (lossy, experimental) | 198 | +14.6 [+7.6, +22.7] | +7.6 | +32.8 [+25.8, +39.9] | +17.2 |
-| kompressor `lossless` mode | 48 | +14.6 [−4.2, +31.2] | +14.6 | +37.5 [+22.9, +52.1] | +12.5 |
-| rtk | 109 | +23.9 [+13.8, +33.0] | +5.5 | +35.8 [+26.6, +45.9] | +13.8 |
-| sqz | 45 | +28.9 [+11.1, +46.7] | +15.6 | +33.3 [+15.6, +51.1] | +15.6 |
-| LLMLingua-2 | 192 | +29.2 [+21.4, +37.5] | +18.8 | +42.7 [+34.9, +50.0] | +27.1 |
-| kompressor | 351 | +33.6 [+27.6, +39.9] | +23.6 | +44.7 [+39.0, +50.7] | +32.2 |
+| headroom | 133 | +9.0 [+0.0, +18.3] | +3.8 | +18.0 [+10.1, +26.3] | +3.8 |
+| kompressor `lossless` mode | 48 | +0.0 [−16.7, +16.7] | +14.6 | +25.0 [+12.5, +37.5] | +12.5 |
+| rtk | 109 | +18.3 [+8.6, +28.8] | +5.5 | +22.0 [+13.6, +31.4] | +13.8 |
+| sqz | 45 | +13.3 [−4.4, +31.8] | +15.6 | +17.8 [+4.3, +32.6] | +15.6 |
+| ctxprune `balanced` (lossy, experimental) | 198 | +7.1 [+0.0, +14.7] | +7.6 | +15.7 [+8.7, +22.8] | +17.2 |
+| LLMLingua-2 | 192 | +10.4 [+1.6, +18.6] | +18.8 | +15.6 [+7.4, +23.3] | +27.1 |
+| kompressor | 351 | +10.0 [+3.7, +16.3] | +23.6 | +12.5 [+6.7, +18.3] | +32.2 |
+
+Rows are sorted by Qwen3.8 re-fetch. **Correction (2026-11-19):** an earlier version of this table showed much larger
+divergence figures (e.g. LLMLingua-2 +42.7, kompressor +44.7 on Qwen3.8). They came from a paired script that was run
+interactively and never committed, and the committed scorer does not reproduce them. They are replaced by the
+committed scorer's numbers above (excess over the noise floor, per item, on the items each tool changed). Re-fetch
+figures were unchanged.
 
 How to read it:
-- Every lossy tool changed the agent's next action materially, more so on Qwen3.8. headroom was the mildest, and
-  milder than ctxprune's own `balanced` on Qwen3.8.
+- Divergence is small to moderate and noisy: on Qwen3.6 four of the seven intervals touch or include zero; on Qwen3.8
+  every lossy tool's interval excludes zero (+12 to +25 points). The tools are not separable on divergence alone.
+- The clearer signal is re-fetch (the agent has to go back for what the tool dropped). headroom was the mildest
+  (+3.8 on both readers); kompressor (+23.6 / +32.2) and LLMLingua-2 (+18.8 / +27.1) were the heaviest. ctxprune
+  `balanced` sits in between (+7.6 / +17.2). On divergence, headroom and `balanced` overlap on both readers, so
+  "headroom does better than `balanced`" is not supported by this data.
+- The kompressor "lossless" mode still raises re-fetch by 12 to 15 points and, on Qwen3.8, divergence by +25.
 - `safe` changed only 7 of these 400 items (most were file views and code, which it leaves alone), so this shows that
   it does no harm where it fires, not that it saves much here.
 - The same study measured savings at each tool's own reach on 30.6k public tool outputs (research repo
