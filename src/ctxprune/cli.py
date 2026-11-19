@@ -102,13 +102,17 @@ def _audit(argv: list) -> int:
     a, rest = ap.parse_known_args(argv)
     if a.help:
         print("ctxprune audit [--harness NAME ...] [--days 30] [--json OUT] [Claude Code options: --root DIR "
-              "--exclude GLOB ... --records OUT.jsonl --self-test]\nLocal and advice-only: numbers and names, never "
+              "--exclude GLOB ... --records OUT.jsonl --share [FILE] --otel LOGFILE --self-test]\nLocal and advice-only: numbers and names, never "
               "content; nothing is changed.")
         return 0
     glue.boot()
     import ctx_audit
     if "--self-test" in rest:
         sys.argv = ["ctxprune audit", "--self-test"]
+        ctx_audit.main()
+        return 0
+    if any(x == "--otel" or x.startswith("--otel=") for x in rest):   # fleet mode: a log file, no transcripts, no harness scan
+        sys.argv = ["ctxprune audit"] + rest
         ctx_audit.main()
         return 0
     want = a.harness or ["claude-code"] + list(ha.HARNESSES)
