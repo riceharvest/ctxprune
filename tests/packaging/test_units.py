@@ -210,3 +210,52 @@ class Glue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Wrap(unittest.TestCase):
+    """`ctxprune wrap/unwrap`: the one-liner over install/uninstall, with the config diff."""
+
+    def run_cli(self, home, *args):
+        import io
+        import contextlib
+        from ctxprune import cli
+        env = {"HOME": home, "USERPROFILE": home, "PATH": os.environ.get("PATH", ""), "CTXPRUNE_WRAP_NO_BOOTSTRAP": "1"}
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf), \
+                mock.patch.object(ins, "ephemeral_env", return_value=None):
+            rc = cli.main(list(args))
+        return rc, buf.getvalue()
+
+    def test_wrap_idempotent_and_clean_unwrap(self):
+        with tempfile.TemporaryDirectory() as home:
+            rc, out = self.run_cli(home, "wrap", "claude")
+            self.assertEqual(rc, 0)
+            self.assertIn("config diff:", out)
+            cfg = os.path.join(home, ".claude", "settings.json")
+            first = open(cfg).read()
+            self.assertIn("hook claude-code", first)
+            rc, out = self.run_cli(home, "wrap", "claude")
+            self.assertIn("already up to date", out)
+            self.assertIn("config diff: none", out)
+            self.assertEqual(open(cfg).read(), first)
+            rc, out = self.run_cli(home, "unwrap", "claude")
+            self.assertEqual(rc, 0)
+            self.assertNotIn("ctxprune", open(cfg).read())
+
+    def test_unknown_agent_and_scope(self):
+        with tempfile.TemporaryDirectory() as home:
+            for args in (("wrap", "nope"), ("wrap", "pi", "--scope", "project")):
+                with self.assertRaises(SystemExit) as c:
+                    import io
+                    import contextlib
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        self.run_cli(home, *args)
+                self.assertEqual(c.exception.code, 2)
+
+    def test_install_still_refuses_ephemeral(self):
+        from ctxprune import cli
+        import io
+        import contextlib
+        with mock.patch.object(ins, "ephemeral_env", return_value="/x/archive-v0/y"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["install", "claude-code"]), 2)

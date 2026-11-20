@@ -1,6 +1,6 @@
 {
   "name": "ctxprune",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "description": "Rewrites big Bash, PowerShell, Grep and MCP tool outputs into a shorter form without dropping content (repeated lines counted, JSON record lists as rows, escaped JSON shown as text). Local, no model download. Uses the installed ctxprune, else uvx.",
   "author": {"name": "riceharvest", "url": "https://github.com/riceharvest"},
   "homepage": "https://github.com/riceharvest/ctxprune",

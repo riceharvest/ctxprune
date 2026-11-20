@@ -4,7 +4,7 @@ Shrink what your LLM reads, locally. ctxprune has two parts:
 
 | you want to... | use | drops content? | what you get |
 |---|---|---|---|
-| shrink tool outputs inside a coding agent (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) | `ctxprune install --all` | **no**: every value stays | ~9% fewer tool-output tokens on MCP-heavy work (12% on Claude Opus), 0.3–4% on coding |
+| shrink tool outputs inside a coding agent (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) | `uvx ctxprune wrap claude` | **no**: every value stays | ~9% fewer tool-output tokens on MCP-heavy work (12% on Claude Opus), 0.3–4% on coding |
 | shrink prompts, retrieved documents or logs you control (Python, LangChain, LlamaIndex, shell) | `ctxprune.prune(text, keep=0.5)` | **yes**: deletes low-value words | you pick the size; at 50% kept, +15 points of QA accuracy over LLMLingua-2-large on held-out agent text, level with it on held-out LongBench |
 
 Both run on your machine with no API key, and nothing leaves it.
@@ -71,8 +71,16 @@ already cached.
 ## Install
 
 ```sh
-uv tool install ctxprune        # or: pipx install ctxprune
-ctxprune install --all          # every supported agent found on this machine
+uvx ctxprune wrap claude        # or: opencode | hermes | pi | codex | --all
+```
+
+One command: it installs ctxprune for good (`uv tool install`, or pipx), adds the lossless `safe` hook to that agent,
+and prints the diff of the agent's config. Running it again changes nothing. `ctxprune unwrap claude` removes it.
+Nothing it installs drops content.
+
+```sh
+uv tool install ctxprune        # the same thing in two steps; or: pipx install ctxprune
+ctxprune install --all          # every supported agent found on this machine (`wrap` is `install` plus the diff)
 ctxprune doctor                 # checks versions and runs a test call through each integration
 ```
 
@@ -82,7 +90,8 @@ it keeps a backup of the original. [PACKAGE.md](https://github.com/riceharvest/c
 for Windows and for the Codex proxy.
 
 Don't run `install` through `uvx`. It writes the interpreter path into your agent configs, and uvx deletes that
-environment later. `ctxprune install` refuses to run from one.
+environment later, so `ctxprune install` refuses to run from one. `wrap` is the uvx-safe form: it installs ctxprune
+permanently first and runs `wrap` from that copy.
 
 **Claude Code plugin, without pip.** A self-contained plugin bundles the same stdlib runtime, so it needs only
 Python 3.9+ on the machine:
@@ -334,7 +343,7 @@ of answering was counted as a re-fetch (an extra turn), not as wrong. Without th
 ## Presets
 
 - **`safe` (the default).** The rules above, with nothing dropped and no model.
-  - **Cross-turn dedup is decided by model**, once per session. It is on for `claude-opus-*` served by Anthropic and
+  - **Cross-turn dedup is decided by model, per request**. It is on for `claude-opus-*` served by Anthropic and
     off for everything else (`ctxprune_core.DEDUP_MODELS`). `CTXPRUNE_DEDUP=0|1` overrides that in every integration.
   - In Claude Code the hook reads the model from the session. If `ANTHROPIC_BASE_URL` points anywhere other than
     Anthropic, dedup stays off.

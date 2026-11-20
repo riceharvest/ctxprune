@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1 (2026-11-19)
+
+One-line agent install. No change to compression, the 0.2 / 0.3 API or the lossless output.
+
+- `ctxprune wrap claude|opencode|hermes|pi|codex|--all` installs the lossless `safe` integration and prints the diff of
+  the agent's config files; `ctxprune unwrap AGENT|--all` removes it. Same code, manifest and backups as `install` /
+  `uninstall`, which are unchanged.
+- `uvx ctxprune wrap claude` works: from a temporary uvx environment it first runs `uv tool install ctxprune==VERSION`
+  (pipx if there is no uv), then runs `wrap` from the permanent copy. `ctxprune install` still refuses to run from uvx.
+- The Claude Code marketplace plugin (`riceharvest/ctxprune`) is version 0.4.1: its uvx fallback pin is widened to
+  `ctxprune>=0.3,<0.5` (was `<0.4`), so plugin users without a local install run the 0.4 lossless hook. On the smoke
+  payloads (grep output, repeated lines, JSON rows, small outputs) the hook's bytes are identical to 0.3.2's, both
+  from the 0.4.1 wheel and through uvx.
+- The Pi, OpenCode and Hermes per-output scripts now hold changed first-render pins in their context store (the
+  residual T2.1 rule the Codex proxy already had): a pin that changed a result's bytes is never evicted. No output
+  change; the 0.4.0 note that these stores "do not call the pin hold yet" is superseded.
+- Docs: cross-turn dedup is described as decided by model **per request** (what the code already did).
+- Re-checked against a pristine 0.3.2 install with the release probes (`probe_api.py`, `probe_cli.sh`): the 0.2 / 0.3
+  API, the CLI (file, pipe, dash, bare stdin), `--stats` and `serve` `POST /compress` are byte-identical; only the
+  version string differs. `install` / `uninstall --scope project|local` against a real 0.2.1 install: all probe
+  checks pass. The one deliberate 0.4 behaviour change (`ctxprune mcp` `read_pruned` `protect="auto"`) is unchanged
+  from 0.4.0 and listed there.
+
 ## 0.4.0 (2026-11-19)
 
 0.4 is the lossy release: a second token-pruning engine and new entry points for `prune()`. The lossless `safe`

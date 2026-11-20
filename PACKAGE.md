@@ -139,5 +139,5 @@ token model to the 0.3.0 `safe` hook (lossless rules; dedup by model), and Grep/
 plugin's matcher is updated. See [CHANGELOG.md](CHANGELOG.md#migrating-from-021). The 0.2 token-pruning API
 (`ctxprune.prune()`, `Compressor`, `ctxprune FILE --keep`, `ctxprune serve` without `--model-dir`, the LangChain /
 LlamaIndex classes, `install claude-code --scope`) works as in 0.2.1, with byte-identical outputs.
-0.3.0 updates that plugin in place (matcher `Bash|PowerShell|Grep|mcp__.*`, pinned to `ctxprune>=0.3,<0.4`):
+0.3.0 updates that plugin in place (matcher `Bash|PowerShell|Grep|mcp__.*`, pinned to `ctxprune>=0.3,<0.5`):
 `/plugin marketplace update ctxprune` picks it up.

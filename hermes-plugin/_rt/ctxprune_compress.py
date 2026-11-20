@@ -189,6 +189,8 @@ def _context_store(path: str):
     if st is None:
         from render_store import RenderStore
         st = _STORES[path] = RenderStore(path)
+        st.hold_pins()   # T2.1 residual: a pin that changed bytes is never evicted (Claude thinking signatures cover
+                         # those bytes, and these harnesses can run Claude models); persisted in the store's meta
     return st
 
 
@@ -298,7 +300,7 @@ def main_context(harness: str, log: str | None) -> int:
 
 
 def main() -> int:
-    for x in sys.argv[1:]:   # --dedup-for=MODEL: "1" / "0" (the plugins ask once per session; one allow-list, in core)
+    for x in sys.argv[1:]:   # --dedup-for=MODEL: "1" / "0" (the plugins ask per model id, per request; one allow-list, in core)
         if x.startswith("--dedup-for="):
             try:
                 from ctxprune_core import dedup_on
