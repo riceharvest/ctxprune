@@ -201,7 +201,30 @@ def handle(msg: dict) -> dict | None:
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+USAGE = """usage: ctxprune mcp [-h]
+
+Run ctxprune as a local stdio MCP server (JSON-RPC 2.0, one message per line on stdin/stdout).
+For clients without tool-output hooks (Claude Desktop, Cursor, Cline, ...). No network calls.
+
+tools:
+  read_compact  lossless `safe` pipeline: shortens a big log/JSON/report, nothing is dropped
+  read_pruned   opt-in lossy token pruning with the v0.4 model (downloads it once on first use)
+
+register it in an MCP client (e.g. claude_desktop_config.json):
+  { "mcpServers": { "ctxprune": { "command": "uvx", "args": ["ctxprune", "mcp"] } } }
+or: claude mcp add ctxprune -- uvx ctxprune mcp
+"""
+
+
 def main(argv: list | None = None) -> int:
+    argv = list(argv or [])
+    if any(a in ("-h", "--help") for a in argv):
+        sys.stdout.write(USAGE)
+        return 0
+    if argv:
+        sys.stderr.write(f"ctxprune mcp: error: unrecognized arguments: {' '.join(argv)}\n"
+                         "try 'ctxprune mcp --help'\n")
+        return 2
     out = sys.stdout
     for line in sys.stdin:
         line = line.strip()
