@@ -73,15 +73,23 @@ def test_forged_marker_in_windows_listing():
     assert decode(out) == text
 
 
-def test_gate_follows_paths_except_denied_models():
-    env = {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "", "CTXPRUNE_PATHS_MODELS": "claude-,qwen3.6"}
-    with mock.patch.dict(os.environ, env):
-        assert lossless.paths_win_on("anthropic https://api.anthropic.com claude-opus-5-5")
-        assert not lossless.paths_win_on("")                                    # no model: paths off, so off
-        assert not lossless.paths_win_on("vllm http://127.0.0.1:8000/v1 claude-opus-5-5")   # local
-        assert not lossless.paths_win_on("openai https://api.openai.com qwen3.6-35b")       # denied (probe -11 pt)
-    with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS": "1", "CTXPRUNE_PATHS_WIN": ""}):
+def test_gate_is_off_by_default_and_follows_allow_list():
+    # Option A (t_ae33ce38): the 0.4.1 rule; only PATHS_WIN_MODELS (default ()) or CTXPRUNE_PATHS_WIN=1 turn it on
+    assert lossless.PATHS_WIN_MODELS == ()
+    hosted = "anthropic https://api.anthropic.com claude-opus-5-5"
+    with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "1", "CTXPRUNE_PATHS_MODELS": "claude-"}):
+        assert not lossless.paths_win_on(hosted)            # default: off even with paths on
+        assert not lossless.paths_win_on("")
+        with mock.patch.object(lossless, "PATHS_WIN_MODELS", ("claude-",)):
+            assert lossless.paths_win_on(hosted)
+            assert not lossless.paths_win_on("")                                         # no model
+            assert not lossless.paths_win_on("vllm http://127.0.0.1:8000/v1 claude-opus-5-5")   # local
+            assert not lossless.paths_win_on("openai https://api.openai.com qwen3.6-35b")       # not listed
+            with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS": "0"}):
+                assert not lossless.paths_win_on(hosted)    # paths off -> off
+    with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "1", "CTXPRUNE_PATHS": ""}):
+        assert lossless.paths_win_on("")
         assert lossless.paths_win_on("vllm http://127.0.0.1:8000/v1 some-model")
-        assert not lossless.paths_win_on("vllm http://127.0.0.1:8000/v1 qwen3.6")
     with mock.patch.dict(os.environ, {"CTXPRUNE_PATHS": "1", "CTXPRUNE_PATHS_WIN": "0"}):
-        assert not lossless.paths_win_on("anthropic claude-opus-5-5")
+        with mock.patch.object(lossless, "PATHS_WIN_MODELS", ("claude-",)):
+            assert not lossless.paths_win_on("anthropic claude-opus-5-5")

@@ -23,10 +23,13 @@ import lossless_hook  # noqa: E402
 
 
 def _reset_breaker():   # the model circuit breaker persists in the state dir; tests must not leak it
+    d = os.environ.get("CTXPRUNE_STATE")
+    if not d:   # another test module (test_plugin_history) clears it
+        return
     try:
-        for f in os.listdir(os.environ["CTXPRUNE_STATE"]):
+        for f in os.listdir(d):
             if f.startswith("breaker"):
-                os.remove(os.path.join(os.environ["CTXPRUNE_STATE"], f))
+                os.remove(os.path.join(d, f))
     except OSError:
         pass
 
