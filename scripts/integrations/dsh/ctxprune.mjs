@@ -10,7 +10,7 @@
 // messages entering the step), and its compaction keeps a verbatim tail, summarizes the span before it and trims
 // the middle of big results, so a reference written into a result at tool time could later point at an output that
 // is gone. For dedup, route dsh through ctxprune_proxy (it dedups every request the same way).
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -114,11 +114,13 @@ export function apply(ctx) {
       const text = content.map(b => b.text ?? '').join('\n')
       fallbackText = text
       if (text.length < MIN) return escaped(decision, text)   // under the minimum: escape only, no compress
-      const out = execFileSync(PY, [CLI, `--command=${commandOf(exec.arguments)}`, `--tool=${exec.name || ''}`,   // `=`: "-x" stays a value
-        '--harness', 'dsh'], {
-        input: text, maxBuffer: 64 << 20, timeout: TIMEOUT_MS,
-        env: { ...process.env, CTXPRUNE_HARNESS: 'dsh', ...targetEnv() }, stdio: ['pipe', 'pipe', 'ignore'],
-      }).toString('utf8')
+      const out = await new Promise((resolve, reject) => {
+        const child = execFile(PY, [CLI, `--command=${commandOf(exec.arguments)}`, `--tool=${exec.name || ''}`,
+          '--harness', 'dsh'], { encoding: 'utf8', maxBuffer: 64 << 20, timeout: TIMEOUT_MS,
+          env: { ...process.env, CTXPRUNE_HARNESS: 'dsh', ...targetEnv() } }, (err, stdout) => err ? reject(err) : resolve(stdout))
+        child.stdin.on('error', () => {})
+        child.stdin.end(text)
+      })
       if (!out || (out.length >= text.length && !escapedOnly(out, text))) return escaped(decision, text)
       return { ...decision, kind: 'accept', content: [{ type: 'text', text: out }] }
     } catch {

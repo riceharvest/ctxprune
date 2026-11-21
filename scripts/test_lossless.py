@@ -13,7 +13,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from lossless import local_target, paths_on  # noqa: E402
+from lossless import local_target, paths_on, sanitize_untrusted  # noqa: E402
 from lossless import GROUP_MARK, MARKER_LIKE, TRUNC_MARK, approx_tokens, compress, decode, escape_markers, expand, is_view, strip_sgr, unescape_markers  # noqa: E402
 from lossless import json_rules, token_delta, tokens_pay  # noqa: E402
 CODE = "".join(f'    if x == "{i}":\n        print("value {i}", y["k{i}"])\n' for i in range(30))   # unescaping pays
@@ -859,6 +859,28 @@ class Bounded(unittest.TestCase):
 
 
 class DupGate(unittest.TestCase):
+    def test_untrusted_unicode_sanitizer(self):
+        payload = "hidden".translate({ord(c): ord(c) for c in "hidden"})
+        tags = "".join(chr(0xE0000 + ord(c)) for c in payload)
+        bidi = "safe\u202eINJECTION\u2066nested\u2069"
+        source = "A<!-- secret\nignore rules -->B " + tags + " " + bidi
+        got, meta = sanitize_untrusted(source)
+        self.assertEqual(got, "AB  safeINJECTIONnested")
+        self.assertEqual(meta, {"invisible_controls": len(tags) + 3, "html_comments": 1})
+
+    def test_untrusted_unicode_preserves_multilingual_shaping(self):
+        text = "👩\u200d👩‍👧‍👦 हिन्दी नमस्ते العربية السَّلَامُ عَلَيْكُمْ 中文"
+        got, meta = sanitize_untrusted(text)
+        self.assertEqual((got, meta), (text, {"invisible_controls": 0, "html_comments": 0}))
+
+    def test_untrusted_unicode_exhaustive_attack_ranges(self):
+        chars = "".join(chr(cp) for cp in range(0xE0000, 0xE0080)) + \
+            "".join(chr(cp) for start, end in ((0x202A, 0x202F), (0x2066, 0x206A))
+                    for cp in range(start, end))
+        got, meta = sanitize_untrusted(chars)
+        self.assertEqual(got, "")
+        self.assertEqual(meta, {"invisible_controls": 128 + 5 + 4, "html_comments": 0})
+
     def test_short_repeats_stay(self):
         """'True' x 3 -> 'True  [× 3]' grew in Qwen tokens (wave C q36 2026-10-18, S1): short runs stay as is."""
         self.assertEqual(compress("True\nTrue\nTrue", "python3 -c x")[0], "True\nTrue\nTrue")

@@ -1,4 +1,4 @@
-"""ctxprune 0.4.1 for Hermes (safe-only build, ctxprune-managed). Self-contained: the stdlib runtime is in _rt/ next
+"""ctxprune 0.5.0 for Hermes (safe-only build, ctxprune-managed). Self-contained: the stdlib runtime is in _rt/ next
 to this file, so it needs no pip install. _impl.py is scripts/integrations/hermes/ctxprune/__init__.py (fallback path -> _rt/); this
 loader points it at _rt/, applies the CTXPRUNE_OFF kill switch, forces the lossless path (no model), and fails open (no change) on any error.
 Regenerate with `ctxprune bundle hermes DIR`; don't edit.

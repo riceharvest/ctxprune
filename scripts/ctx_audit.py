@@ -1215,10 +1215,11 @@ def report(agg: dict, days: float, home: Path, tok: str, recs: list[dict] | None
         how = f"  [how: {s['how']}]" if s.get("how") and s["usd"] > 0 else ""
         L.append(f"  - {tag}{s['what']}{save}{how}")
     mode = mode or auth_mode(home)
-    ttl = ttl_advice(recs) if recs is not None and mode == "api_key" else {}   # never for a subscription (unverified)
+    ttl = ttl_advice(recs) if recs is not None else {}
+    sub_tag = "" if mode == "api_key" else "[unverified for subscription quota] "
     for side, v in ttl.items():
         if v["save_usd"] > 0:
-            tag = "" if v["verified"] else "[unverified, not in total] "
+            tag = sub_tag + ("" if v["verified"] else "[unverified, not in total] ")
             L.append(f"  - {tag}cache TTL ({side}): your gaps make {v['best']} cheaper than today's {v['now']}: set "
                      f"{v['setting']}  -> -${v['save_usd'] * k30:,.0f}/mo (-{100 * v['save_usd'] / (agg['bill'] or 1):.2f}% "
                      f"of bill)")
@@ -1232,9 +1233,138 @@ def report(agg: dict, days: float, home: Path, tok: str, recs: list[dict] | None
     L.append(f"  Total, verified mechanisms only: -${tot * k30:,.0f}/month (-{100 * tot / (agg['bill'] or 1):.1f}% of "
              f"bill); unverified items: -{100 * unv / (agg['bill'] or 1):.1f}% more if they work")
     if recs is not None and mode != "api_key":
-        L.append("  Note: no cache-TTL advice on a subscription: how plan quota counts 1-hour vs 5-minute cache writes "
-                 "is not verified. Verify it yourself before changing promptCacheTtl.")
+        L.append("  Note: on a subscription the TTL lines are dollar counterfactuals at API list prices only; how plan "
+                 "quota counts 1-hour vs 5-minute cache writes is [unverified for subscription quota] (T3.4). Never in "
+                 "the total.")
     return "\n".join(L)
+
+
+# ------------------------------------------------------------------------------------------------ OTel fleet audit
+_OTEL_KEYS = {
+    "input": ("input_tokens", "input_token_count"), "output": ("output_tokens", "output_token_count"),
+    "read": ("cache_read_tokens", "cache_read_input_tokens", "cache_read_token_count"),
+    "write": ("cache_creation_tokens", "cache_creation_input_tokens", "cache_creation_token_count"),
+}
+
+
+def _otel_attrs(rec: dict) -> dict:
+    """One log record -> flat attribute dict. Accepts flat JSON, {"attributes": {...}}, OTLP key/value lists."""
+    a = rec.get("attributes", rec)
+    if isinstance(a, list):
+        flat = {}
+        for kv in a:
+            v = kv.get("value") or {}
+            flat[kv.get("key")] = next(iter(v.values()), None) if isinstance(v, dict) else v
+        a = flat
+    out = dict(a) if isinstance(a, dict) else {}
+    for k in ("timeUnixNano", "time_unix_nano", "observedTimeUnixNano", "timestamp", "time"):
+        if k in rec and "ts" not in out:
+            out["ts"] = rec[k]
+    if not out.get("event.name"):
+        out["event.name"] = rec.get("event.name") or rec.get("name") or rec.get("eventName")
+    return out
+
+
+def _otel_iter(path: str):
+    txt = Path(path).read_text(encoding="utf-8", errors="replace")
+    docs = []
+    try:
+        d = json.loads(txt)
+        docs = d if isinstance(d, list) else [d]
+    except ValueError:
+        for line in txt.splitlines():
+            try:
+                docs.append(json.loads(line))
+            except ValueError:
+                pass
+    for d in docs:
+        if isinstance(d, dict) and "resourceLogs" in d:      # OTLP/JSON export
+            for rl in d["resourceLogs"]:
+                for sl in rl.get("scopeLogs", []):
+                    for lr in sl.get("logRecords", []):
+                        yield lr
+        elif isinstance(d, dict):
+            yield d
+
+
+def _otel_ts(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        x = float(v)
+        return x / 1e9 if x > 1e17 else x / 1e3 if x > 1e11 else x
+    except (TypeError, ValueError):
+        return _ts(v)
+
+
+def otel_records(path: str) -> list[dict]:
+    """api_request log events -> per-session records shaped like stream records (req_log + bill). Numbers only.
+    The OTel event carries no 5m/1h split, so every cache write is priced as 5m (stated in the report)."""
+    sess: dict[str, list] = defaultdict(list)
+    for rec in _otel_iter(path):
+        a = _otel_attrs(rec)
+        if not str(a.get("event.name") or "").endswith("api_request"):
+            continue
+
+        def g(k):
+            for n in _OTEL_KEYS[k]:
+                if a.get(n) not in (None, ""):
+                    return float(a[n])
+            return 0.0
+        sess[str(a.get("session.id") or "?")].append((_otel_ts(a.get("ts") or a.get("event.timestamp")), g("input"),
+                                                      g("read"), g("write"), 0.0, g("output")))
+    recs = []
+    for sid, rs in sess.items():
+        rs.sort(key=lambda x: (x[0] is None, x[0] or 0))
+        bill = sum((i * P_IN + r * P_R + w * P_W + o * P_OUT) / 1e6 for _, i, r, w, _, o in rs)
+        recs.append({"file": sid, "project": "otel", "subagent": False, "requests": len(rs),
+                     "req_log": [list(x) for x in rs], "bill_usd": bill,
+                     "billed": {k: sum(x[j] for x in rs) for k, j in (("in", 1), ("r", 2), ("w", 3), ("out", 5))}})
+    return recs
+
+
+def otel_report(recs: list[dict], mode: str = "unknown") -> tuple[str, dict]:
+    reqs = sum(r["requests"] for r in recs)
+    b = defaultdict(float)
+    for r in recs:
+        for k, v in r["billed"].items():
+            b[k] += v
+    bill = sum(r["bill_usd"] for r in recs)
+    prompt = b["in"] + b["r"] + b["w"]
+    hit = b["r"] / prompt if prompt else 0.0
+    firsts = sorted(r["req_log"][0][1] + r["req_log"][0][2] + r["req_log"][0][3] for r in recs if r["req_log"])
+    static_med = firsts[len(firsts) // 2] if firsts else 0.0     # first request's prompt = static prefix + first message
+    ttl = ttl_advice(recs)
+    tag = "" if mode == "api_key" else "[unverified for subscription quota] "
+    L = [f"ctxprune audit --otel: {len(recs)} sessions, {reqs:,} api_request events. Priced at Opus 5.5 list "
+         f"(input 4, write5m 5, read 0.20, output 20 per M); the log has no 5m/1h split, so writes count as 5m.",
+         f"  bill ${bill:,.2f}; cache hit rate {100 * hit:.1f}% of prompt tokens; cold-prefix writes "
+         f"{100 * b['w'] / (prompt or 1):.1f}% of prompt tokens",
+         f"  static prefix (median first-request prompt per session): {static_med:,.0f} tokens"]
+    adv = {}
+    for side, v in ttl.items():
+        c = v["usd"]
+        adv[side] = {"best": v["best"], "usd": {k: round(x, 4) for k, x in c.items()}}
+        L.append(f"  cache TTL: 5m ${c['5m']:,.2f} vs 1h ${c['1h']:,.2f} (5m+keepalive ${c['5m+KA']:,.2f}); cheapest "
+                 f"settable: {v['best']}" + (f" -> {tag}-{100 * (c['5m'] - c[v['best']]) / (c['5m'] or 1):.1f}% vs 5m"
+                                             if v["best"] != "5m" else ""))
+    return "\n".join(L), {"schema": "ctxprune-audit-share/1", "sessions": len(recs), "requests": reqs,
+                          "bill_usd": round(bill, 2), "cache_hit_rate": round(hit, 4),
+                          "static_prefix_tok_median": round(static_med), "ttl": adv}
+
+
+# ------------------------------------------------------------------------------------------------ numbers-only share
+def share_blob(agg: dict, days: float, recs: list[dict], mode: str) -> dict:
+    """Numbers only: no names, paths, project or session ids, no text. For collecting real multi-user baselines."""
+    ttl = ttl_advice(recs)
+    return {"schema": "ctxprune-audit-share/1", "days": days, "auth": mode, "requests": agg["requests"],
+            "streams": agg["streams"], "bill_usd": round(agg["bill"], 2), "in_bill_usd": round(agg["in_bill"], 2),
+            "out_bill_usd": round(agg["out_bill"], 2), "cold_requests": agg["cold"],
+            "billed_tokens": {k: round(v) for k, v in agg["billed"].items() if k in ("in", "r", "w", "out")},
+            "breakdown_pct": [round(p, 2) for _, _, p in breakdown_rows(agg)],
+            "ttl": {s: {"now": v["now"], "best": v["best"], "save_usd": round(v["save_usd"], 2),
+                        "keepalive_save_usd": round(v["keepalive_save_usd"], 2),
+                        "unverified_for_subscription": mode != "api_key"} for s, v in ttl.items()}}
 
 
 # ------------------------------------------------------------------------------------------------ self-test
@@ -1422,14 +1552,14 @@ def self_test() -> None:
     adv1 = ttl_advice([{"subagent": False, "req_log": rs1}])["main"]
     assert adv1["now"] == "1h" and adv1["best"] == "5m" and not adv1["verified"] and adv1["save_usd"] > 0
     assert abs(adv1["save_usd"] - sum(x[3] for x in rs1) * (P_W1 - P_W) / 1e6) < 1e-9     # no gap >= 5 min
-    # report: a subscription gets no TTL advice (footnote only); an API key gets it [unverified], out of the total
+    # report: a subscription gets TTL advice labelled [unverified for subscription quota]; an API key gets it [unverified], out of the total
     agg0 = {"streams": 1, "requests": 20, "bill": 10.0, "in_bill": 9.0, "cold": 1}
     recs1 = [{"subagent": False, "req_log": rs1}]
     import unittest.mock as um
     with um.patch(__name__ + ".breakdown_rows", lambda a: []), um.patch(__name__ + ".sources", lambda a, d: []), \
             um.patch(__name__ + ".suggestions", lambda a, d, p: []), um.patch(__name__ + ".enabled_plugins", lambda h: []):
         sub = report(agg0, 30, Path("/nonexistent"), "x", recs1, mode="subscription")
-        assert "cache TTL (" not in sub and "promptCacheTtl\"" not in sub and "Verify it yourself" in sub, sub
+        assert "[unverified for subscription quota]" in sub and "cache TTL (main)" in sub and "Total, verified mechanisms only: -$0/month" in sub, sub
         api = report(agg0, 30, Path("/nonexistent"), "x", recs1, mode="api_key")
         assert "[unverified, not in total] cache TTL (main)" in api and "Total, verified mechanisms only: -$0/month" in api, api
     with tempfile.TemporaryDirectory() as td:
@@ -1451,6 +1581,8 @@ def main() -> None:
     ap.add_argument("--exclude", nargs="*", default=[], help="project-dir globs to skip (e.g. '*client*')")
     ap.add_argument("--json", help="write aggregates (numbers and names only) here")
     ap.add_argument("--records", help="write per-stream aggregates (JSONL) here")
+    ap.add_argument("--otel", help="fleet mode: audit an OTel api_request log file (JSONL or OTLP/JSON), no transcripts")
+    ap.add_argument("--share", nargs="?", const="-", help="write a numbers-only JSON blob (to FILE, default stdout)")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
@@ -1458,9 +1590,20 @@ def main() -> None:
         return
     block_network()
     home = Path.home()
+    if a.otel:
+        recs = otel_records(a.otel)
+        txt, blob = otel_report(recs, auth_mode(home))
+        print(txt)
+        if a.share:
+            (sys.stdout.write(json.dumps(blob, indent=1) + "\n") if a.share == "-"
+             else Path(a.share).write_text(json.dumps(blob, indent=1)))
+        return
     recs = run(Path(a.root), a.days, a.exclude, home, a.records, progress=True)
     agg = aggregate(recs)
     print(report(agg, a.days, home, tokenizer_name(), recs))
+    if a.share:
+        blob = json.dumps(share_blob(agg, a.days, recs, auth_mode(home)), indent=1)
+        sys.stdout.write(blob + "\n") if a.share == "-" else Path(a.share).write_text(blob)
     if a.json:
         out = {"days": a.days, "requests": agg["requests"], "bill_usd": agg["bill"], "in_bill": agg["in_bill"],
                "breakdown": breakdown_rows(agg), "sources": sources(agg, a.days),

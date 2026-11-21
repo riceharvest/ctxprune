@@ -80,7 +80,7 @@ PRESETS: dict[str, dict] = {
 #   keep: Claude Code paid +4.8..+11.5% at 0.5 (extra turns) -> a lighter 0.6; persisted (>30k) outputs go to Claude
 #   Code's own file + preview (persisted pairs cost +24.7% with the model at 24k inline).
 PRESET_HARNESS: dict[str, dict] = {
-    "codex": {"lossy": False}, "dsh": {"lossy": False}, "opencode": {"lossy": False}, "pi": {"lossy": False},
+    "codex": {"lossy": False}, "cline": {"lossy": False}, "copilot": {"lossy": False}, "dsh": {"lossy": False}, "opencode": {"lossy": False}, "pi": {"lossy": False},
     "claude-code": {"keep": 0.6, "persisted": "skip"},
     "hermes": {"keep": 0.5},
 }

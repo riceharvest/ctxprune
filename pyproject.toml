@@ -1,6 +1,6 @@
 [project]
 name = "ctxprune"
-version = "0.4.1"
+version = "0.5.0"
 description = "Shrink what your LLM reads: lossless tool-output compression for coding agents (Claude Code, Hermes, Pi, OpenCode, dsh, Codex) and token pruning for prompts and RAG (LangChain, LlamaIndex)"
 readme = "README.md"
 # 0BSD from 0.3.0 (0.2.1 was Apache-2.0). The optional model weights are not part of the package; see THIRD_PARTY_NOTICES
@@ -83,6 +83,7 @@ packages = ["src/ctxprune"]
 "scripts/render_store.py" = "ctxprune/_rt/render_store.py"
 "scripts/hook_budget.py" = "ctxprune/_rt/hook_budget.py"
 "scripts/ctx_audit.py" = "ctxprune/_rt/ctx_audit.py"
+"scripts/digest.py" = "ctxprune/_rt/digest.py"
 "scripts/integrations/hermes/ctxprune/__init__.py" = "ctxprune/_rt/integrations/hermes/ctxprune/__init__.py"
 "scripts/integrations/hermes/ctxprune/plugin.yaml" = "ctxprune/_rt/integrations/hermes/ctxprune/plugin.yaml"
 "scripts/integrations/pi/ctxprune.ts" = "ctxprune/_rt/integrations/pi/ctxprune.ts"
@@ -120,6 +121,7 @@ include = [
     "scripts/render_store.py",
     "scripts/hook_budget.py",
     "scripts/ctx_audit.py",
+    "scripts/digest.py",
     "scripts/integrations/hermes/ctxprune/__init__.py",
     "scripts/integrations/hermes/ctxprune/plugin.yaml",
     "scripts/integrations/pi/ctxprune.ts",

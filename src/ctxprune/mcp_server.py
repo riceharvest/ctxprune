@@ -70,7 +70,39 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
+    {
+        "name": "read_skeleton",
+        "title": "Read source signatures and exact line ranges",
+        "description": ("Read a source file as an outline of imports, classes, functions and type declarations with "
+                        "exact 1-based source line ranges. Opt-in navigation aid; use read_compact for non-code."),
+        "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "required": ["path"]},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "read_symbols",
+        "title": "Read query-ranked source symbols",
+        "description": ("Find symbols relevant to a query using lexical BM25 ranking and return the top matching "
+                        "definitions verbatim with exact line ranges. Read-only; results are source code."),
+        "inputSchema": {"type": "object", "properties": {
+            "path": {"type": "string"}, "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5}},
+            "required": ["path", "query"]},
+        "name": "search_saved",
+        "title": "Search a saved output",
+        "description": "Search a saved or spilled text output by its file path handle and return matching snippets.",
+        "inputSchema": {"type": "object", "properties": {
+            "handle": {"type": "string", "description": "Path to the saved output (the handle shown by the spill)."},
+            "query": {"type": "string"},
+            "context_lines": {"type": "integer", "minimum": 0, "maximum": 20, "default": 3}},
+            "required": ["handle", "query"]},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
+    },
 ]
+
+
+# 0.5 tools: listed only with CTXPRUNE_MCP_EXTRA_TOOLS=1 so the 0.4.0 tools/list stays byte-identical.
+_OPT_IN_TOOLS = ("read_skeleton", "read_symbols", "search_saved")
 
 
 def _read(args: dict) -> str:
@@ -110,9 +142,22 @@ def _pruned(text: str, keep: float, protect: bool | str, query: str | None = Non
 
 def call_tool(name: str, args: dict) -> dict:
     try:
+        if name == "search_saved":
+            from .search_saved import search_saved
+            hits = search_saved(str(args.get("handle", "")), str(args.get("query", "")),
+                                int(args.get("context_lines", 3)))
+            return {"content": [{"type": "text", "text": json.dumps(hits, ensure_ascii=True)}], "isError": False}
         text = _read(args)
         if name == "read_compact":
             out, note = _compact(text)
+        elif name in ("read_skeleton", "read_symbols"):
+            from . import code_reader
+            path = os.path.expanduser(str(args.get("path", "")))
+            if name == "read_skeleton":
+                out = code_reader.read_skeleton(path, text)
+            else:
+                out = code_reader.read_symbols(path, text, str(args.get("query", "")), int(args.get("limit", 5)))
+            note = f"[ctxprune: source outline; {len(text.splitlines())} source lines]"
         elif name == "read_pruned":
             keep = float(args.get("keep", 0.5))
             if not 0 < keep <= 1:
@@ -147,7 +192,7 @@ def handle(msg: dict) -> dict | None:
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": TOOLS if os.environ.get("CTXPRUNE_MCP_EXTRA_TOOLS") == "1" else [t for t in TOOLS if t["name"] not in _OPT_IN_TOOLS]}
     elif method == "tools/call":
         p = msg.get("params") or {}
         result = call_tool(str(p.get("name")), p.get("arguments") or {})
@@ -156,7 +201,30 @@ def handle(msg: dict) -> dict | None:
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+USAGE = """usage: ctxprune mcp [-h]
+
+Run ctxprune as a local stdio MCP server (JSON-RPC 2.0, one message per line on stdin/stdout).
+For clients without tool-output hooks (Claude Desktop, Cursor, Cline, ...). No network calls.
+
+tools:
+  read_compact  lossless `safe` pipeline: shortens a big log/JSON/report, nothing is dropped
+  read_pruned   opt-in lossy token pruning with the v0.4 model (downloads it once on first use)
+
+register it in an MCP client (e.g. claude_desktop_config.json):
+  { "mcpServers": { "ctxprune": { "command": "uvx", "args": ["ctxprune", "mcp"] } } }
+or: claude mcp add ctxprune -- uvx ctxprune mcp
+"""
+
+
 def main(argv: list | None = None) -> int:
+    argv = list(argv or [])
+    if any(a in ("-h", "--help") for a in argv):
+        sys.stdout.write(USAGE)
+        return 0
+    if argv:
+        sys.stderr.write(f"ctxprune mcp: error: unrecognized arguments: {' '.join(argv)}\n"
+                         "try 'ctxprune mcp --help'\n")
+        return 2
     out = sys.stdout
     for line in sys.stdin:
         line = line.strip()

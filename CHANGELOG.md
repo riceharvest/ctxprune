@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.5.0 (2026-11-21)
+
+0.5 adds opt-in integrations and tools. **The default output is the same as 0.4.1**: the lossless `safe` stack, the
+0.2 / 0.3 API and the default `ctxprune mcp` tool list are byte-identical to 0.4.1 on the tested inputs (below). Nothing
+in 0.5 is on by default except the version string. No 0.5 item has a held-out benchmark; the two numbers that have an
+independent review are given with their scope, and every other 0.5 item is labelled "unmeasured".
+
+### Checked on the release tree (frozen commit 1fcedcc, release gates run)
+
+These are tests, not benchmarks: no dev-set or held-out split applies.
+- Full test suite: `759 passed, 3 skipped, 46 subtests passed` (141.85 s). Hook / plugin / MCP / proxy smoke scripts
+  (7 files): `219 passed, 46 subtests passed`. `ctxprune mcp --help` exits 0.
+- Lossless parity against 0.4.1 on 78 input files (repo fixtures, docs, sources) x 3 commands x paths / rows /
+  `CTXPRUNE_PATHS` variants = 4,212 calls: same digest (`60e015d8aec913b3`) on both trees, per-call diff empty. `ctxprune mcp`
+  `tools/list` is the same two tools (`read_compact`, `read_pruned`) in both. This shows no change *on those inputs*, not
+  for all inputs. The gate log and the parity script live in the lab tree and are not shipped in the wheel.
+- API / CLI compatibility against a pristine 0.3.2 install (release probes):
+  `probe_api` 17 keys byte-identical, only `version` differs; the CLI probe passes once its one script artifact
+  (it imports `ctxprune.hook`, which 0.3.2 does not have) is replaced by a 0.3.2 -> 0.5.0 install check.
+
+### New, all opt-in
+
+- **`ctxprune mcp-wrap -- <server cmd>`**: a stdio MCP proxy that applies the lossless rules to `tools/call` text
+  results. Author offline replay (no independent review, no live-client run): 8.4% fewer o200k tokens, 0 parse breaks.
+- **`ctxprune mcp-gateway`**: `list_tools` / `describe_tool` / `call_tool` meta-tools in front of a server. Static
+  schema text is 92.5% smaller **in characters of JSON, not tokens**; discovery takes 1-2 scripted turns. No live client
+  and no completion rate were measured (author screen, unreviewed). `docs/lab/L4.3-result.md`.
+- **`ctxprune.wrap_openai` / `wrap_anthropic` / `LiteLLMCallback`**: SDK wrappers that pin each tool output's bytes per
+  call id. Tested against an httpx mock transport only; first render of a new 7 KB JSON costs 7-25 ms (author screen).
+- **MCP extra tools** (listed only with `CTXPRUNE_MCP_EXTRA_TOOLS=1`, so the default tool list does not change):
+  `search_saved` (SQLite FTS5 over saved outputs; `ctxprune search`) with its ingest latency gate unproven, and
+  `read_skeleton` / `read_symbols` (the 85.19% figure is a whitespace-word proxy on 9 Python files, not tokens, no reader eval).
+- **`ctxprune notebook`**: renders `.ipynb` as percent-format text. Author screen: 96.66% pooled on 12 output-heavy
+  notebooks, no reader evaluation.
+- **`--redact-secrets`**: reversible secret redaction. Author screen on synthetic data: 100% recall on 2,000 synthetic
+  secrets, 0 false positives in 40,000 clean strings. Not wired into the recovery spill.
+- **`ctxprune audit --otel` / `--share`**: fleet OTel mode and a numbers-only share blob. The subscriber-TTL advice is
+  labelled unverified and the OTel field names were never tested on a real export.
+- **Agent presets**: Cline `afterTool` plugin, Copilot CLI `postToolUse` hook, async `execFile` in the Pi / OpenCode /
+  dsh plugins, a `digest` preset (9 of 11 encoders fire 0 times on the real traces tried). None run live against
+  Codex, Copilot or Cline.
+- **Lossless rules, off by default**: `CTXPRUNE_JSONDEFS=1` (repeated JSON objects -> `@N@` + legend; author fixtures
+  46.3% vs 7.7% o200k on 4 Notion fixtures, no reader eval) and `CTXPRUNE_PATHS_WIN=1` (Windows `\` path lists with spaces;
+  author fixtures 0% -> 51.7%). Both are off in 0.5.0 so the default output stays the 0.4.1 one.
+- **Entity refs across calls (T1.10b)**: opt-in rule with a **reader-loss warning, no preset**. Validation split of
+  MCPMark sessions (not held-out; github n=23 sessions, notion n=28): with the hosted default (jsonrows on) it saves
+  notion 4.81% [3.42, 6.36] and github 10.28% [3.94, 18.31] (github median 0%) more o200k tokens, round trip 0 failures.
+  A local 1.5B reader answering questions about replaced objects lost 24.3 points [-30.8, -17.9] (n=243 questions, 34
+  sessions). So "no measured reader loss" is **not** claimed. independent review: WEAKER.
+
+### Negative results, not shipped as a hook rule
+
+- **Log template miner (L3.2)**: too slow for the hook path, about 73-85 ms per 5k lines against a 15 ms gate (30 real
+  and synthetic logs, CPU, independent review: PASS). Code stays opt-in and lossy; no savings claim.
+- Not shipped or not built: diagnostic delta (verified negative, independent review: FAIL), a11y delta (killed at 10.8%
+  against a 20% gate), rich-text and native TypeScript core screens.
+- Claims table with the review verdict behind each item: `docs/lab/v0.5-release-claims.md`.
+
+### Carried from 0.4, so nobody reads 0.5 as a compression upgrade
+
+0.5 does not change the token-pruning engine. The held-out result from 0.4.0 still applies and is still **level with**
+LLMLingua-2-large, not better (+2.36 [-0.70, +5.51], 270 held-out LongBench items, below). The 0.4 dev-set losses stand:
+`triviaqa` 83.8 vs 90.4, `lcc` 8.7 vs 14.6 (n=16 paired) and `passage_retrieval_en` (a lexical shortcut) against
+LLMLingua-2-large; see [docs/BENCHMARKS.md §9](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#9-longbench-rematch-against-llmlingua-2).
+No rented compute (CloudRift) was used for 0.5; the last rental in the ledger is from 2026-10-21 (0.2 / 0.3 work).
+
 ## 0.4.1 (2026-11-19)
 
 One-line agent install. No change to compression, the 0.2 / 0.3 API or the lossless output.
@@ -77,7 +143,7 @@ unchanged in its output (two safety fixes below). The 0.2 / 0.3 API returns the 
 ### Compatibility
 
 - **The 0.2 / 0.3 API returns the same bytes as 0.3.2.** `prune(text, keep[, protect])`,
-  `Compressor().compress(text, rate=..., force_protected=bool, keep_structure=..., unit="chars"|"tokens"|callable,
+  `Compressor.compress(text, rate=..., force_protected=bool, keep_structure=..., unit="chars"|"tokens"|callable,
   threshold=..., measure=...)`, `ctxprune FILE --keep [--protect]`, `ctxprune serve` `POST /compress` without the new
   fields, and `CtxpruneDocumentCompressor` / `CtxpruneNodePostprocessor` with their defaults run the frozen 0.3.2 path
   (`ctxprune/_v032.py`). Checked against a pristine 0.3.2 install with the release probes (`probe_api.py`,
@@ -109,7 +175,7 @@ unchanged in its output (two safety fixes below). The 0.2 / 0.3 API returns the 
 
 ## 0.3.2 (2026-11-18)
 
-- **`ctxprune mcp`**: a stdio MCP server for clients without tool-output hooks (Claude Desktop, Cursor, Cline, ...).
+- **`ctxprune mcp`**: a stdio MCP server for clients without tool-output hooks (Claude Desktop, Cursor, Cline,...).
   `read_compact` reads a file through the lossless `safe` pipeline; `read_pruned` token-prunes it with the 0.2 model,
   identifiers kept by default. Stdlib JSON-RPC, no MCP SDK. Listed as `io.github.riceharvest/ctxprune` in the MCP
   Registry (`server.json`).

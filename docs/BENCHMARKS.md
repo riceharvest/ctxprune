@@ -7,7 +7,7 @@ file the number is in.
 agent-session runs in §6, and the competitor replay in §8) ran on rented RTX 5090s from
 [CloudRift](https://www.cloudrift.ai), provided through their AI Builder Grant; §5 is computed from those probe
 answers. §1–3 and §7 ran locally, and the Claude Opus probes ran through Claude. §9 and §10 (0.4) ran
-locally too: the reader on a local Intel Arc B70, the compressors on CPU and a local RTX 3060, with no rented compute.
+locally too: the reader on a local Intel Arc B70, the compressors on CPU and a local RTX 3060, with no rented compute. §11 (0.5) used no rented compute; the CloudRift ledger has no rental after 2026-10-21.
 
 **Runtime.** Unless noted, numbers are for the ctxprune runtime at research-repo `main` **12c7b79** (2026-10-18).
 This packaging branch is rebased onto that commit, and its wheel vendors `scripts/` unchanged. The re-runs used a
@@ -521,12 +521,12 @@ Paired differences (2,000 bootstrap resamples within task, 95% CIs):
 | comparison | macro, 9 tasks | macro, 8 tasks | reading |
 |---|---|---|---|
 | v04 query − LLMLingua-2-large | **+2.36 [−0.70, +5.51]** | +0.15 [−2.76, +3.42] | level with |
-| ... without the 21 dev-shared-document items (n=249) | +1.93 [−1.14, +5.27] | −0.32 [−3.42, +2.72] | level with |
+|... without the 21 dev-shared-document items (n=249) | +1.93 [−1.14, +5.27] | −0.32 [−3.42, +2.72] | level with |
 | v04 query-blind − LLMLingua-2-large | −1.28 [−4.12, +1.55] | **−3.73 [−6.52, −1.14]** | level on 9 tasks, worse on 8 |
 | v04 query − BM25 only | +0.71 [−1.77, +3.40] | +0.38 [−2.34, +3.33] | level with |
-| ... n=249 | +0.30 [−2.14, +2.93] | | level with |
+|... n=249 | +0.30 [−2.14, +2.93] | | level with |
 | v04 query − v04 query-blind | **+3.64 [+1.06, +6.31]** | +3.88 [+0.99, +6.84] | seeing the question helps |
-| ... n=249 | +3.40 [+0.82, +6.04] | | |
+|... n=249 | +3.40 [+0.82, +6.04] | | |
 
 What it says:
 
@@ -569,7 +569,7 @@ error answers were removed from the cache and the arm was re-run); the reader ra
 counted with o200k, not in Gemma tokens (the reviewer audited the reader's own token counts: 0.9817x for the 0.4
 arms against LLMLingua-2-large, no truncation). Review: **WEAKER** (numbers and freeze order reproduce; the wording above is
 what the reviewer allowed). Raw answers, scripts and the review are in the research repo (commit `493f658`,
-`research/v04_code/lab/heldout/gate/`).
+`internal lab notes`).
 
 ### 9.2 Dev-set (the 0.4 code was tuned on these items)
 
@@ -611,7 +611,7 @@ and `Compressor(rep_decay="prose"|...)`. On the dev set only, with `fewshot="pin
 (was 83.78; two items, CI [0.0, +20.0]), `lcc` 14.69 (was 8.69; one item; on the 30-item dev extension 11.17 vs 6.97,
 CI includes 0, and 0.3.2 scores 18.00), 9-task macro 54.27 (was 52.69; +1.58 [+0.09, +3.56]). Because the lcc effect is not
 robust and the registered gate as a whole was not met, they stay opt-in. The review of this experiment: **WEAKER** (numbers reproduce;
-"recovers / level with", not "fixed"). Evidence: research repo `research/v04_code/lab/dev_fix/`.
+"recovers / level with", not "fixed"). Evidence: research repo `internal lab notes`.
 
 ## 10. Other 0.4 measurements (dev-set or offline proxy, not held-out, not independently reviewed)
 
@@ -633,6 +633,34 @@ How to read it:
 - On the negation probe 0.4 matches the 0.3.2 polarity-safe rate (80.0%) and does not improve it; both are far above
   LLMLingua-2-large (47.5%). n=40 is too few to see a small difference.
 - The RAG result is n=30 on the dev set (+2.8 F1); an offline answer-hit proxy on the same 30 items gave 80.0% vs 73.3%.
+
+## 11. 0.5 items (opt-in, mostly unmeasured)
+
+Nothing here is held-out. Each row says what the number is, its n, and where it comes from. Rule for 0.5: a number is
+quoted only if an independent review exists; otherwise it is labelled an author screen. The table of items and their
+review cards is `docs/lab/v0.5-release-claims.md`; repo result files are under `docs/lab/` and `docs/ideas/results/`.
+
+| item | number | scope | source |
+|---|---|---|---|
+| entity refs across calls (T1.10b) | notion 4.81% [3.42, 6.36], github 10.28% [3.94, 18.31] (median 0%) more o200k tokens, hosted default (jsonrows on) | validation split of MCPMark sessions, not held-out; notion n=28, github n=23 sessions | independent review (WEAKER), `docs/ideas/results/145/t110b_result.md` |
+| entity refs, reader probe | **-24.3 points** [-30.8, -17.9] on questions about replaced objects (raw 61.7% -> 37.4%) | validation sessions, n=243 questions / 34 sessions, local Qwen2.5-1.5B reader only | same files; the reason there is no preset |
+| log template miner (L3.2) | 73-85 ms per 5k lines vs a 15 ms gate: **not shipped as a hook rule** | CPU, 30 real + 30 synthetic logs, byte-identical output, 0 alarm lines lost | independent review (PASS) |
+| `mcp-wrap` | 8.4% o200k tokens saved, 0 parse breaks | author offline replay, no live client, no review | `docs/lab/v0.5-release-claims.md` row 4 |
+| `mcp-gateway` | static schema 92.5% smaller in **characters of JSON** (not tokens); 1-2 scripted discovery turns | author screen, no live client, no completion rate | `docs/lab/L4.3-result.md` |
+| SDK wrappers | first render of a new 7 KB JSON costs 7-25 ms | author timing, httpx mock transport | `docs/lab/v0.5-integration-result.md` |
+| `read_skeleton` / `read_symbols` | 85.19% fewer whitespace-separated words | proxy, 9 Python files, no reader eval | `docs/lab/v0.5-integration-result.md` |
+| `ctxprune notebook` | 96.66% pooled | author screen, 12 output-heavy notebooks, no reader eval | `docs/lab/v0.5-release-claims.md` row 9 |
+| `--redact-secrets` | 100% recall, 0 / 40,000 false positives | synthetic secrets (2,000), author screen | `docs/lab/v0.5-release-claims.md` row 10 |
+| `jsondefs` (`CTXPRUNE_JSONDEFS=1`) | 46.3% vs 7.7% o200k | 4 Notion fixtures, author, no reader eval | `docs/lab/v0.5-release-claims.md` row 15 |
+| `paths_win` (`CTXPRUNE_PATHS_WIN=1`) | 0% -> 51.7% | author fixtures, no reader eval | `docs/lab/v0.5-release-claims.md` row 16 |
+
+Release checks (tests, not benchmarks; frozen commit 1fcedcc, release gates run): full suite 759 passed / 3 skipped;
+smoke scripts 219 passed; default lossless output identical to 0.4.1 on 78 input files x 4,212 calls (digest
+`60e015d8aec913b3` both trees); default `ctxprune mcp` tool list identical. This says nothing about inputs outside
+those files.
+
+Compression quality did not change in 0.5. The held-out LongBench result (§9.1) is still *level with* LLMLingua-2-large,
+and the dev-set losses in §9.2 (`triviaqa`, `lcc`, `passage_retrieval_en`) still apply.
 
 ## Not quoted, and why
 

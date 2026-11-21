@@ -23,10 +23,13 @@ import lossless_hook  # noqa: E402
 
 
 def _reset_breaker():   # the model circuit breaker persists in the state dir; tests must not leak it
+    d = os.environ.get("CTXPRUNE_STATE")
+    if not d:   # another test module (test_plugin_history) clears it
+        return
     try:
-        for f in os.listdir(os.environ["CTXPRUNE_STATE"]):
+        for f in os.listdir(d):
             if f.startswith("breaker"):
-                os.remove(os.path.join(os.environ["CTXPRUNE_STATE"], f))
+                os.remove(os.path.join(d, f))
     except OSError:
         pass
 
@@ -798,7 +801,11 @@ class McpAndKillSwitch(unittest.TestCase):
             cur = j["hookSpecificOutput"]["updatedMCPToolOutput"]
             for k in path:
                 cur = cur[k]
-            self.assertIn("[cp:rows #1]", cur.split("\n")[0])
+            if cur.startswith("[cp:defs"):                              # jsondefs wraps the rows encoding
+                cur_rows = cur.split("\n[/cp]\n", 1)[1]
+            else:
+                cur_rows = cur
+            self.assertIn("[cp:rows #1]", cur_rows.split("\n")[0])
             self.assertIn(", parent(json), ", cur)                       # key.sub columns: CTXPRUNE_JSONROWS_EXT=1
             self.assertNotIn("parent.type", cur)
             self.assertEqual(decode(cur), text)
@@ -1196,8 +1203,9 @@ class PathsWinBySessionModel(unittest.TestCase):
 
     def test_listed_model_hosted_only(self):
         import lossless
+        # (paths_win follows `paths`: the allow-list for sonnet is `paths`' own list)
         with mock.patch.object(lossless, "PATHS_WIN_MODELS", ("claude-opus-",)), \
-                mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "", "CTXPRUNE_PATHS_MODELS": "claude-"}):
+                mock.patch.dict(os.environ, {"CTXPRUNE_PATHS_WIN": "", "CTXPRUNE_PATHS": "", "CTXPRUNE_PATHS_MODELS": "claude-opus-"}):
             for target, llm, enc in (("", "claude-opus-5-5", True), ("https://api.anthropic.com", "claude-opus-5-5", True),
                                      ("http://127.0.0.1:8000", "claude-opus-5-5", False), ("", "claude-sonnet-5", False),
                                      ("", "", False)):

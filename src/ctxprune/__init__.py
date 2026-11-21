@@ -11,7 +11,7 @@ model code only on first use:
 
 from __future__ import annotations
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 __all__ = [
     "Compressor",
     "ScoredText",
@@ -21,6 +21,9 @@ __all__ = [
     "prune_scored",
     "compress_many",
     "DEFAULT_MODEL",
+    "wrap_openai",
+    "wrap_anthropic",
+    "LiteLLMCallback",
 ]
 
 _default = None
@@ -109,6 +112,10 @@ def compress_many(
 
 
 def __getattr__(name: str):  # PEP 562: keep `import ctxprune` import-free for the hook
+    if name in ("wrap_openai", "wrap_anthropic", "LiteLLMCallback"):
+        from . import sdk
+
+        return getattr(sdk, name)
     if name in ("Compressor", "DEFAULT_MODEL", "ScoredText"):
         from . import compress
 
@@ -117,4 +124,8 @@ def __getattr__(name: str):  # PEP 562: keep `import ctxprune` import-free for t
         from .compat import PromptCompressor
 
         return PromptCompressor
+    if name in ("render_notebook", "unescape_notebook_diff", "extract_code_cells"):
+        from . import notebook
+
+        return getattr(notebook, name)
     raise AttributeError(f"module 'ctxprune' has no attribute {name!r}")

@@ -218,6 +218,8 @@ def main(argv: list) -> int:
     ap.add_argument("--price", type=float, default=float(os.environ.get("CTXPRUNE_PRICE_PER_MTOK") or DEFAULT_PRICE),
                     help=f"USD per million input tokens for the estimate (default {DEFAULT_PRICE}, a placeholder)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--share", nargs="?", const="-", help="write a numbers-only JSON (no names, paths or text) to FILE "
+                    "(default stdout) to contribute to real multi-user baselines; nothing is sent anywhere")
     ap.add_argument("--no-transcripts", action="store_true",
                     help="don't read the agents' own local usage records (skips the share-of-input estimate)")
     a = ap.parse_args(argv)
@@ -233,6 +235,19 @@ def main(argv: list) -> int:
     proxy = _proxy_stats(glue.settings()["proxy_port"])
     if proxy is not None:
         tot["proxy"] = proxy
+    if a.share:
+        blob = {"schema": "ctxprune-stats-share/1", "days": a.days, "calls": tot["calls"], "changed": tot["changed"],
+                "chars_before": tot["before"], "chars_after": tot["after"], "dedup_chars": tot["dedup"],
+                "tokens_saved_est": tot["tokens_saved_est"],
+                "harnesses": {h: {k: v[k] for k in ("calls", "tokens_saved", "share_pct") if k in v}
+                              for h, v in per.items()}}
+        out = json.dumps(blob, indent=1, sort_keys=True)
+        if a.share == "-":
+            print(out)
+        else:
+            with open(a.share, "w", encoding="utf-8") as f:
+                f.write(out + "\n")
+        return 0
     if a.json:
         print(json.dumps(tot, indent=2, sort_keys=True))
         return 0

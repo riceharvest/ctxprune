@@ -14,7 +14,9 @@
     ctxprune serve --model-dir DIR                    line-model server for lossy presets (ctxprune[model])
     ctxprune bundle hermes|claude-code DEST           self-contained plugin dirs (catalog / marketplace builds)
     ctxprune hook claude-code                         (called by Claude Code: hook JSON on stdin)
+    ctxprune mcp-wrap -- <server cmd...>              wrap any stdio MCP server: lossless rewrite of its tool results
     ctxprune mcp                                      stdio MCP server: read_compact (lossless), read_pruned (lossy)
+    ctxprune mcp-gateway --config FILE                stdio meta-tool gateway for configured MCP servers
   0.2 token pruning (lossy, still supported; model darioooooo0o/ctxprune-small):
     ctxprune FILE [--keep 0.5] [--protect] [--stats]  token-prune a file (or stdin) and print it
     ctxprune serve [--port 8719]                      0.2 HTTP API: POST /compress {"text": ..., "rate": 0.5}
@@ -103,13 +105,17 @@ def _audit(argv: list) -> int:
     a, rest = ap.parse_known_args(argv)
     if a.help:
         print("ctxprune audit [--harness NAME ...] [--days 30] [--json OUT] [Claude Code options: --root DIR "
-              "--exclude GLOB ... --records OUT.jsonl --self-test]\nLocal and advice-only: numbers and names, never "
+              "--exclude GLOB ... --records OUT.jsonl --share [FILE] --otel LOGFILE --self-test]\nLocal and advice-only: numbers and names, never "
               "content; nothing is changed.")
         return 0
     glue.boot()
     import ctx_audit
     if "--self-test" in rest:
         sys.argv = ["ctxprune audit", "--self-test"]
+        ctx_audit.main()
+        return 0
+    if any(x == "--otel" or x.startswith("--otel=") for x in rest):   # fleet mode: a log file, no transcripts, no harness scan
+        sys.argv = ["ctxprune audit"] + rest
         ctx_audit.main()
         return 0
     want = a.harness or ["claude-code"] + list(ha.HARNESSES)
@@ -398,6 +404,7 @@ def _compress(argv: list) -> int:
     ap = argparse.ArgumentParser(prog="ctxprune compress")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--command", default="", help="the command that produced the text (enables grep grouping etc.)")
+    ap.add_argument("--redact-secrets", action="store_true", help="mask recognized credentials before compression (reversible only in this process)")
     ap.add_argument("--stats", action="store_true", help="chars before/after on stderr")
     a = ap.parse_args(argv)
     if a.file and a.file != "-":
@@ -406,6 +413,9 @@ def _compress(argv: list) -> int:
     else:
         raw = sys.stdin.buffer.read()
     text = raw.decode("utf-8", "surrogateescape")
+    if a.redact_secrets:
+        from .redact import Redactor
+        text = Redactor().redact(text)
     glue.boot()
     import ctxprune_compress
     out, rec = ctxprune_compress.run(text, command=a.command, harness="cli")
@@ -466,11 +476,35 @@ def main(argv: list | None = None) -> int:
         return _audit(rest)
     if cmd == "compress":
         return _compress(rest)
+    if cmd == "notebook":
+        from .notebook import main as notebook_main
+        return notebook_main(rest)
     if cmd == "proxy":
         return _proxy(rest)
     if cmd == "mcp":
         from .mcp_server import main as mcp_main
         return mcp_main(rest)
+    if cmd == "mcp-gateway":
+        from .mcp_gateway import main as gateway_main
+        return gateway_main(rest)
+    if cmd == "search":
+        import argparse
+        from .search_saved import search_saved
+        ap = argparse.ArgumentParser(prog="ctxprune search")
+        ap.add_argument("handle", help="path of a saved/spilled output")
+        ap.add_argument("query", help="FTS5 search expression")
+        ap.add_argument("--context-lines", type=int, default=3)
+        a = ap.parse_args(rest)
+        try:
+            blocks = search_saved(a.handle, a.query, a.context_lines)
+            print("\n--\n".join(b["snippet"] for b in blocks) if blocks else "no matches")
+        except (OSError, ValueError) as e:
+            print(f"ctxprune search: {e}", file=sys.stderr)
+            return 2
+        return 0
+    if cmd == "mcp-wrap":
+        from .mcp_wrap import main as wrap_main
+        return wrap_main(rest)
     if cmd == "bundle":
         from .bundle import main as bundle_main
         return bundle_main(rest)

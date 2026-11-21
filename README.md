@@ -122,6 +122,33 @@ use), and needs no MCP SDK.
 
 <!-- mcp-name: io.github.riceharvest/ctxprune -->
 
+## Wrap any MCP server: `ctxprune mcp-wrap`
+
+For clients without hooks (Cursor, Claude Desktop, Cline, Windsurf, Codex), put `ctxprune mcp-wrap --` in front of the
+server command. Its tool results are rewritten with the lossless `safe` rules; everything else passes through
+byte for byte.
+
+```json
+{"mcpServers": {"playwright": {"command": "ctxprune", "args": ["mcp-wrap", "--", "npx", "@playwright/mcp@latest"]}}}
+```
+
+Only `result.content[].text` of `tools/call` is touched. Results with `structuredContent` or `isError` are left alone
+(`--structured` rewrites the text and keeps `structuredContent` as is), file read/write/edit tools are skipped, a
+rewrite is kept only if it decodes back (JSON: to the same pairs, in order), and any error forwards the original
+line. It is stateless (no cross-call dedup). `CTXPRUNE_OFF=1` turns it off.
+
+Scope of the numbers: an offline replay by the author saved 8.4% of o200k tokens with 0 parse breaks. It has had no
+independent review and no run against a live client ([BENCHMARKS §11](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#11-05-items-opt-in-mostly-unmeasured)).
+
+### New in 0.5 (all opt-in, nothing changes unless you turn it on)
+
+`mcp-gateway`, the `wrap_openai` / `wrap_anthropic` / `LiteLLMCallback` SDK wrappers, `search_saved`, `read_skeleton` /
+`read_symbols` (MCP extra tools, `CTXPRUNE_MCP_EXTRA_TOOLS=1`), `ctxprune notebook`, `--redact-secrets`,
+`audit --otel`, and Cline / Copilot CLI hooks. The default output, the 0.2 / 0.3 API and the default MCP tool list are
+the same as 0.4.1 on the tested inputs. None of these has a held-out benchmark; their numbers are author screens or
+validation-split numbers and are listed with their scope in [BENCHMARKS §11](https://github.com/riceharvest/ctxprune/blob/main/docs/BENCHMARKS.md#11-05-items-opt-in-mostly-unmeasured)
+and the [CHANGELOG](https://github.com/riceharvest/ctxprune/blob/main/CHANGELOG.md).
+
 ## Token pruning: the 0.2 API (Python, LangChain, LlamaIndex)
 
 This is lossy compression for prompts, retrieved documents and logs: a 140M-parameter token classifier
@@ -539,4 +566,4 @@ The GPU work behind the agent-hook benchmarks (BENCHMARKS §4–§8, first publi
 AI Builder Grant: the comprehension and long-context probes on open models, the next-action replay against other
 compactors, and the agent-session runs behind the presets. Thanks to CloudRift for the compute. The savings numbers
 and the latency were measured locally on CPU, the 0.2 token-pruning model was trained on a local GPU, and the 0.4 LongBench
-and RAG measurements ran locally (no rented compute).
+and RAG measurements ran locally (no rented compute). The 0.5 work used no rented compute either.
