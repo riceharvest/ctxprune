@@ -26,4 +26,7 @@ jobs:
           command -v mcp-publisher >/dev/null || { echo "mcp-publisher missing on runner"; exit 1; }
           mcp-publisher validate
           mcp-publisher login github-oidc
-          mcp-publisher publish
+          out=$(mcp-publisher publish 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          # re-running for a version that is already listed is success
+          [ "$rc" = 0 ] || echo "$out" | grep -q "cannot publish duplicate version" || exit "$rc"
