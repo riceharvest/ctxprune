@@ -1,0 +1,29 @@
+# Publishes server.json to the MCP Registry with GitHub OIDC (no human login, no stored token).
+# The namespace io.github.riceharvest/* is proven by the repo owner identity in the OIDC token.
+# Runs after publish.yml succeeds (PyPI must already hold the version), or by hand: gh workflow run registry.yml
+name: registry
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  registry:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, Linux, X64, ctxprune-release]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Publish server.json
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v mcp-publisher >/dev/null || { echo "mcp-publisher missing on runner"; exit 1; }
+          mcp-publisher validate
+          mcp-publisher login github-oidc
+          mcp-publisher publish
