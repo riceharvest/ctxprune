@@ -1,6 +1,12 @@
 # ctxprune
 
-Shrink what your LLM reads, locally. ctxprune has two parts:
+Shrink what your LLM reads, locally.
+
+![real run: one MCP server's 14 tools and 13,123 characters of schema become 3 tools and 569 characters behind ctxprune mcp-gateway](https://raw.githubusercontent.com/riceharvest/ctxprune/main/assets/demo-mcp-gateway.gif)
+
+*`ctxprune mcp-gateway` (new in 0.5, opt-in), real run on the official filesystem MCP server: 14 tools / 13,123 characters of schema become 3 tools / 569 characters, and a call through it returns the directory listing. Characters of JSON, one server, not tokens and not a benchmark. The cost: the agent looks a tool up first, one or two extra steps ([L4.3](docs/lab/L4.3-result.md)).*
+
+ctxprune has two parts:
 
 | you want to... | use | drops content? | what you get |
 |---|---|---|---|
