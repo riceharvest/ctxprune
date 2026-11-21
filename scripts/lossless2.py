@@ -116,7 +116,7 @@ _S = rf"(?:[{_A}.@+-]|{_U})+(?: (?:[{_A}.@+-]|{_U})+)*"   # a name segment: sing
 PATHLINE_WIN = re.compile(rf"^(?!(?=[^\n]* )(?![^\n]*\\))(?:\./|~/|/|[A-Za-z]:\\|\\\\|\.\\)?(?:{_S}[/\\])+{_S}[/\\]?$")
 # ^ reference only (_pathlike is the matcher): a space inside a segment counts only on a line that has a `\`
 # ^ name chars as in _U (NFD combining marks, Indic vowel signs count). `\`-separated Windows lists (C:\, \\server\share,
-#   .\ roots) only with the rule `paths_win` (lossless.paths_win_on: hosted + probed model, or CTXPRUNE_PATHS_WIN=1):
+#   .\ roots) only with the rule `paths_win` (lossless.paths_win_on: hosted + allow-listed model (PATHS_WIN_MODELS, empty by default), or opt-in CTXPRUNE_PATHS_WIN=1):
 #   ship-bytes probe 2026-10-18, Qwen3.6 no-think -11 pt [-18, -6] on them (the reader joins `DIR\` + ` name` keeping
 #   the indent space, or drops a `.\` root); `/` lists: 0.0.
 # Markers (tokenizer study 2026-10-17 §4): one shared prefix `[cp` / `[/cp]`, so the H2 escaper and the note need one
@@ -1415,7 +1415,9 @@ VIEW_RULES = ("numbered",)                                   # file views: code 
 TEXT_RULES = ("a11y", "diffhdr", "hits", "paths", "paths_win", "numbered", "table", "prefix", "blockref")
 # paths_win: `paths` also takes `\`-separated lists (lossless.compress adds it only when paths_win_on())
 FLAG_RULES = {"blockref": "CTXPRUNE_BLOCKREF", "prefix": "CTXPRUNE_PREFIX", "jsonrows_ext": "CTXPRUNE_JSONROWS_EXT",
-              "jsonrows_flat": "CTXPRUNE_JSONROWS_FLAT", "numbered": "CTXPRUNE_NUMBERED", "hits": "CTXPRUNE_HITS"}
+              "jsonrows_flat": "CTXPRUNE_JSONROWS_FLAT", "numbered": "CTXPRUNE_NUMBERED", "hits": "CTXPRUNE_HITS",
+              "jsondefs": "CTXPRUNE_JSONDEFS"}
+# jsondefs (0.5): opt-in so the default lossless output stays byte-identical to 0.4.1 (decision t_ae33ce38, Option A)
 # hits (and lossless.grep_group, same flag): lprobe-long2 no-think, the line put under the wrong file header
 #   (raw right, encoded wrong 17 vs 10; right -3.7 [-9.7, +3.2], the rg --heading layout the same -3.7), against the
 #   pre-registered keep bar of >= -2 in both modes; it saves 0.04% of coding tokens.

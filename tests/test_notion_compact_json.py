@@ -1,6 +1,7 @@
 """Notion MCP compact JSON (own_research:notion-compact-json-zero): savings, exact round trip, no field lost.
 Run: python3 -m pytest tests/test_notion_compact_json.py   (fixtures: tests/gen_notion_fixtures.py)"""
 import glob, json, os, sys, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
@@ -24,7 +25,14 @@ def leaves(o, out):
     return out
 
 
+@mock.patch.dict(os.environ, {"CTXPRUNE_JSONDEFS": "1"})   # jsondefs is opt-in in 0.5 (decision t_ae33ce38, Option A)
 class Notion(unittest.TestCase):
+    def test_default_off(self):          # default output has no jsondefs rule: byte-identical to 0.4.1
+        with mock.patch.dict(os.environ, {"CTXPRUNE_JSONDEFS": ""}):
+            for p in FIX:
+                _, st = compress(open(p).read(), None)
+                self.assertNotIn("l2_jsondefs", st["rules"], p)
+
     def test_fixtures_present(self):
         self.assertEqual({os.path.basename(p) for p in FIX},
                          {"search.json", "page.json", "block_children.json", "database_query.json"})

@@ -1055,30 +1055,20 @@ def paths_on(target: str | None = None) -> bool:
     return bool(ms) and not local_target(target) and any(model_listed(t, ms) for t in (target or "").lower().split())
 
 
-# `\`-separated (Windows) path lists. They follow `paths` (same opt-in, same hosted/allow-list rules, so Windows
-# listings save in the same range as Linux ones, coverage-hole card t_edbc761c) EXCEPT for models probed to misread them
-# (ship-bytes probe 2026-10-18: Qwen3.6 no-think -11 pt: the reader joins `DIR\` + ` name` keeping the indent space, or
-# drops a `.\` root). PATHS_WIN_DENY: model-id prefixes/ids as in a target string, always off. PATHS_WIN_MODELS: extra
-# allow-list kept for compatibility (it wins over the deny list when a model is probed OK later).
+# `\`-separated (Windows) path lists: only for probed hosted models (ship-bytes probe 2026-10-18: Qwen3.6 no-think
+# -11 pt on them). Model ids as they appear in the target string (provider / base URL / model); empty = off everywhere.
 PATHS_WIN_MODELS: tuple[str, ...] = ()
-PATHS_WIN_DENY: tuple[str, ...] = ("qwen3.6",)
 
 
 def paths_win_on(target: str | None = None) -> bool:
-    """CTXPRUNE_PATHS_WIN=0|1 wins; else on when `paths` is on for this target and no token of `target` is a denied
-    (misreading) model, or when an allow-listed model (PATHS_WIN_MODELS) is in it."""
+    """CTXPRUNE_PATHS_WIN=0|1 wins; else only with `paths` on, a hosted target and an allow-listed model in it."""
     v = os.environ.get("CTXPRUNE_PATHS_WIN", "").strip().lower()
     if v in ("0", "false", "no", "off"):
         return False
     if v in ("1", "true", "yes", "on"):
         return True
-    toks = (target or "").lower().split()
-    if PATHS_WIN_MODELS and not local_target(target) and any(model_listed(t, PATHS_WIN_MODELS) for t in toks) \
-            and paths_on(target):
-        return True
-    if any(d in t for t in toks for d in PATHS_WIN_DENY):
-        return False
-    return paths_on(target)
+    return bool(PATHS_WIN_MODELS) and paths_on(target) and not local_target(target) and \
+        any(model_listed(t, PATHS_WIN_MODELS) for t in (target or "").lower().split())
 
 
 def model_listed(token: str, models) -> bool:
